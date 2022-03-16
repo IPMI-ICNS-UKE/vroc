@@ -34,16 +34,15 @@ def read_image(filepath: Path) -> sitk.Image:
     image = np.flip(image, axis=0)
 
     image = sitk.GetImageFromArray(image)
-    image.SetSpacing(meta["voxel_spacing"])
     image = sitk.DICOMOrient(image, 'LPI')
-    image.SetOrigin((0,0,0))
-
+    image.SetOrigin((0.0, 0.0, 0.0))
+    image.SetSpacing(meta["voxel_spacing"])
 
     return image
 
 
 if __name__ == "__main__":
-    DIRLAB_FOLDER = Path("/mnt/c/Users/Thilo/Documents/dirlab2022")
+    DIRLAB_FOLDER = Path("/home/tsentker/data/dirlab2022/")
 
     for image_filepath in sorted(DIRLAB_FOLDER.glob("**/*.img")):
 
@@ -53,3 +52,5 @@ if __name__ == "__main__":
         image = read_image(image_filepath)
         output_filepath = image_filepath.parent / f"phase_{phase}.mha"
         sitk.WriteImage(image, str(output_filepath))
+        break
+
