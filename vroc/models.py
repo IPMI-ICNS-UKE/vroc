@@ -125,19 +125,19 @@ class TrainableVarRegBlock(nn.Module):
             return True
         return False
 
-    def _perform_scaling(self, image, mask, conditional, scale_factor: float = 1.0):
+    def _perform_scaling(self, image, mask, moving, scale_factor: float = 1.0):
         image = F.interpolate(
             image, scale_factor=scale_factor, mode="trilinear", align_corners=False
         )
         mask = F.interpolate(mask, scale_factor=scale_factor, mode="nearest")
-        conditional = F.interpolate(
-            conditional,
+        moving = F.interpolate(
+            moving,
             scale_factor=scale_factor,
             mode="trilinear",
             align_corners=False,
         )
 
-        return image, mask, conditional
+        return image, mask, moving
 
     def _match_vector_field(self, vector_field, image):
         if vector_field.shape[2:] == image.shape[2:]:
@@ -156,9 +156,9 @@ class TrainableVarRegBlock(nn.Module):
 
         return vector_field * scale_factor
 
-    def warp_conditional(self, image, mask, conditional):
-        # register conditional image onto image
-        full_size_conditional = conditional
+    def warp_moving(self, image, mask, moving):
+        # register moving image onto fixed image
+        full_size_moving = moving
 
         vector_field = None
         with torch.no_grad():
@@ -168,14 +168,14 @@ class TrainableVarRegBlock(nn.Module):
             ):
                 metrics = []
 
-                (scaled_image, scaled_mask, scaled_conditional) = self._perform_scaling(
-                    image, mask, conditional, scale_factor=scale_factor
+                (scaled_image, scaled_mask, scaled_moving) = self._perform_scaling(
+                    image, mask, moving, scale_factor=scale_factor
                 )
 
                 if vector_field is None:
                     vector_field = torch.zeros(
                         scaled_image.shape[:1] + (3,) + scaled_image.shape[2:],
-                        device=conditional.device,
+                        device=moving.device,
                     )
                 elif vector_field.shape[2:] != scaled_image.shape[2:]:
                     vector_field = self._match_vector_field(vector_field, scaled_image)
@@ -186,17 +186,17 @@ class TrainableVarRegBlock(nn.Module):
                 for i in range(iterations):
                     # print(f'*** ITERATION {i + 1} ***')
 
-                    warped_conditional = spatial_transformer(
-                        scaled_conditional, vector_field
+                    warped_moving = spatial_transformer(
+                        scaled_moving, vector_field
                     )
 
-                    metrics.append(float(F.mse_loss(scaled_image, warped_conditional)))
+                    metrics.append(float(F.mse_loss(scaled_image, warped_moving)))
 
                     if self._check_early_stopping_average_improvement(metrics):
                         # print(f'Early stopping at iter {i}')
                         break
 
-                    forces = self._demon_forces_layer(warped_conditional, scaled_image)
+                    forces = self._demon_forces_layer(warped_moving, scaled_image)
                     # mask forces with artifact mask (artifact = 0, valid = 1)
 
                     vector_field -= self.tau * (forces * scaled_mask)
@@ -208,7 +208,7 @@ class TrainableVarRegBlock(nn.Module):
         else:
             # update/correct DVF at artifact region
             masked_image = image * mask
-            stacked = torch.cat((vector_field, masked_image, warped_conditional), dim=1)
+            stacked = torch.cat((vector_field, masked_image, warped_moving), dim=1)
 
             vector_field_correction = self._vector_field_updater(stacked)
             corrected_vector_field = vector_field + vector_field_correction
@@ -218,36 +218,36 @@ class TrainableVarRegBlock(nn.Module):
 
             corrected_vector_field = self._regularization_layer(corrected_vector_field)
 
-        vector_field = self._match_vector_field(vector_field, full_size_conditional)
+        vector_field = self._match_vector_field(vector_field, full_size_moving)
         corrected_vector_field = self._match_vector_field(
-            corrected_vector_field, full_size_conditional
+            corrected_vector_field, full_size_moving
         )
 
-        corrected_warped_conditional = self._full_size_spatial_transformer(
-            full_size_conditional, corrected_vector_field
+        corrected_warped_moving = self._full_size_spatial_transformer(
+            full_size_moving, corrected_vector_field
         )
-        warped_conditional = self._full_size_spatial_transformer(
-            full_size_conditional, vector_field
+        warped_moving = self._full_size_spatial_transformer(
+            full_size_moving, vector_field
         )
 
         return (
-            corrected_warped_conditional,
-            warped_conditional,
+            corrected_warped_moving,
+            warped_moving,
             corrected_vector_field,
             vector_field,
         )
 
-    def forward(self, image, mask, conditional):
+    def forward(self, image, mask, moving):
         (
-            corrected_warped_conditional,
-            warped_conditional,
+            corrected_warped_moving,
+            warped_moving,
             corrected_vector_field,
             vector_field,
-        ) = self.warp_conditional(image, mask, conditional)
+        ) = self.warp_moving(image, mask, moving)
 
         return (
-            corrected_warped_conditional,
-            warped_conditional,
+            corrected_warped_moving,
+            warped_moving,
             corrected_vector_field,
             vector_field,
         )
