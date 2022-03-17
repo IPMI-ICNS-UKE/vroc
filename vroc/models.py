@@ -265,16 +265,48 @@ if __name__ == "__main__":
         filepath = str(filepath)
         image = sitk.ReadImage(filepath, sitk.sitkFloat32)
         image = sitk.GetArrayFromImage(image)
-        image = image.swapaxes(0, 2)
+        # image = image.swapaxes(0, 2)
 
         return image
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    data_path = '/home/tsentker/data/dirlab2022/data/Case06Pack'
+    out_path = '/home/tsentker/Documents/results/varreg-on-crack/'
 
-    data_path = '/home/tsentker/data/dirlab/CT_asMHD/Case06'
+    # fixed = np.zeros((40, 40, 40))
+    # moving = np.zeros((40, 40, 40))
+    # fixed[18:22, 18:22, 20] = 1.0
+    # moving[22:24, 22:24, 20] = 1.0
+    #
+    # patch_shape = fixed.shape
+    # fixed_ = torch.from_numpy(fixed.copy())
+    # fixed_ = fixed_[None, None, :].float().to(device)
+    # moving_ = torch.from_numpy(moving.copy())
+    # moving_ = moving_[None, None, :].float().to(device)
+    # mask = torch.ones_like(fixed_).float().to(device)
+    # model = TrainableVarRegBlock(patch_shape=patch_shape).to(device)
+    # out = model.forward(fixed_, mask, moving_)
+    #
+    # warped_image = out[1].cpu().detach().numpy()
+    # warped_image = np.squeeze(warped_image)
+    # warped_image = sitk.GetImageFromArray(warped_image)
+    # sitk.WriteImage(warped_image, os.path.join(out_path, 'warped.mha'))
+    #
+    # vf = out[3].cpu().detach().numpy()
+    # vf = np.squeeze(vf)
+    # vf = vf.swapaxes(0, 3)
+    # vf = vf.swapaxes(1, 2)
+    # vf = sitk.GetImageFromArray(vf, isVector=True)
+    # vf = sitk.Cast(vf, sitk.sitkVectorFloat64)
+    # inverter = sitk.IterativeInverseDisplacementFieldImageFilter()
+    # vf = inverter.Execute(vf)
+    # warper = sitk.WarpImageFilter()
+    # sitk_warped = warper.Execute(sitk.GetImageFromArray(moving), vf)
+    # sitk.WriteImage(sitk_warped, os.path.join(out_path, 'sitk_warped.mha'))
+    # sitk.WriteImage(vf, os.path.join(out_path, 'vf.mha'))
 
-    fixed = load_and_preprocess(os.path.join(data_path, 'T00-Case06.mhd'))
-    moving = load_and_preprocess(os.path.join(data_path, 'T50-Case06.mhd'))
+    fixed = load_and_preprocess(os.path.join(data_path, 'Images', 'phase_0.mha'))
+    moving = load_and_preprocess(os.path.join(data_path, 'Images', 'phase_5.mha'))
 
     fixed = torch.from_numpy(fixed.copy())
     patch_shape = fixed.shape
@@ -285,35 +317,40 @@ if __name__ == "__main__":
     model = TrainableVarRegBlock(patch_shape=patch_shape).to(device)
     out = model.forward(fixed, mask, moving)
 
-    orig_ref = sitk.ReadImage(os.path.join(data_path, 'T00-Case06.mhd'))
-    orig_moving = sitk.ReadImage(os.path.join(data_path, 'T50-Case06.mhd'))
+    orig_ref = sitk.ReadImage(os.path.join(data_path, 'Images', 'phase_0.mha'))
+    orig_moving = sitk.ReadImage(os.path.join(data_path, 'Images', 'phase_5.mha'))
 
     warped_image = out[1].cpu().detach().numpy()
     warped_image = np.squeeze(warped_image)
-    warped_image = warped_image.swapaxes(0, 2)
+    # warped_image = warped_image.swapaxes(0, 2)
     warped_image = sitk.GetImageFromArray(warped_image)
-    warped_image.CopyInformation(orig_ref)
-    sitk.WriteImage(warped_image, '/home/tsentker/Documents/results/varreg-on-crack/warped_Case06.mha')
+    # warped_image.CopyInformation(orig_ref)
+    sitk.WriteImage(warped_image, os.path.join(out_path, 'warped.mha'))
 
     vf = out[3].cpu().detach().numpy()
     vf = np.squeeze(vf)
-    vf = vf.swapaxes(0, 3)
-    vf = vf.swapaxes(1, 2)
-    vf = sitk.GetImageFromArray(vf)
-    vf.CopyInformation(orig_ref)
-    vf = sitk.Cast(vf, sitk.sitkVectorFloat64)
+    vf = np.rollaxis(vf, 0, vf.ndim)
+    # vf = vf.swapaxes(1, 2)
+    # for i, sp in enumerate(orig_ref.GetSpacing()):
+    #     vf[:, :, :, i] = vf[:, :, :, i] * sp
+    vf = sitk.GetImageFromArray(vf, isVector=True)
     inverter = sitk.IterativeInverseDisplacementFieldImageFilter()
     vf = inverter.Execute(vf)
+    # vf.CopyInformation(orig_ref)
+    vf = sitk.Cast(vf, sitk.sitkVectorFloat64)
     warper = sitk.WarpImageFilter()
-    warper.SetOutputParameteresFromImage(orig_moving)
+    # warper.SetOutputParameteresFromImage(orig_moving)
+    orig_moving.CopyInformation(vf)
     sitk_warped = warper.Execute(orig_moving, vf)
-    sitk.WriteImage(sitk_warped, '/home/tsentker/Documents/results/varreg-on-crack/sitk_warped_Case06.mha')
-    sitk.WriteImage(vf, '/home/tsentker/Documents/results/varreg-on-crack/vf.mha')
+    sitk.WriteImage(sitk_warped, os.path.join(out_path, 'sitk_warped.mha'))
+    sitk.WriteImage(vf, os.path.join(out_path, 'vf.mha'))
 
-    fixed_LM = read_landmarks('/home/tsentker/data/dirlab/Landmarks/Case06/Lungs/T00-Case06_300_Lungs_LM.txt')
+    fixed_LM = read_landmarks(os.path.join(data_path, 'extremePhases', 'case6_dirLab300_T00_xyz.txt'))
     fixed_LM = transform_landmarks(fixed_LM, orig_ref)
-    moving_LM = read_landmarks('/home/tsentker/data/dirlab/Landmarks/Case06/Lungs/T50-Case06_300_Lungs_LM.txt')
+    moving_LM = read_landmarks(os.path.join(data_path, 'extremePhases', 'case6_dirLab300_T50_xyz.txt'))
     moving_LM = transform_landmarks(moving_LM, orig_ref)
 
     vf_transformed = sitk.DisplacementFieldTransform(vf)
     TRE = np.mean(target_registration_errors(vf_transformed, moving_LM, fixed_LM))
+
+
