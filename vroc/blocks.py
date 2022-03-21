@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class GaussianSmoothing3d(nn.Module):
     def __init__(self, sigma=(1.0, 1.0, 1.0), sigma_cutoff: float = 2.0):
         super().__init__()
@@ -60,7 +59,8 @@ class GaussianSmoothing3d(nn.Module):
 
         input[:, 0:1] = F.conv3d(padded_x, self.weight_x, stride=1)
         input[:, 1:2] = F.conv3d(padded_y, self.weight_y, stride=1)
-        input[:, 2:3] = F.conv3d(padded_z, self.weight_z, stride=1)
+        if len(input.shape) == 5:
+            input[:, 2:3] = F.conv3d(padded_z, self.weight_z, stride=1)
 
         return input
 
@@ -96,7 +96,7 @@ class SpatialTransformer(nn.Module):
 
     def forward(self, src, flow):
         # new locations
-        new_locs = self.grid - flow
+        new_locs = self.grid + flow
         shape = flow.shape[2:]
 
         # need to normalize grid values to [-1, 1] for resampler
@@ -112,7 +112,7 @@ class SpatialTransformer(nn.Module):
             new_locs = new_locs.permute(0, 2, 3, 4, 1)
             new_locs = new_locs[..., [2, 1, 0]]
 
-        return F.grid_sample(src, new_locs, align_corners=True, mode=self.mode)
+        return F.grid_sample(src, new_locs, align_corners=True, mode=self.mode, padding_mode='reflection')
 
 
 class DemonForces3d(nn.Module):
@@ -123,13 +123,21 @@ class DemonForces3d(nn.Module):
         gamma: float = 1.0,
         epsilon: float = 1e-6,
     ):
-        x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
-        l2_grad = x_grad**2 + y_grad**2 + z_grad**2
-        norm = (reference_image - image) / (
-            epsilon + l2_grad + gamma * (reference_image - image) ** 2
-        )
-
-        return norm * torch.cat((x_grad, y_grad, z_grad), dim=1)
+        if len(image.shape) == 5:
+            x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
+            l2_grad = x_grad**2 + y_grad**2 + z_grad**2
+            norm = (reference_image - image) / (
+                epsilon + l2_grad + gamma * (reference_image - image) ** 2
+            )
+            out = norm * torch.cat((x_grad, y_grad, z_grad), dim=1)
+        elif len(image.shape) == 4:
+            x_grad, y_grad = torch.gradient(image, dim=(2, 3))
+            l2_grad = x_grad ** 2 + y_grad ** 2
+            norm = (reference_image - image) / (
+                    epsilon + l2_grad + gamma * (reference_image - image) ** 2
+            )
+            out = norm * torch.cat((x_grad, y_grad), dim=1)
+        return out
 
     def forward(self, image: torch.tensor, reference_image: torch.tensor):
         return DemonForces3d._calculate_active_demon_forces_3d(

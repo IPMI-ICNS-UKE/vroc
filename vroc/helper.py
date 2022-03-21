@@ -21,3 +21,13 @@ def target_registration_errors(tx, point_list, reference_point_list):
     """
     return [np.linalg.norm(np.array(tx.TransformPoint(p)) - np.array(p_ref))
             for p, p_ref in zip(point_list, reference_point_list)]
+
+def landmark_distance(point_list, reference_point_list):
+    return [np.linalg.norm(np.array(p) - np.array(p_ref))
+            for p, p_ref in zip(point_list, reference_point_list)]
+
+def load_and_preprocess(filepath):
+    filepath = str(filepath)
+    image = sitk.ReadImage(filepath, sitk.sitkFloat32)
+    image = sitk.GetArrayFromImage(image)
+    return image
