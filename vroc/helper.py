@@ -1,5 +1,9 @@
 import SimpleITK as sitk
 import numpy as np
+import matplotlib
+matplotlib.use('WebAgg')
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 
 def read_landmarks(filepath):
@@ -29,5 +33,22 @@ def landmark_distance(point_list, reference_point_list):
 def load_and_preprocess(filepath):
     filepath = str(filepath)
     image = sitk.ReadImage(filepath, sitk.sitkFloat32)
-    image = sitk.GetArrayFromImage(image)
     return image
+
+def plot_TRE_landmarks(tx, point_list, reference_point_list):
+    transformed_point_list = [tx.TransformPoint(p) for p in point_list]
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    orig = ax.scatter(list(np.array(reference_point_list).T)[0],
+                      list(np.array(reference_point_list).T)[1],
+                      list(np.array(reference_point_list).T)[2],
+                      marker='o',
+                      color='blue',
+                      label='Original points')
+    transformed = ax.scatter(list(np.array(transformed_point_list).T)[0],
+                             list(np.array(transformed_point_list).T)[1],
+                             list(np.array(transformed_point_list).T)[2],
+                             marker='^',
+                             color='red',
+                             label='Transformed points')
+    plt.legend(loc=(0.0, 1.0))

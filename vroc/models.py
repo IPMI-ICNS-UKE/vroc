@@ -202,7 +202,8 @@ class TrainableVarRegBlock(nn.Module):
                     f"spatial_transformer_level_{i_level}",
                 )
                 for i in range(iterations):
-                    # print(f'*** ITERATION {i + 1} ***')
+                    if (i % 100) == 0:
+                        print(f'*** ITERATION {i} ***')
 
                     warped_moving = spatial_transformer(
                         scaled_moving, vector_field
@@ -211,7 +212,7 @@ class TrainableVarRegBlock(nn.Module):
                     metrics.append(float(F.mse_loss(scaled_image, warped_moving)))
 
                     if self._check_early_stopping_average_improvement(metrics):
-                        # print(f'Early stopping at iter {i}')
+                        print(f'Early stopping at iter {i}')
                         break
 
                     forces = self._demon_forces_layer(warped_moving, scaled_image)
@@ -220,7 +221,7 @@ class TrainableVarRegBlock(nn.Module):
                     vector_field += self.tau * (forces * scaled_mask)
                     vector_field = self._regularization_layer(vector_field)
 
-                # print(f'ITERATION {i + 1}: Metric: {metrics[-1]}')
+                print(f'ITERATION {i + 1}: Metric: {metrics[-1]}')
         if self.disable_correction:
             corrected_vector_field = vector_field
         else:

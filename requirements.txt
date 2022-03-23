@@ -1,0 +1,6 @@
+SimpleITK~=2.1.1
+numpy~=1.22.3
+torch~=1.11.0
+matplotlib~=3.5.1
+vroc~=0.1
+setuptools~=58.0.4
