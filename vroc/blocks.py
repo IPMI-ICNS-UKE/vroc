@@ -96,7 +96,7 @@ class SpatialTransformer(nn.Module):
 
     def forward(self, src, flow):
         # new locations
-        new_locs = self.grid - flow
+        new_locs = self.grid + flow
         shape = flow.shape[2:]
 
         # need to normalize grid values to [-1, 1] for resampler
