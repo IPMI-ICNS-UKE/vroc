@@ -42,7 +42,7 @@ class GaussianSmoothing3d(nn.Module):
 
         sigma2 = sigma * sigma
         x = torch.arange(-radius, radius + 1)
-        phi_x = torch.exp(-0.5 / sigma2 * x**2)
+        phi_x = torch.exp(-0.5 / sigma2 * x ** 2)
         phi_x = phi_x / phi_x.sum()
 
         return phi_x
@@ -117,51 +117,32 @@ class SpatialTransformer(nn.Module):
 
 class DemonForces3d(nn.Module):
     @staticmethod
-    def _calculate_active_demon_forces_3d(
-        image: torch.tensor,
-        reference_image: torch.tensor,
-        gamma: float = 1.0,
-        epsilon: float = 1e-6,
+    def _calculate_demon_forces_3d(
+            image: torch.tensor,
+            reference_image: torch.tensor,
+            method: str,
+            gamma: float = 1.0,
+            epsilon: float = 1e-6,
     ):
-        x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
-        l2_grad = x_grad**2 + y_grad**2 + z_grad**2
+        if method == 'active':
+            x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
+        elif method == 'passive':
+            x_grad, y_grad, z_grad = torch.gradient(reference_image, dim=(2, 3, 4))
+            # TODO: Has to be only calculated once per level, as reference image does not change -> To be implemented
+        elif method == 'symmetric':
+            x_grad, y_grad, z_grad = torch.stack(torch.gradient(image, dim=(2, 3, 4))) + \
+                                     torch.stack(torch.gradient(reference_image, dim=(2, 3, 4)))
+            # TODO: Has to be only calculated once per level, as reference image does not change -> To be implemented
+        else:
+            raise Exception('Specified demon forces not implemented')
+        l2_grad = x_grad ** 2 + y_grad ** 2 + z_grad ** 2  # TODO: Same as above, if method == passive
         norm = (reference_image - image) / (
-            epsilon + l2_grad + gamma * (reference_image - image) ** 2
+                epsilon + l2_grad + gamma * (reference_image - image) ** 2
         )
 
         return norm * torch.cat((x_grad, y_grad, z_grad), dim=1)
 
-    @staticmethod
-    def _calculate_passive_demon_forces_3d(
-        image: torch.tensor,
-        reference_image: torch.tensor,
-        gamma: float = 1.0,
-        epsilon: float = 1e-6,
-    ):
-        x_grad, y_grad, z_grad = torch.gradient(reference_image, dim=(2, 3, 4))
-        l2_grad = x_grad**2 + y_grad**2 + z_grad**2
-        norm = (reference_image - image) / (
-            epsilon + l2_grad + gamma * (reference_image - image) ** 2
-        )
-
-        return norm * torch.cat((x_grad, y_grad, z_grad), dim=1)
-
-    @staticmethod
-    def _calculate_dual_demon_forces_3d(
-        image: torch.tensor,
-        reference_image: torch.tensor,
-        gamma: float = 1.0,
-        epsilon: float = 1e-6,
-    ):
-        x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
-        x_grad_, y_grad_, z_grad_ = torch.gradient(reference_image, dim=(2, 3, 4))
-        l2_grad = (x_grad+x_grad_)**2 + (y_grad+y_grad_)**2 + (z_grad+z_grad_)**2
-        norm = (reference_image - image) / (
-            epsilon + l2_grad + gamma * (reference_image - image) ** 2
-        )
-        return norm * (torch.cat((x_grad, y_grad, z_grad), dim=1) + torch.cat((x_grad_, y_grad_, z_grad_), dim=1))
-
-    def forward(self, image: torch.tensor, reference_image: torch.tensor):
-        return DemonForces3d._calculate_active_demon_forces_3d(
-            image=image, reference_image=reference_image
+    def forward(self, image: torch.tensor, reference_image: torch.tensor, method: str):
+        return DemonForces3d._calculate_demon_forces_3d(
+            image=image, reference_image=reference_image, method=method,
         )

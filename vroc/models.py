@@ -10,15 +10,16 @@ from vroc.blocks import SpatialTransformer, DemonForces3d, GaussianSmoothing3d
 
 class TrainableVarRegBlock(nn.Module):
     def __init__(
-        self,
-        patch_shape,
-        iterations: Tuple[int, ...] = (100, 100),
-        tau: float = 1.0,
-        regularization_sigma=(1.0, 1.0, 1.0),
-        disable_correction: bool = False,
-        scale_factors: Tuple[float, ...] = (0.5, 1.0),
-        early_stopping_delta: float = 0.0,
-        early_stopping_window: int = 10,
+            self,
+            patch_shape,
+            iterations: Tuple[int, ...] = (100, 100),
+            tau: float = 1.0,
+            demon_forces='active',
+            regularization_sigma=(1.0, 1.0, 1.0),
+            disable_correction: bool = False,
+            scale_factors: Tuple[float, ...] = (0.5, 1.0),
+            early_stopping_delta: float = 0.0,
+            early_stopping_window: int = 10,
     ):
         super().__init__()
         self.patch_shape = patch_shape
@@ -27,6 +28,7 @@ class TrainableVarRegBlock(nn.Module):
         self.regularization_sigma = regularization_sigma
         self.disable_correction = disable_correction
         self.scale_factors = scale_factors
+        self.demon_forces = demon_forces
 
         self.early_stopping_delta = early_stopping_delta
         self.early_stopping_window = early_stopping_window
@@ -96,13 +98,13 @@ class TrainableVarRegBlock(nn.Module):
 
     def _check_early_stopping(self, metrics: List[float]):
         if (
-            self.early_stopping_delta == 0
-            or len(metrics) < self.early_stopping_window + 1
+                self.early_stopping_delta == 0
+                or len(metrics) < self.early_stopping_window + 1
         ):
             return False
 
         rel_change = (metrics[-self.early_stopping_window] - metrics[-1]) / (
-            metrics[-self.early_stopping_window] + 1e-9
+                metrics[-self.early_stopping_window] + 1e-9
         )
         # print(f'Rel. change: {rel_change}')
 
@@ -112,12 +114,12 @@ class TrainableVarRegBlock(nn.Module):
 
     def _check_early_stopping_average_improvement(self, metrics: List[float]):
         if (
-            self.early_stopping_delta == 0
-            or len(metrics) < self.early_stopping_window + 1
+                self.early_stopping_delta == 0
+                or len(metrics) < self.early_stopping_window + 1
         ):
             return False
 
-        window = np.array(metrics[-self.early_stopping_window :])
+        window = np.array(metrics[-self.early_stopping_window:])
         window_rel_changes = 1 - window[1:] / window[:-1]
 
         if window_rel_changes.mean() < self.early_stopping_delta:
@@ -182,7 +184,7 @@ class TrainableVarRegBlock(nn.Module):
         with torch.no_grad():
 
             for i_level, (scale_factor, iterations) in enumerate(
-                zip(self.scale_factors, self.iterations)
+                    zip(self.scale_factors, self.iterations)
             ):
                 metrics = []
 
@@ -215,7 +217,7 @@ class TrainableVarRegBlock(nn.Module):
                         print(f'Early stopping at iter {i}')
                         break
 
-                    forces = self._demon_forces_layer(warped_moving, scaled_image)
+                    forces = self._demon_forces_layer(warped_moving, scaled_image, self.demon_forces)
                     # mask forces with artifact mask (artifact = 0, valid = 1)
 
                     vector_field += self.tau * (forces * scaled_mask)

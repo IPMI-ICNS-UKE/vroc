@@ -52,5 +52,5 @@ if __name__ == "__main__":
         image = read_image(image_filepath)
         output_filepath = image_filepath.parent / f"phase_{phase}.mha"
         sitk.WriteImage(image, str(output_filepath))
-        break
+
 
