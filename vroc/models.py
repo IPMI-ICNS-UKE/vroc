@@ -228,9 +228,9 @@ class TrainableVarRegBlock(nn.Module):
 
                     vector_field += self.tau * (forces * scaled_mask)
                     _regularization_layer = self.get_submodule(
-                        f"regularization_layer{i_level}",
+                        f"regularization_layer_level_{i_level}",
                     )
-                    vector_field = self._regularization_layer(vector_field)
+                    vector_field = _regularization_layer(vector_field)
 
                 print(f'ITERATION {i + 1}: Metric: {metrics[-1]}')
         if self.disable_correction:
