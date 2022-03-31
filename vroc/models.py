@@ -46,9 +46,15 @@ class TrainableVarRegBlock(nn.Module):
 
         self._demon_forces_layer = DemonForces3d()
 
-        self._regularization_layer = GaussianSmoothing3d(
-            sigma=self.regularization_sigma, sigma_cutoff=2
-        )
+        for i_level, sigma in enumerate(regularization_sigma):
+            self.add_module(
+                name=f"regularization_layer_level_{i_level}",
+                module=GaussianSmoothing3d(sigma=sigma, sigma_cutoff=2),
+            )
+
+        # self._regularization_layer = GaussianSmoothing3d(
+        #     sigma=self.regularization_sigma, sigma_cutoff=2
+        # )
 
         self._vector_field_updater = nn.Sequential(
             nn.Conv3d(
@@ -221,6 +227,9 @@ class TrainableVarRegBlock(nn.Module):
                     # mask forces with artifact mask (artifact = 0, valid = 1)
 
                     vector_field += self.tau * (forces * scaled_mask)
+                    _regularization_layer = self.get_submodule(
+                        f"regularization_layer{i_level}",
+                    )
                     vector_field = self._regularization_layer(vector_field)
 
                 print(f'ITERATION {i + 1}: Metric: {metrics[-1]}')

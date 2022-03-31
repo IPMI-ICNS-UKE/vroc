@@ -39,6 +39,8 @@ class GaussianSmoothing3d(nn.Module):
         sd = float(sigma)
         # make the radius of the filter equal to truncate standard deviations
         radius = int(sigma_cutoff * sd + 0.5)
+        if radius == 0:
+            radius = 1
 
         sigma2 = sigma * sigma
         x = torch.arange(-radius, radius + 1)

@@ -40,11 +40,11 @@ moving_ = moving_[None, None, :].float().to(device)
 mask = torch.ones_like(fixed_).float().to(device)
 start = time.time()
 model = TrainableVarRegBlock(patch_shape=patch_shape,
-                             iterations=(100, 100, 100, 10),
+                             iterations=(100, 100, 100),
                              demon_forces='passive',
                              tau=1.0,
-                             regularization_sigma=(1.0, 1.0, 1.0),
-                             scale_factors=(0.125, 0.25, 0.5, 1.0),
+                             regularization_sigma=((1.0, 1.0, 1.0), (1.0, 1.0, 1.0), (1.0, 1.0, 1.0)),
+                             scale_factors=(0.125, 0.25, 0.5),
                              disable_correction=True,
                              early_stopping_delta=0.001,
                              early_stopping_window=10).to(device)
