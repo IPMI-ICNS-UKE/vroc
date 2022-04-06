@@ -121,9 +121,8 @@ class TrainableVarRegBlock(nn.Module):
 
     def _check_early_stopping_average_improvement(self, metrics: List[float], i_level):
         if (
-                # self.early_stopping_delta[i_level] == 0
-                # or
-                len(metrics) < self.early_stopping_window[i_level] + 1
+                self.early_stopping_delta[i_level] == 0
+                or len(metrics) < self.early_stopping_window[i_level] + 1
         ):
             return False
 
@@ -143,8 +142,7 @@ class TrainableVarRegBlock(nn.Module):
             return False
 
         window = np.array(metrics[-self.early_stopping_window[i_level]:])
-        lstsq_result = stats.linregress(window, np.arange(self.early_stopping_window[i_level]))
-        # print(lstsq_result.slope, self.early_stopping_delta[i_level])
+        lstsq_result = stats.linregress(np.arange(self.early_stopping_window[i_level]), window)
         if lstsq_result.slope > -self.early_stopping_delta[i_level]:
             return True
         return False
