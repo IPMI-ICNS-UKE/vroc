@@ -2,16 +2,15 @@ import SimpleITK as sitk
 import os
 import time
 
+import matplotlib
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
-import matplotlib
 
-matplotlib.use('WebAgg')
 from vroc.models import TrainableVarRegBlock
+from vroc.helper import read_landmarks, transform_landmarks_and_flip_z, target_registration_errors, load_and_preprocess, landmark_distance, plot_TRE_landmarks
 
-from vroc.helper import read_landmarks, transform_landmarks_and_flip_z, target_registration_errors, load_and_preprocess, \
-    landmark_distance, plot_TRE_landmarks
+matplotlib.use('module://backend_interagg')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -27,7 +26,7 @@ mask = sitk.ReadImage(os.path.join(data_path, 'segmentation', f'mask_0.mha'))
 # TODO: Influence of mask dilation on TRE
 dilate_filter = sitk.BinaryDilateImageFilter()
 dilate_filter.SetForegroundValue(1)
-dilate_filter.SetKernelRadius((2, 2, 2))
+dilate_filter.SetKernelRadius((3, 3, 3))
 mask = dilate_filter.Execute(mask)
 moving = sitk.HistogramMatching(moving, fixed)
 hist_matching = sitk.HistogramMatchingImageFilter()
@@ -49,15 +48,15 @@ mask_ = mask_[None, None, :].float().to(device)
 # mask_ = torch.ones_like(fixed_).float().to(device)
 start = time.time()
 model = TrainableVarRegBlock(patch_shape=patch_shape,
-                             iterations=(1600, 1600, 1600, 1600),
-                             demon_forces='active',
-                             tau=2.0,
+                             iterations=(800, 800, 800, 800),
+                             demon_forces='symmetric',
+                             tau=(2.0, 2.0, 2.0, 2.0),
                              regularization_sigma=((2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (2.0, 2.0, 2.0)),
                              scale_factors=(0.125, 0.25, 0.5, 1.0),
                              disable_correction=True,
-                             early_stopping_delta=1e-3,
-                             early_stopping_window=20).to(device)
-_, warped, _, vf = model.forward(fixed_, mask_, moving_)
+                             early_stopping_delta=(0, 0, 0, 1e-4),
+                             early_stopping_window=(10, 10, 10, 20)).to(device)
+_, warped, _, vf, metrics = model.forward(fixed_, mask_, moving_)
 print(time.time() - start)
 
 warped_moving = warped.cpu().detach().numpy()
@@ -110,3 +109,5 @@ print(
 # # plt.show()
 # plot_TRE_landmarks(vf_transformed,moving_LM, fixed_LM)
 # plt.show()
+plt.plot([item for sublist in metrics for item in sublist])
+plt.show()
