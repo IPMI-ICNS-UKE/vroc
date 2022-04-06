@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-
+import os
 import SimpleITK as sitk
 import numpy as np
 
@@ -34,8 +34,6 @@ def read_image(filepath: Path) -> sitk.Image:
     image = np.flip(image, axis=0)
 
     image = sitk.GetImageFromArray(image)
-    image = sitk.DICOMOrient(image, 'LPI')
-    image.SetOrigin((0.0, 0.0, 0.0))
     image.SetSpacing(meta["voxel_spacing"])
 
     return image
@@ -43,6 +41,7 @@ def read_image(filepath: Path) -> sitk.Image:
 
 if __name__ == "__main__":
     DIRLAB_FOLDER = Path("/home/tsentker/data/dirlab2022/")
+    DIRLAB_FOLDER_OLD = Path("/home/tsentker/data/dirlab/Segm_asMHD")
 
     for image_filepath in sorted(DIRLAB_FOLDER.glob("**/*.img")):
 
@@ -53,4 +52,19 @@ if __name__ == "__main__":
         output_filepath = image_filepath.parent / f"phase_{phase}.mha"
         sitk.WriteImage(image, str(output_filepath))
 
+
+    # for f in sorted(DIRLAB_FOLDER_OLD.glob("**/**/*Lungs.mhd")):
+    #     case = int(re.search("Case(\d\d)", str(f)).group(1))
+    #     phase = int(re.search("T(\d\d)", str(f)).group(1)) // 10
+    #     output_filepath = os.path.join(DIRLAB_FOLDER, 'data', f'Case{case:02d}Pack', 'segmentation', f'mask_{phase}.mha')
+    #     segm = sitk.ReadImage(str(f))
+    #     segm_arr = sitk.GetArrayFromImage(segm)
+    #     segm_arr = np.flip(segm_arr, axis=0)
+    #     segm_img = sitk.GetImageFromArray(segm_arr)
+    #     segm_img.SetSpacing(segm.GetSpacing())
+    #     # segm_img.SetOrigin((0.0, 0.0, 0.0))
+    #     segm_img = sitk.Cast(segm_img, sitk.sitkInt8)
+    #     sitk.WriteImage(segm_img, str(output_filepath))
+    #     print(f, output_filepath)
+    #     # break
 

@@ -10,25 +10,24 @@ import matplotlib
 matplotlib.use('WebAgg')
 from vroc.models import TrainableVarRegBlock
 
-from vroc.helper import read_landmarks, transform_landmarks, target_registration_errors, load_and_preprocess, \
+from vroc.helper import read_landmarks, transform_landmarks_and_flip_z, target_registration_errors, load_and_preprocess, \
     landmark_distance, plot_TRE_landmarks
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-dirlab_case = 2
+dirlab_case = 1
 
-data_path = f'/home/tsentker/data/dirlab2022/data/Case0{dirlab_case}Pack'
+data_path = f'/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack'
 out_path = '/home/tsentker/Documents/results/varreg-on-crack/'
-
-# data_path = '/mnt/c/Users/Thilo/Documents/dirlab2022/data/Case06Pack'
-# out_path = '/mnt/c/Users/Thilo/Desktop'
 
 fixed = load_and_preprocess(os.path.join(data_path, 'Images', 'phase_0.mha'))
 orig_ref = fixed
 moving = load_and_preprocess(os.path.join(data_path, 'Images', 'phase_5.mha'))
-mask = sitk.ReadImage(os.path.join(data_path, 'segmentation', f'T00-Case{dirlab_case:02d}_Lungs.mha'))
+mask = sitk.ReadImage(os.path.join(data_path, 'segmentation', f'mask_0.mha'))
+# TODO: Influence of mask dilation on TRE
 dilate_filter = sitk.BinaryDilateImageFilter()
 dilate_filter.SetForegroundValue(1)
+dilate_filter.SetKernelRadius((2, 2, 2))
 mask = dilate_filter.Execute(mask)
 moving = sitk.HistogramMatching(moving, fixed)
 hist_matching = sitk.HistogramMatchingImageFilter()
@@ -39,7 +38,6 @@ hist_matching.Execute(moving, fixed)
 fixed = sitk.GetArrayFromImage(fixed)
 moving = sitk.GetArrayFromImage(moving)
 mask = sitk.GetArrayFromImage(mask)
-
 
 patch_shape = fixed.shape
 fixed_ = torch.from_numpy(fixed.copy())
@@ -53,11 +51,11 @@ start = time.time()
 model = TrainableVarRegBlock(patch_shape=patch_shape,
                              iterations=(1600, 1600, 1600, 1600),
                              demon_forces='active',
-                             tau=1.0,
-                             regularization_sigma=((2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (1.0, 1.0, 1.0), (0.5, 0.5, 0.5)),
+                             tau=2.0,
+                             regularization_sigma=((2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (2.0, 2.0, 2.0)),
                              scale_factors=(0.125, 0.25, 0.5, 1.0),
                              disable_correction=True,
-                             early_stopping_delta=1e-8,
+                             early_stopping_delta=1e-3,
                              early_stopping_window=20).to(device)
 _, warped, _, vf = model.forward(fixed_, mask_, moving_)
 print(time.time() - start)
@@ -88,24 +86,27 @@ sitk.WriteImage(moving, os.path.join(out_path, 'moving.mha'))
 sitk.WriteImage(fixed, os.path.join(out_path, 'fixed.mha'))
 
 fixed_LM = read_landmarks(os.path.join(data_path, 'extremePhases', f'Case{dirlab_case}_300_T00_xyz.txt'))
-fixed_LM_world = transform_landmarks(fixed_LM, orig_ref)
+fixed_LM_world = transform_landmarks_and_flip_z(fixed_LM, orig_ref)
 moving_LM = read_landmarks(os.path.join(data_path, 'extremePhases', f'Case{dirlab_case}_300_T50_xyz.txt'))
-moving_LM_world = transform_landmarks(moving_LM, orig_ref)
+moving_LM_world = transform_landmarks_and_flip_z(moving_LM, orig_ref)
 
-
-# TODO: Warp moving with scaled vector field on correct spacing/origin/direction to verify correctness of transformation
-
-vector_field_scaled = sitk.GetArrayFromImage(vector_field)
-vector_field_scaled = vector_field_scaled * orig_ref.GetSpacing()
-vector_field_scaled = sitk.GetImageFromArray(vector_field_scaled, isVector=True)
+vector_field_scaled = sitk.Compose(
+    [sitk.VectorIndexSelectionCast(vector_field, i) * sp for i, sp in enumerate(orig_ref.GetSpacing())])
 vector_field_scaled = sitk.Cast(vector_field_scaled, sitk.sitkVectorFloat64)
 vector_field_scaled.CopyInformation(orig_ref)
+
+warper.SetOutputParameteresFromImage(moving)
+sitk_warped_moving_scaled = warper.Execute(moving, vector_field_scaled)
+sitk.WriteImage(sitk_warped_moving_scaled, os.path.join(out_path, 'sitk_warped_moving_scaled.mha'))
+sitk.WriteImage(vector_field_scaled, os.path.join(out_path, 'sitk_vf.mha'))
 vf_transformed = sitk.DisplacementFieldTransform(vector_field_scaled)
-sitk.WriteTransform(vf_transformed, os.path.join(out_path, 'sitk_transform.tfm'))
-delta_LM = landmark_distance(moving_LM_world, fixed_LM_world)
-TRE = target_registration_errors(vf_transformed, moving_LM_world, fixed_LM_world)
+
+delta_LM = landmark_distance(fixed_LM_world, moving_LM_world)
+TRE = target_registration_errors(vf_transformed, fixed_LM_world, moving_LM_world)
+print(
+    f'Mean (std) TRE for DIRlab case {dirlab_case} is {np.mean(TRE):.2f} ({np.std(TRE):.2f}) [before registration: {np.mean(delta_LM):.2f} ({np.std(delta_LM):.2f}) ]')
 #
-# plt.imshow(sitk.GetArrayFromImage(moving)[:,256,:], aspect='auto')
+# plt.imshow(sitk.GetArrayFromImage(moving)[:,100,:], aspect='auto')
 # # plt.show()
 # plot_TRE_landmarks(vf_transformed,moving_LM, fixed_LM)
 # plt.show()

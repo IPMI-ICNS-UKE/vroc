@@ -13,8 +13,10 @@ def read_landmarks(filepath):
     return lines
 
 
-def transform_landmarks(point_list, reference_image):
-    return [reference_image.TransformContinuousIndexToPhysicalPoint(p) for p in point_list]
+def transform_landmarks_and_flip_z(point_list, reference_image):
+    # point_list = [(p[0], p[1], reference_image.GetSize()[2] - p[2]) for p in point_list]
+    return [reference_image.TransformContinuousIndexToPhysicalPoint((p[0], p[1], reference_image.GetSize()[2] - p[2]))
+            for p in point_list]
 
 
 def target_registration_errors(tx, point_list, reference_point_list):
