@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import torch
 import numpy as np
 
+from torch.profiler import profile, record_function, ProfilerActivity
 from vroc.models import TrainableVarRegBlock
 from vroc.helper import read_landmarks, transform_landmarks_and_flip_z, target_registration_errors, load_and_preprocess, landmark_distance, plot_TRE_landmarks
 
@@ -14,7 +15,7 @@ matplotlib.use('module://backend_interagg')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-dirlab_case = 1
+dirlab_case = 2
 
 data_path = f'/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack'
 out_path = '/home/tsentker/Documents/results/varreg-on-crack/'
@@ -46,18 +47,22 @@ moving_ = moving_[None, None, :].float().to(device)
 mask_ = torch.from_numpy(mask.copy())
 mask_ = mask_[None, None, :].float().to(device)
 # mask_ = torch.ones_like(fixed_).float().to(device)
-start = time.time()
+
 model = TrainableVarRegBlock(patch_shape=patch_shape,
-                             iterations=(800, 800, 800, 800),
+                             iterations=(800, 600, 800, 10),
                              demon_forces='symmetric',
                              tau=(2.0, 2.0, 2.0, 2.0),
                              regularization_sigma=((2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (2.0, 2.0, 2.0)),
-                             scale_factors=(0.125, 0.25, 0.5, 1.0),
+                             scale_factors=(0.25, 0.5, 0.75, 1.0),
                              disable_correction=True,
-                             early_stopping_delta=(0, 0, 0, 1e-4),
+                             early_stopping_delta=(1e-3, 1e-3, 1e-3, 1e-3),
                              early_stopping_window=(10, 10, 10, 20)).to(device)
+# start = time.time()
+# with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+#     with record_function("model_inference"):
 _, warped, _, vf, metrics = model.forward(fixed_, mask_, moving_)
-print(time.time() - start)
+
+# print(time.time() - start)
 
 warped_moving = warped.cpu().detach().numpy()
 warped_moving = np.squeeze(warped_moving)

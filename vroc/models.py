@@ -1,3 +1,4 @@
+import time
 from typing import Tuple, List
 
 import numpy as np
@@ -7,6 +8,7 @@ import torch.nn.functional as F
 from scipy import stats
 
 from vroc.blocks import SpatialTransformer, DemonForces3d, GaussianSmoothing3d
+from helper import rescale_range
 
 
 class TrainableVarRegBlock(nn.Module):
@@ -142,7 +144,8 @@ class TrainableVarRegBlock(nn.Module):
             return False
 
         window = np.array(metrics[-self.early_stopping_window[i_level]:])
-        lstsq_result = stats.linregress(np.arange(self.early_stopping_window[i_level]), window)
+        scaled_window = rescale_range(window, (np.min(metrics), np.max(metrics)), (0, 1))
+        lstsq_result = stats.linregress(np.arange(self.early_stopping_window[i_level]), scaled_window)
         if lstsq_result.slope > -self.early_stopping_delta[i_level]:
             return True
         return False
@@ -225,6 +228,7 @@ class TrainableVarRegBlock(nn.Module):
                     f"spatial_transformer_level_{i_level}",
                 )
                 for i in range(iterations):
+                    s_t = time.time()
                     if (i % 100) == 0:
                         print(f'*** LEVEL {i_level + 1} *** ITERATION {i} ***')
 
@@ -251,6 +255,7 @@ class TrainableVarRegBlock(nn.Module):
                         f"regularization_layer_level_{i_level}",
                     )
                     vector_field = _regularization_layer(vector_field)
+                    print(time.time()-s_t)
 
                 print(f'LEVEL {i_level + 1} stopped at ITERATION {i}: Metric: {metrics[-1]}')
                 metrics_all_level.append(metrics)
@@ -281,7 +286,6 @@ class TrainableVarRegBlock(nn.Module):
         warped_moving = self._full_size_spatial_transformer(
             full_size_moving, vector_field
         )
-
 
         return (
             corrected_warped_moving,

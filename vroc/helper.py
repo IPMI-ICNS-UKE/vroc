@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import SimpleITK as sitk
 import numpy as np
 import matplotlib
@@ -58,3 +60,15 @@ def plot_TRE_landmarks(tx, point_list, reference_point_list):
                              color='red',
                              label='Transformed points')
     plt.legend(loc=(0.0, 1.0))
+
+
+def rescale_range(values: np.ndarray,
+                  input_range: Tuple,
+                  output_range: Tuple,
+                  clip=True):
+    in_min, in_max = input_range
+    out_min, out_max = output_range
+    rescaled = (((values - in_min) * (out_max - out_min)) / (in_max - in_min)) + out_min
+    if clip:
+        return np.clip(rescaled, out_min, out_max)
+    return rescaled
