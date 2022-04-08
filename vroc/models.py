@@ -55,10 +55,6 @@ class TrainableVarRegBlock(nn.Module):
                 module=GaussianSmoothing3d(sigma=sigma, sigma_cutoff=2),
             )
 
-        # self._regularization_layer = GaussianSmoothing3d(
-        #     sigma=self.regularization_sigma, sigma_cutoff=2
-        # )
-
         self._vector_field_updater = nn.Sequential(
             nn.Conv3d(
                 # 3 DVF channels, 2x1 image channels
@@ -136,13 +132,27 @@ class TrainableVarRegBlock(nn.Module):
             return True
         return False
 
-    def _check_early_stopping_lstsq(self, metrics: List[float], i_level):
+    def _check_early_stopping_improvement(self, metrics: List[float], i_level):
         if (
                 self.early_stopping_delta[i_level] == 0
                 or len(metrics) < self.early_stopping_window[i_level] + 1
         ):
             return False
 
+        window = np.array(metrics[-self.early_stopping_window[i_level]:])
+        window_rel_changes = 1 - window[1:] / window[:-1]
+
+        if window_rel_changes.mean() < self.early_stopping_delta[i_level]:
+            # print(f'Rel. change: {window_rel_changes}')
+            return True
+        return False
+
+    def _check_early_stopping_lstsq(self, metrics: List[float], i_level):
+        if (
+                self.early_stopping_delta[i_level] == 0
+                or len(metrics) < self.early_stopping_window[i_level] + 1
+        ):
+            return False
         window = np.array(metrics[-self.early_stopping_window[i_level]:])
         scaled_window = rescale_range(window, (np.min(metrics), np.max(metrics)), (0, 1))
         lstsq_result = stats.linregress(np.arange(self.early_stopping_window[i_level]), scaled_window)
@@ -195,7 +205,7 @@ class TrainableVarRegBlock(nn.Module):
 
         return vector_field * scale_factor
 
-    def warp_moving(self, image, mask, moving):
+    def warp_moving(self, image, mask, moving, original_image_spacing):
         # register moving image onto fixed image
         if len(image.shape) == 4:
             dim_vf = 2
@@ -247,7 +257,8 @@ class TrainableVarRegBlock(nn.Module):
                             # print(f'Early stopping at iter {i}')
                             break
 
-                    forces = self._demon_forces_layer(warped_moving, scaled_image, self.demon_forces)
+                    forces = self._demon_forces_layer(warped_moving, scaled_image, self.demon_forces,
+                                                      original_image_spacing)
                     # mask forces with artifact mask (artifact = 0, valid = 1)
 
                     vector_field += self.tau[i_level] * (forces * scaled_mask)
@@ -255,7 +266,7 @@ class TrainableVarRegBlock(nn.Module):
                         f"regularization_layer_level_{i_level}",
                     )
                     vector_field = _regularization_layer(vector_field)
-                    print(time.time()-s_t)
+                    print(time.time() - s_t)
 
                 print(f'LEVEL {i_level + 1} stopped at ITERATION {i}: Metric: {metrics[-1]}')
                 metrics_all_level.append(metrics)
@@ -273,7 +284,10 @@ class TrainableVarRegBlock(nn.Module):
             if not corrected_vector_field.isfinite().all():
                 raise ValueError()
 
-            corrected_vector_field = self._regularization_layer(corrected_vector_field)
+            _regularization_layer = self.get_submodule(
+                f"regularization_layer_level_{i_level}",
+            )
+            corrected_vector_field = _regularization_layer(corrected_vector_field)
 
         vector_field = self._match_vector_field(vector_field, full_size_moving)
         corrected_vector_field = self._match_vector_field(
@@ -295,14 +309,14 @@ class TrainableVarRegBlock(nn.Module):
             metrics_all_level
         )
 
-    def forward(self, image, mask, moving):
+    def forward(self, image, mask, moving, original_image_spacing):
         (
             corrected_warped_moving,
             warped_moving,
             corrected_vector_field,
             vector_field,
             metrics_all_level
-        ) = self.warp_moving(image, mask, moving)
+        ) = self.warp_moving(image, mask, moving, original_image_spacing)
 
         return (
             corrected_warped_moving,
