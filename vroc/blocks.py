@@ -73,7 +73,7 @@ class GaussianSmoothing2d(BaseGaussianSmoothing):
     def __init__(
         self,
         sigma: Tuple[float, float] = (1.0, 1.0),
-        sigma_cutoff: Tuple[float, float] = (2.0, 2.0),
+        sigma_cutoff: Tuple[float, float] = (1.0, 1.0),
         same_size: bool = False,
     ):
         super().__init__()
@@ -86,7 +86,7 @@ class GaussianSmoothing2d(BaseGaussianSmoothing):
         self.same_size = same_size
 
         kernel_x, kernel_y = GaussianSmoothing2d.make_gaussian_kernel(
-            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff
+            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff, same_size=same_size
         )
         self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1])
 
@@ -117,7 +117,7 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
     def __init__(
         self,
         sigma: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        sigma_cutoff: Tuple[float, float, float] = (2.0, 2.0, 2.0),
+        sigma_cutoff: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         same_size: bool = False,
     ):
         super().__init__()
@@ -130,7 +130,7 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
         self.same_size = same_size
 
         kernel_x, kernel_y, kernel_z = GaussianSmoothing3d.make_gaussian_kernel(
-            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff
+            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff, same_size=same_size
         )
         self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1], kernel_z.shape[-1])
 

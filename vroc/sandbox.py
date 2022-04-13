@@ -8,13 +8,14 @@ import torch
 import numpy as np
 
 from vroc.models import TrainableVarRegBlock
-from vroc.helper import read_landmarks, transform_landmarks_and_flip_z, target_registration_errors, load_and_preprocess, landmark_distance, plot_TRE_landmarks
+from vroc.helper import read_landmarks, transform_landmarks_and_flip_z, target_registration_errors_snapped, load_and_preprocess, \
+    landmark_distance, plot_TRE_landmarks
 
 matplotlib.use('module://backend_interagg')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-dirlab_case = 10
+dirlab_case = 8
 
 data_path = f'/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack'
 out_path = '/home/tsentker/Documents/results/varreg-on-crack/'
@@ -29,12 +30,7 @@ dilate_filter = sitk.BinaryDilateImageFilter()
 dilate_filter.SetForegroundValue(1)
 dilate_filter.SetKernelRadius((1, 1, 1))
 mask = dilate_filter.Execute(mask)
-moving = sitk.HistogramMatching(moving, fixed)
-hist_matching = sitk.HistogramMatchingImageFilter()
-hist_matching.SetNumberOfHistogramLevels(1024)
-hist_matching.SetNumberOfMatchPoints(7)
-hist_matching.ThresholdAtMeanIntensityOn()
-hist_matching.Execute(moving, fixed)
+moving = sitk.HistogramMatching(moving, fixed, numberOfHistogramLevels=1024, numberOfMatchPoints=7)
 fixed = sitk.GetArrayFromImage(fixed)
 moving = sitk.GetArrayFromImage(moving)
 mask = sitk.GetArrayFromImage(mask)
@@ -49,13 +45,14 @@ mask_ = mask_[None, None, :].float().to(device)
 # mask_ = torch.ones_like(fixed_).float().to(device)
 
 model = TrainableVarRegBlock(patch_shape=patch_shape,
-                             iterations=(800, 800, 800, 800),
+                             iterations=(800,) * 4,
                              demon_forces='symmetric',
-                             tau=(2.0, 2.0, 2.0, 2.0),
-                             regularization_sigma=((2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (2.0, 2.0, 2.0), (2.0, 2.0, 2.0)),
-                             scale_factors=(0.125, 0.25, 0.5, 1.0),
+                             tau=(2.0,) * 4,
+                             regularization_sigma=((2.0, 2.0, 2.0),) * 4,
+                             scale_factors=(1 / 4, 1 / 2, 1 / 1),
                              disable_correction=True,
-                             early_stopping_delta=(1e-3, 1e-3, 1e-5, 1e-5),
+                             early_stopping_fn=('no_impr', 'none', 'none', 'lstsq'),
+                             early_stopping_delta=(10, 10, 10, 1e-5),
                              early_stopping_window=(10, 10, 10, 20)).to(device)
 # start = time.time()
 _, warped, _, vf, metrics = model.forward(fixed_, mask_, moving_, original_image_spacing)
@@ -83,6 +80,9 @@ moving = sitk.GetImageFromArray(moving)
 moving.CopyInformation(orig_ref)
 fixed = sitk.GetImageFromArray(fixed)
 fixed.CopyInformation(orig_ref)
+mask = sitk.GetImageFromArray(mask)
+mask.CopyInformation(orig_ref)
+sitk.WriteImage(mask, os.path.join(out_path, 'mask.mha'))
 sitk.WriteImage(moving, os.path.join(out_path, 'moving.mha'))
 sitk.WriteImage(fixed, os.path.join(out_path, 'fixed.mha'))
 
@@ -95,6 +95,8 @@ vector_field_scaled = sitk.Compose(
     [sitk.VectorIndexSelectionCast(vector_field, i) * sp for i, sp in enumerate(orig_ref.GetSpacing())])
 vector_field_scaled = sitk.Cast(vector_field_scaled, sitk.sitkVectorFloat64)
 vector_field_scaled.CopyInformation(orig_ref)
+sigma_jac = sitk.DisplacementFieldJacobianDeterminant(vector_field_scaled, True)
+sigma_jac = sitk.GetArrayFromImage(sigma_jac)[sitk.GetArrayFromImage(mask) == 1]
 
 warper.SetOutputParameteresFromImage(moving)
 sitk_warped_moving_scaled = warper.Execute(moving, vector_field_scaled)
@@ -103,13 +105,15 @@ sitk.WriteImage(vector_field_scaled, os.path.join(out_path, 'sitk_vf.mha'))
 vf_transformed = sitk.DisplacementFieldTransform(vector_field_scaled)
 
 delta_LM = landmark_distance(fixed_LM_world, moving_LM_world)
-TRE = target_registration_errors(vf_transformed, fixed_LM_world, moving_LM_world)
+TRE = target_registration_errors_snapped(vf_transformed, fixed_LM_world, moving_LM_world, orig_ref, world=False)
 print(
     f'Mean (std) TRE for DIRlab case {dirlab_case} is {np.mean(TRE):.2f} ({np.std(TRE):.2f}) [before registration: {np.mean(delta_LM):.2f} ({np.std(delta_LM):.2f}) ]')
+print(
+    f'Mean (std) jacobian for DIRlab case {dirlab_case} is {np.std(sigma_jac):.2f}')
 #
 # plt.imshow(sitk.GetArrayFromImage(moving)[:,100,:], aspect='auto')
 # # plt.show()
-# plot_TRE_landmarks(vf_transformed,moving_LM, fixed_LM)
-# plt.show()
+plot_TRE_landmarks(vf_transformed, fixed_LM_world, moving_LM_world)
+plt.show()
 plt.plot([item for sublist in metrics for item in sublist])
 plt.show()

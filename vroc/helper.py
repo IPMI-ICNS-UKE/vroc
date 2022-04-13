@@ -21,15 +21,25 @@ def transform_landmarks_and_flip_z(point_list, reference_image):
             for p in point_list]
 
 
-def target_registration_errors(tx, point_list, reference_point_list):
+def target_registration_errors_snapped(tx, point_list, reference_point_list, reference_image, world=True):
     """
     Distances between points transformed by the given transformation and their
     location in another coordinate system. When the points are only used to evaluate
     registration accuracy (not used in the registration) this is the target registration
     error (TRE).
     """
-    return [np.linalg.norm(np.array(tx.TransformPoint(p)) - np.array(p_ref))
-            for p, p_ref in zip(point_list, reference_point_list)]
+    TRE = []
+    for p, p_ref in zip(point_list, reference_point_list):
+        t_p = np.array(tx.TransformPoint(p))
+        t_p_idx = np.round(reference_image.TransformPhysicalPointToContinuousIndex(t_p))
+        r_p = np.array(p_ref)
+        if world:
+            t_p = reference_image.TransformContinuousIndexToPhysicalPoint(t_p_idx)
+        else:
+            r_p = reference_image.TransformPhysicalPointToContinuousIndex(r_p)
+            t_p = t_p_idx
+        TRE.append(np.linalg.norm(t_p - r_p))
+    return TRE
 
 
 def landmark_distance(point_list, reference_point_list):

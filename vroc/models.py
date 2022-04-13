@@ -21,6 +21,7 @@ class TrainableVarRegBlock(nn.Module):
             regularization_sigma=(1.0, 1.0, 1.0),
             disable_correction: bool = False,
             scale_factors: Tuple[float, ...] = (0.5, 1.0),
+            early_stopping_fn: Tuple[str, ...] = ('no_impr', 'lstsq'),
             early_stopping_delta: Tuple[float, ...] = (0.0, 0.0),
             early_stopping_window: Tuple[int, ...] = (10, 10),
     ):
@@ -33,9 +34,11 @@ class TrainableVarRegBlock(nn.Module):
         self.scale_factors = scale_factors
         self.demon_forces = demon_forces
 
+        self.early_stopping_fn = early_stopping_fn
         self.early_stopping_delta = early_stopping_delta
         self.early_stopping_window = early_stopping_window
         self._metrics = []
+        self._counter = 0
 
         self._full_size_spatial_transformer = SpatialTransformer(shape=patch_shape)
 
@@ -52,7 +55,7 @@ class TrainableVarRegBlock(nn.Module):
         for i_level, sigma in enumerate(regularization_sigma):
             self.add_module(
                 name=f"regularization_layer_level_{i_level}",
-                module=GaussianSmoothing3d(sigma=sigma, sigma_cutoff=2),
+                module=GaussianSmoothing3d(sigma=sigma, sigma_cutoff=(2.0, 2.0, 2.0), same_size=True),
             )
 
         self._vector_field_updater = nn.Sequential(
@@ -147,6 +150,19 @@ class TrainableVarRegBlock(nn.Module):
             return True
         return False
 
+    def _check_early_stopping_increase_count(self, metrics: List[float], i_level):
+        # if len(metrics) < self.early_stopping_window[i_level] + 1:
+        #     return False
+
+        window = np.array(metrics)
+        if np.argmin(window) == (len(window) - 1):
+            self._counter = 0
+        else:
+            self._counter += 1
+        if self._counter == self.early_stopping_delta[i_level]:
+            return True
+        return False
+
     def _check_early_stopping_lstsq(self, metrics: List[float], i_level):
         if (
                 self.early_stopping_delta[i_level] == 0
@@ -221,6 +237,7 @@ class TrainableVarRegBlock(nn.Module):
                     zip(self.scale_factors, self.iterations)
             ):
                 metrics = []
+                self._counter = 0
 
                 (scaled_image, scaled_mask, scaled_moving) = self._perform_scaling(
                     image, mask, moving, scale_factor=scale_factor
@@ -238,7 +255,6 @@ class TrainableVarRegBlock(nn.Module):
                     f"spatial_transformer_level_{i_level}",
                 )
                 for i in range(iterations):
-                    s_t = time.time()
                     if (i % 100) == 0:
                         print(f'*** LEVEL {i_level + 1} *** ITERATION {i} ***')
 
@@ -248,14 +264,19 @@ class TrainableVarRegBlock(nn.Module):
 
                     metrics.append(float(F.mse_loss(scaled_image, warped_moving)))
 
-                    if i_level == (len(self.scale_factors) - 1):
+                    if self.early_stopping_fn[i_level] == 'lstsq':
                         if self._check_early_stopping_lstsq(metrics, i_level):
-                            # print(f'Early stopping at iter {i}')
                             break
-                    else:
+                    elif self.early_stopping_fn[i_level] == 'no_impr':
+                        if self._check_early_stopping_increase_count(metrics, i_level):
+                            break
+                    elif self.early_stopping_fn[i_level] == 'no_average_impr':
                         if self._check_early_stopping_average_improvement(metrics, i_level):
-                            # print(f'Early stopping at iter {i}')
                             break
+                    elif self.early_stopping_fn[i_level] == 'none':
+                        pass
+                    else:
+                        raise Exception(f'Early stopping method {self.early_stopping_fn[i_level]} is not implemented')
 
                     forces = self._demon_forces_layer(warped_moving, scaled_image, self.demon_forces,
                                                       original_image_spacing)
@@ -266,7 +287,6 @@ class TrainableVarRegBlock(nn.Module):
                         f"regularization_layer_level_{i_level}",
                     )
                     vector_field = _regularization_layer(vector_field)
-                    print(time.time() - s_t)
 
                 print(f'LEVEL {i_level + 1} stopped at ITERATION {i}: Metric: {metrics[-1]}')
                 metrics_all_level.append(metrics)
