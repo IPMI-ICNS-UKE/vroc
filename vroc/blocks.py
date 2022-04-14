@@ -1,9 +1,96 @@
 from abc import ABC
-from typing import Tuple
+from typing import Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class ConvBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        mid_channels: int = None,
+        dimensions: int = 2,
+    ):
+        super().__init__()
+
+        if dimensions == 2:
+            conv = nn.Conv2d
+            norm = nn.BatchNorm2d
+        elif dimensions == 3:
+            conv = nn.Conv3d
+            norm = nn.BatchNorm3d
+        else:
+            raise ValueError(f"Cannot handle {dimensions=}")
+
+        if not mid_channels:
+            mid_channels = out_channels
+        self.double_conv = nn.Sequential(
+            conv(in_channels, mid_channels, kernel_size=3, padding=1),
+            norm(mid_channels),
+            nn.ReLU(inplace=True),
+            conv(mid_channels, out_channels, kernel_size=3, padding=1),
+            norm(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+class DownBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        dimensions: int = 2,
+        pooling: Union[int, Tuple[int, ...]] = 2,
+    ):
+        super().__init__()
+
+        if dimensions == 2:
+            pool = nn.MaxPool2d
+        elif dimensions == 3:
+            pool = nn.MaxPool3d
+        else:
+            raise ValueError(f"Cannot handle {dimensions=}")
+
+        self.maxpool_conv = nn.Sequential(
+            pool(pooling), ConvBlock(in_channels, out_channels, dimensions=dimensions)
+        )
+
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+
+class UpBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+
+        # if bilinear, use the normal convolutions to reduce the number of channels
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+            self.conv = ConvBlock(in_channels, out_channels, in_channels // 2)
+        else:
+            self.up = nn.ConvTranspose2d(
+                in_channels, in_channels // 2, kernel_size=2, stride=2
+            )
+            self.conv = ConvBlock(in_channels, out_channels)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        # input is CHW
+        diff_y = x2.size()[2] - x1.size()[2]
+        diff_x = x2.size()[3] - x1.size()[3]
+
+        x1 = F.pad(
+            x1, [diff_x // 2, diff_x - diff_x // 2, diff_y // 2, diff_y - diff_y // 2]
+        )
+
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
 
 
 class BaseGaussianSmoothing(ABC, nn.Module):
