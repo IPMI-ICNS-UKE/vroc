@@ -7,23 +7,65 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy import stats
 
-from vroc.blocks import SpatialTransformer, DemonForces3d, GaussianSmoothing3d
+from vroc.blocks import (
+    SpatialTransformer,
+    DemonForces3d,
+    GaussianSmoothing3d,
+    DownBlock,
+    UpBlock,
+    ConvBlock,
+)
 from helper import rescale_range
+
+
+class UNet(nn.Module):
+    def __init__(self, n_channels: int = 1, n_classes: int = 1, bilinear: bool = True):
+        super(UNet, self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.bilinear = bilinear
+
+        factor = 2 if bilinear else 1
+
+        self.inc = ConvBlock(n_channels, 64)
+        self.down1 = DownBlock(64, 128)
+        self.down2 = DownBlock(128, 256)
+        self.down3 = DownBlock(256, 512)
+        self.down4 = DownBlock(512, 1024 // factor)
+
+        self.up1 = UpBlock(1024, 512 // factor, bilinear)
+        self.up2 = UpBlock(512, 256 // factor, bilinear)
+        self.up3 = UpBlock(256, 128 // factor, bilinear)
+        self.up4 = UpBlock(128, 64, bilinear)
+        self.out = nn.Conv2d(64, n_classes, kernel_size=1)
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+
+        return self.out(x)
 
 
 class TrainableVarRegBlock(nn.Module):
     def __init__(
-            self,
-            patch_shape,
-            iterations: Tuple[int, ...] = (100, 100),
-            tau: Tuple[float, ...] = (1.0, 1.0),
-            demon_forces='active',
-            regularization_sigma=(1.0, 1.0, 1.0),
-            disable_correction: bool = False,
-            scale_factors: Tuple[float, ...] = (0.5, 1.0),
-            early_stopping_fn: Tuple[str, ...] = ('no_impr', 'lstsq'),
-            early_stopping_delta: Tuple[float, ...] = (0.0, 0.0),
-            early_stopping_window: Tuple[int, ...] = (10, 10),
+        self,
+        patch_shape,
+        iterations: Tuple[int, ...] = (100, 100),
+        tau: Tuple[float, ...] = (1.0, 1.0),
+        demon_forces="active",
+        regularization_sigma=(1.0, 1.0, 1.0),
+        disable_correction: bool = False,
+        scale_factors: Tuple[float, ...] = (0.5, 1.0),
+        early_stopping_fn: Tuple[str, ...] = ("no_impr", "lstsq"),
+        early_stopping_delta: Tuple[float, ...] = (0.0, 0.0),
+        early_stopping_window: Tuple[int, ...] = (10, 10),
     ):
         super().__init__()
         self.patch_shape = patch_shape
@@ -55,7 +97,9 @@ class TrainableVarRegBlock(nn.Module):
         for i_level, sigma in enumerate(regularization_sigma):
             self.add_module(
                 name=f"regularization_layer_level_{i_level}",
-                module=GaussianSmoothing3d(sigma=sigma, sigma_cutoff=(2.0, 2.0, 2.0), same_size=True),
+                module=GaussianSmoothing3d(
+                    sigma=sigma, sigma_cutoff=(2.0, 2.0, 2.0), same_size=True
+                ),
             )
 
         self._vector_field_updater = nn.Sequential(
@@ -106,13 +150,13 @@ class TrainableVarRegBlock(nn.Module):
 
     def _check_early_stopping(self, metrics: List[float], i_level):
         if (
-                self.early_stopping_delta[i_level] == 0
-                or len(metrics) < self.early_stopping_window[i_level] + 1
+            self.early_stopping_delta[i_level] == 0
+            or len(metrics) < self.early_stopping_window[i_level] + 1
         ):
             return False
 
         rel_change = (metrics[-self.early_stopping_window[i_level]] - metrics[-1]) / (
-                metrics[-self.early_stopping_window[i_level]] + 1e-9
+            metrics[-self.early_stopping_window[i_level]] + 1e-9
         )
         # print(f'Rel. change: {rel_change}')
 
@@ -122,12 +166,12 @@ class TrainableVarRegBlock(nn.Module):
 
     def _check_early_stopping_average_improvement(self, metrics: List[float], i_level):
         if (
-                self.early_stopping_delta[i_level] == 0
-                or len(metrics) < self.early_stopping_window[i_level] + 1
+            self.early_stopping_delta[i_level] == 0
+            or len(metrics) < self.early_stopping_window[i_level] + 1
         ):
             return False
 
-        window = np.array(metrics[-self.early_stopping_window[i_level]:])
+        window = np.array(metrics[-self.early_stopping_window[i_level] :])
         window_rel_changes = 1 - window[1:] / window[:-1]
 
         if window_rel_changes.mean() < self.early_stopping_delta[i_level]:
@@ -137,12 +181,12 @@ class TrainableVarRegBlock(nn.Module):
 
     def _check_early_stopping_improvement(self, metrics: List[float], i_level):
         if (
-                self.early_stopping_delta[i_level] == 0
-                or len(metrics) < self.early_stopping_window[i_level] + 1
+            self.early_stopping_delta[i_level] == 0
+            or len(metrics) < self.early_stopping_window[i_level] + 1
         ):
             return False
 
-        window = np.array(metrics[-self.early_stopping_window[i_level]:])
+        window = np.array(metrics[-self.early_stopping_window[i_level] :])
         window_rel_changes = 1 - window[1:] / window[:-1]
 
         if window_rel_changes.mean() < self.early_stopping_delta[i_level]:
@@ -165,22 +209,26 @@ class TrainableVarRegBlock(nn.Module):
 
     def _check_early_stopping_lstsq(self, metrics: List[float], i_level):
         if (
-                self.early_stopping_delta[i_level] == 0
-                or len(metrics) < self.early_stopping_window[i_level] + 1
+            self.early_stopping_delta[i_level] == 0
+            or len(metrics) < self.early_stopping_window[i_level] + 1
         ):
             return False
-        window = np.array(metrics[-self.early_stopping_window[i_level]:])
-        scaled_window = rescale_range(window, (np.min(metrics), np.max(metrics)), (0, 1))
-        lstsq_result = stats.linregress(np.arange(self.early_stopping_window[i_level]), scaled_window)
+        window = np.array(metrics[-self.early_stopping_window[i_level] :])
+        scaled_window = rescale_range(
+            window, (np.min(metrics), np.max(metrics)), (0, 1)
+        )
+        lstsq_result = stats.linregress(
+            np.arange(self.early_stopping_window[i_level]), scaled_window
+        )
         if lstsq_result.slope > -self.early_stopping_delta[i_level]:
             return True
         return False
 
     def _perform_scaling(self, image, mask, moving, scale_factor: float = 1.0):
         if len(image.shape) == 4:
-            mode = 'bilinear'
+            mode = "bilinear"
         elif len(image.shape) == 5:
-            mode = 'trilinear'
+            mode = "trilinear"
         image = F.interpolate(
             image, scale_factor=scale_factor, mode=mode, align_corners=False
         )
@@ -196,9 +244,9 @@ class TrainableVarRegBlock(nn.Module):
 
     def _match_vector_field(self, vector_field, image):
         if len(image.shape) == 4:
-            mode = 'bilinear'
+            mode = "bilinear"
         elif len(image.shape) == 5:
-            mode = 'trilinear'
+            mode = "trilinear"
         if vector_field.shape[2:] == image.shape[2:]:
             return vector_field
 
@@ -234,7 +282,7 @@ class TrainableVarRegBlock(nn.Module):
         with torch.no_grad():
 
             for i_level, (scale_factor, iterations) in enumerate(
-                    zip(self.scale_factors, self.iterations)
+                zip(self.scale_factors, self.iterations)
             ):
                 metrics = []
                 self._counter = 0
@@ -256,30 +304,36 @@ class TrainableVarRegBlock(nn.Module):
                 )
                 for i in range(iterations):
                     if (i % 100) == 0:
-                        print(f'*** LEVEL {i_level + 1} *** ITERATION {i} ***')
+                        print(f"*** LEVEL {i_level + 1} *** ITERATION {i} ***")
 
-                    warped_moving = spatial_transformer(
-                        scaled_moving, vector_field
-                    )
+                    warped_moving = spatial_transformer(scaled_moving, vector_field)
 
                     metrics.append(float(F.mse_loss(scaled_image, warped_moving)))
 
-                    if self.early_stopping_fn[i_level] == 'lstsq':
+                    if self.early_stopping_fn[i_level] == "lstsq":
                         if self._check_early_stopping_lstsq(metrics, i_level):
                             break
-                    elif self.early_stopping_fn[i_level] == 'no_impr':
+                    elif self.early_stopping_fn[i_level] == "no_impr":
                         if self._check_early_stopping_increase_count(metrics, i_level):
                             break
-                    elif self.early_stopping_fn[i_level] == 'no_average_impr':
-                        if self._check_early_stopping_average_improvement(metrics, i_level):
+                    elif self.early_stopping_fn[i_level] == "no_average_impr":
+                        if self._check_early_stopping_average_improvement(
+                            metrics, i_level
+                        ):
                             break
-                    elif self.early_stopping_fn[i_level] == 'none':
+                    elif self.early_stopping_fn[i_level] == "none":
                         pass
                     else:
-                        raise Exception(f'Early stopping method {self.early_stopping_fn[i_level]} is not implemented')
+                        raise Exception(
+                            f"Early stopping method {self.early_stopping_fn[i_level]} is not implemented"
+                        )
 
-                    forces = self._demon_forces_layer(warped_moving, scaled_image, self.demon_forces,
-                                                      original_image_spacing)
+                    forces = self._demon_forces_layer(
+                        warped_moving,
+                        scaled_image,
+                        self.demon_forces,
+                        original_image_spacing,
+                    )
                     # mask forces with artifact mask (artifact = 0, valid = 1)
 
                     vector_field += self.tau[i_level] * (forces * scaled_mask)
@@ -288,7 +342,9 @@ class TrainableVarRegBlock(nn.Module):
                     )
                     vector_field = _regularization_layer(vector_field)
 
-                print(f'LEVEL {i_level + 1} stopped at ITERATION {i}: Metric: {metrics[-1]}')
+                print(
+                    f"LEVEL {i_level + 1} stopped at ITERATION {i}: Metric: {metrics[-1]}"
+                )
                 metrics_all_level.append(metrics)
 
         if self.disable_correction:
@@ -326,7 +382,7 @@ class TrainableVarRegBlock(nn.Module):
             warped_moving,
             corrected_vector_field,
             vector_field,
-            metrics_all_level
+            metrics_all_level,
         )
 
     def forward(self, image, mask, moving, original_image_spacing):
@@ -335,7 +391,7 @@ class TrainableVarRegBlock(nn.Module):
             warped_moving,
             corrected_vector_field,
             vector_field,
-            metrics_all_level
+            metrics_all_level,
         ) = self.warp_moving(image, mask, moving, original_image_spacing)
 
         return (
@@ -343,5 +399,5 @@ class TrainableVarRegBlock(nn.Module):
             warped_moving,
             corrected_vector_field,
             vector_field,
-            metrics_all_level
+            metrics_all_level,
         )
