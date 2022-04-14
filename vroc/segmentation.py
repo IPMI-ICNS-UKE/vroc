@@ -43,9 +43,9 @@ class Segmenter2D(ABC):
     def _prepare_axes(self, image: np.ndarray, inverse: bool = False):
         if inverse:
             image = np.swapaxes(image, 0, self.iter_axis)
-            image = np.flip(image, axis=1)
+            # image = np.flip(image, axis=1)
         else:
-            image = np.flip(image, axis=1)
+            # image = np.flip(image, axis=1)
             image = np.swapaxes(image, self.iter_axis, 0)
         return image
 

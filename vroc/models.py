@@ -15,7 +15,7 @@ from vroc.blocks import (
     UpBlock,
     ConvBlock,
 )
-from helper import rescale_range
+from vroc.helper import rescale_range
 
 
 class UNet(nn.Module):

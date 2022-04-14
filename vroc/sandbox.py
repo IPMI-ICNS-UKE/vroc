@@ -15,7 +15,7 @@ matplotlib.use('module://backend_interagg')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-dirlab_case = 1
+dirlab_case = 8
 n_level = 4
 
 data_path = f'/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack'
