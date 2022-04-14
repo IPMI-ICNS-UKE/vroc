@@ -20,6 +20,7 @@ Varreg on Crack(only GPU boost, no DL-based hyperparameter optimization -> Param
 ITK Variational Registration (Parameter as defined in PMB paper of RW):
 
 Call: 
+
 ```
 VariationalRegistration -F fixed.mha -M moving.mha -S mask.mha -i 800 -l 4 -t 2 -u 0 -r 0 -v 4 -d 2 -g 0.00005 -h 1 
 ```

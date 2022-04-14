@@ -24,6 +24,7 @@ class TrainableVarRegBlock(nn.Module):
             early_stopping_fn: Tuple[str, ...] = ('no_impr', 'lstsq'),
             early_stopping_delta: Tuple[float, ...] = (0.0, 0.0),
             early_stopping_window: Tuple[int, ...] = (10, 10),
+            radius: Tuple[int, ...] = None
     ):
         super().__init__()
         self.patch_shape = patch_shape
@@ -55,7 +56,7 @@ class TrainableVarRegBlock(nn.Module):
         for i_level, sigma in enumerate(regularization_sigma):
             self.add_module(
                 name=f"regularization_layer_level_{i_level}",
-                module=GaussianSmoothing3d(sigma=sigma, sigma_cutoff=(2.0, 2.0, 2.0), same_size=True),
+                module=GaussianSmoothing3d(sigma=sigma, sigma_cutoff=(3.0, 3.0, 3.0), same_size=True, radius=radius[i_level]),
             )
 
         self._vector_field_updater = nn.Sequential(
@@ -262,7 +263,7 @@ class TrainableVarRegBlock(nn.Module):
                         scaled_moving, vector_field
                     )
 
-                    metrics.append(float(F.mse_loss(scaled_image, warped_moving)))
+                    metrics.append(float(F.mse_loss(scaled_image[scaled_mask == 1], warped_moving[scaled_mask == 1])))
 
                     if self.early_stopping_fn[i_level] == 'lstsq':
                         if self._check_early_stopping_lstsq(metrics, i_level):
@@ -288,7 +289,7 @@ class TrainableVarRegBlock(nn.Module):
                     )
                     vector_field = _regularization_layer(vector_field)
 
-                print(f'LEVEL {i_level + 1} stopped at ITERATION {i}: Metric: {metrics[-1]}')
+                print(f'LEVEL {i_level + 1} stopped at ITERATION {i + 1}: Metric: {metrics[-1]}')
                 metrics_all_level.append(metrics)
 
         if self.disable_correction:

@@ -37,22 +37,24 @@ class BaseGaussianSmoothing(ABC, nn.Module):
         sigma: Tuple[float, ...],
         sigma_cutoff: Tuple[float, ...],
         same_size: bool = False,
+        radius: int = None
     ):
         if len(sigma) != len(sigma_cutoff):
             raise ValueError("sigma and sigma_cutoff has to be same length")
 
         n_dim = len(sigma)
 
-        max_kernel_radius = max(
-            BaseGaussianSmoothing.get_kernel_radius(s, c)
-            for s, c in zip(sigma, sigma_cutoff)
-        )
+        if not radius:
+            radius = max(
+                BaseGaussianSmoothing.get_kernel_radius(s, c)
+                for s, c in zip(sigma, sigma_cutoff)
+            )
 
         kernels = []
         for i in range(n_dim):
             if same_size:
                 kernel_1d = BaseGaussianSmoothing._make_gaussian_kernel_1d(
-                    sigma=sigma[i], radius=max_kernel_radius
+                    sigma=sigma[i], radius=radius
                 )
             else:
                 kernel_1d = BaseGaussianSmoothing._make_gaussian_kernel_1d(
@@ -74,6 +76,7 @@ class GaussianSmoothing2d(BaseGaussianSmoothing):
         sigma: Tuple[float, float] = (1.0, 1.0),
         sigma_cutoff: Tuple[float, float] = (1.0, 1.0),
         same_size: bool = False,
+        radius: int = None
     ):
         super().__init__()
 
@@ -85,7 +88,7 @@ class GaussianSmoothing2d(BaseGaussianSmoothing):
         self.same_size = same_size
 
         kernel_x, kernel_y = GaussianSmoothing2d.make_gaussian_kernel(
-            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff, same_size=same_size
+            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff, same_size=same_size, radius=radius
         )
         self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1])
 
@@ -118,6 +121,7 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
         sigma: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         sigma_cutoff: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         same_size: bool = False,
+        radius: int = None,
     ):
         super().__init__()
 
@@ -129,7 +133,7 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
         self.same_size = same_size
 
         kernel_x, kernel_y, kernel_z = GaussianSmoothing3d.make_gaussian_kernel(
-            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff, same_size=same_size
+            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff, same_size=same_size, radius=radius
         )
         self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1], kernel_z.shape[-1])
 

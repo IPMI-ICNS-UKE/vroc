@@ -8,14 +8,15 @@ import torch
 import numpy as np
 
 from vroc.models import TrainableVarRegBlock
-from vroc.helper import read_landmarks, transform_landmarks_and_flip_z, target_registration_errors_snapped, load_and_preprocess, \
-    landmark_distance, plot_TRE_landmarks
+from vroc.helper import read_landmarks, transform_landmarks_and_flip_z, target_registration_errors_snapped, \
+    load_and_preprocess, landmark_distance, plot_TRE_landmarks, target_registration_errors
 
 matplotlib.use('module://backend_interagg')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-dirlab_case = 8
+dirlab_case = 1
+n_level = 4
 
 data_path = f'/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack'
 out_path = '/home/tsentker/Documents/results/varreg-on-crack/'
@@ -25,7 +26,7 @@ orig_ref = fixed
 original_image_spacing = fixed.GetSpacing()
 moving = load_and_preprocess(os.path.join(data_path, 'Images', 'phase_5.mha'))
 mask = sitk.ReadImage(os.path.join(data_path, 'segmentation', f'mask_0.mha'))
-# TODO: Influence of mask dilation on TRE
+# TODO: Influence of mask dilation on TRE -> Further, use ebolagnul for mask prediction
 dilate_filter = sitk.BinaryDilateImageFilter()
 dilate_filter.SetForegroundValue(1)
 dilate_filter.SetKernelRadius((1, 1, 1))
@@ -45,11 +46,12 @@ mask_ = mask_[None, None, :].float().to(device)
 # mask_ = torch.ones_like(fixed_).float().to(device)
 
 model = TrainableVarRegBlock(patch_shape=patch_shape,
-                             iterations=(800,) * 4,
+                             iterations=(800,) * n_level,
                              demon_forces='symmetric',
-                             tau=(2.0,) * 4,
-                             regularization_sigma=((2.0, 2.0, 2.0),) * 4,
-                             scale_factors=(1 / 4, 1 / 2, 1 / 1),
+                             tau=(2.0,) * n_level,
+                             regularization_sigma=((2.0, 2.0, 2.0),) * n_level,
+                             radius=(4, 4, 4, 4),
+                             scale_factors=(1 / 8, 1 / 4, 1 / 2, 1 / 1),
                              disable_correction=True,
                              early_stopping_fn=('no_impr', 'none', 'none', 'lstsq'),
                              early_stopping_delta=(10, 10, 10, 1e-5),
@@ -105,15 +107,22 @@ sitk.WriteImage(vector_field_scaled, os.path.join(out_path, 'sitk_vf.mha'))
 vf_transformed = sitk.DisplacementFieldTransform(vector_field_scaled)
 
 delta_LM = landmark_distance(fixed_LM_world, moving_LM_world)
-TRE = target_registration_errors_snapped(vf_transformed, fixed_LM_world, moving_LM_world, orig_ref, world=False)
+TRE_world = target_registration_errors_snapped(vf_transformed, fixed_LM_world, moving_LM_world, orig_ref, world=True)
+TRE_voxel = target_registration_errors_snapped(vf_transformed, fixed_LM_world, moving_LM_world, orig_ref, world=False)
+TRE_world_no_snap = target_registration_errors(vf_transformed, fixed_LM_world, moving_LM_world)
+
+# print(
+#     f'Mean (std) world TRE for DIRlab case {dirlab_case} is {np.mean(TRE_world):.2f} ({np.std(TRE_world):.2f}) [mean voxel TRE: {np.mean(TRE_voxel):.2f} ({np.std(TRE_voxel):.2f}); mean world TRE no snap: {np.mean(TRE_world_no_snap):.2f} ({np.std(TRE_world_no_snap):.2f})]')
+# print(
+#     f'Mean (std) jacobian for DIRlab case {dirlab_case} is {np.std(sigma_jac):.2f}')
+
+print('| Case |  voxel TRE  | world TRE[mm] | no snap world TRE[mm] | sigma jacobian |')
 print(
-    f'Mean (std) TRE for DIRlab case {dirlab_case} is {np.mean(TRE):.2f} ({np.std(TRE):.2f}) [before registration: {np.mean(delta_LM):.2f} ({np.std(delta_LM):.2f}) ]')
-print(
-    f'Mean (std) jacobian for DIRlab case {dirlab_case} is {np.std(sigma_jac):.2f}')
+    f'|  {dirlab_case:02d}  | {np.mean(TRE_voxel):.2f} ({np.std(TRE_voxel):.2f}) |  {np.mean(TRE_world):.2f} ({np.std(TRE_world):.2f})  |      {np.mean(TRE_world_no_snap):.2f} ({np.std(TRE_world_no_snap):.2f})      |      {np.std(sigma_jac):.2f}      |')
 #
 # plt.imshow(sitk.GetArrayFromImage(moving)[:,100,:], aspect='auto')
 # # plt.show()
-plot_TRE_landmarks(vf_transformed, fixed_LM_world, moving_LM_world)
-plt.show()
+# plot_TRE_landmarks(vf_transformed, fixed_LM_world, moving_LM_world)
+# plt.show()
 plt.plot([item for sublist in metrics for item in sublist])
 plt.show()
