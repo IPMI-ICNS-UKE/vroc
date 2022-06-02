@@ -52,7 +52,6 @@ if __name__ == "__main__":
         output_filepath = image_filepath.parent / f"phase_{phase}.mha"
         sitk.WriteImage(image, str(output_filepath))
 
-
     # for f in sorted(DIRLAB_FOLDER_OLD.glob("**/**/*Lungs.mhd")):
     #     case = int(re.search("Case(\d\d)", str(f)).group(1))
     #     phase = int(re.search("T(\d\d)", str(f)).group(1)) // 10
@@ -67,4 +66,3 @@ if __name__ == "__main__":
     #     sitk.WriteImage(segm_img, str(output_filepath))
     #     print(f, output_filepath)
     #     # break
-
