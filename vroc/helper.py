@@ -1,13 +1,9 @@
-from typing import Tuple
-
 import SimpleITK as sitk
 import numpy as np
-import matplotlib
-
-matplotlib.use('WebAgg')
+import torch
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 from math import ceil
+from typing import Tuple
 
 
 def read_landmarks(filepath):
@@ -56,8 +52,10 @@ def target_registration_errors(tx, point_list, reference_point_list):
     registration accuracy (not used in the registration) this is the target registration
     error (TRE).
     """
-    return [np.linalg.norm(np.array(tx.TransformPoint(p)) - np.array(p_ref))
-            for p, p_ref in zip(point_list, reference_point_list)]
+    return [
+        np.linalg.norm(np.array(tx.TransformPoint(p)) - np.array(p_ref))
+        for p, p_ref in zip(point_list, reference_point_list)
+    ]
 
 
 def landmark_distance(point_list, reference_point_list):
@@ -107,9 +105,36 @@ def rescale_range(
     return rescaled
 
 
+def torch_prepare(img):
+    img = torch.from_numpy(img.copy())
+    img = img[None, None, :].float()
+    return img
+
+
 def batch_array(array: np.ndarray, batch_size: int = 32):
     n_total = array.shape[0]
     n_batches = ceil(n_total / batch_size)
 
     for i_batch in range(n_batches):
         yield array[i_batch * batch_size : (i_batch + 1) * batch_size]
+
+
+def detach_and_squeeze(img, is_vf=False):
+    img = img.cpu().detach().numpy()
+    img = np.squeeze(img)
+    if is_vf:
+        img = np.rollaxis(img, 0, img.ndim)
+        img = img[..., ::-1]
+        img = sitk.GetImageFromArray(img, isVector=True)
+        img = sitk.Cast(img, sitk.sitkVectorFloat64)
+    else:
+        img = sitk.GetImageFromArray(img)
+    return img
+
+
+def scale_vf(vf, spacing):
+    vf = sitk.Compose(
+        [sitk.VectorIndexSelectionCast(vf, i) * sp for i, sp in enumerate(spacing)]
+    )
+    vf = sitk.Cast(vf, sitk.sitkVectorFloat64)
+    return vf

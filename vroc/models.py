@@ -55,25 +55,29 @@ class UNet(nn.Module):
 
 class TrainableVarRegBlock(nn.Module):
     def __init__(
-            self,
-            patch_shape,
-            iterations: Tuple[int, ...] = (100, 100),
-            tau: Tuple[float, ...] = (1.0, 1.0),
-            demon_forces='active',
-            regularization_sigma=(1.0, 1.0, 1.0),
-            disable_correction: bool = False,
-            scale_factors: Tuple[float, ...] = (0.5, 1.0),
-            early_stopping_fn: Tuple[str, ...] = ('no_impr', 'lstsq'),
-            early_stopping_delta: Tuple[float, ...] = (0.0, 0.0),
-            early_stopping_window: Tuple[int, ...] = (10, 10),
-            radius: Tuple[int, ...] = None
+        self,
+        patch_shape,
+        iterations: Tuple[int, ...] = (100, 100),
+        tau: Tuple[float, ...] = (1.0, 1.0),
+        demon_forces="active",
+        regularization_sigma=(1.0, 1.0, 1.0),
+        original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
+        disable_correction: bool = False,
+        use_image_spacing: bool = False,
+        scale_factors: Tuple[float, ...] = (0.5, 1.0),
+        early_stopping_fn: Tuple[str, ...] = ("no_impr", "lstsq"),
+        early_stopping_delta: Tuple[float, ...] = (0.0, 0.0),
+        early_stopping_window: Tuple[int, ...] = (10, 10),
+        radius: Tuple[int, ...] = None,
     ):
         super().__init__()
         self.patch_shape = patch_shape
         self.iterations = iterations
         self.tau = tau
         self.regularization_sigma = regularization_sigma
+        self.original_image_spacing = original_image_spacing
         self.disable_correction = disable_correction
+        self.use_image_spacing = use_image_spacing
         self.scale_factors = scale_factors
         self.demon_forces = demon_forces
 
@@ -96,10 +100,29 @@ class TrainableVarRegBlock(nn.Module):
         self._demon_forces_layer = DemonForces3d()
 
         for i_level, sigma in enumerate(regularization_sigma):
-            self.add_module(
-                name=f"regularization_layer_level_{i_level}",
-                module=GaussianSmoothing3d(sigma=sigma, sigma_cutoff=(3.0, 3.0, 3.0), same_size=True, radius=radius[i_level]),
-            )
+            if radius:
+                self.add_module(
+                    name=f"regularization_layer_level_{i_level}",
+                    module=GaussianSmoothing3d(
+                        sigma=sigma,
+                        sigma_cutoff=(3.0, 3.0, 3.0),
+                        same_size=True,
+                        radius=radius[i_level],
+                        spacing=self.original_image_spacing,
+                        use_image_spacing=self.use_image_spacing,
+                    ),
+                )
+            else:
+                self.add_module(
+                    name=f"regularization_layer_level_{i_level}",
+                    module=GaussianSmoothing3d(
+                        sigma=sigma,
+                        sigma_cutoff=(3.0, 3.0, 3.0),
+                        same_size=True,
+                        spacing=self.original_image_spacing,
+                        use_image_spacing=self.use_image_spacing,
+                    ),
+                )
 
         self._vector_field_updater = nn.Sequential(
             nn.Conv3d(
@@ -268,6 +291,22 @@ class TrainableVarRegBlock(nn.Module):
 
         return vector_field * scale_factor
 
+    def generate_feature_vector(self, image, mask, moving, bins=20):
+        L2_image = F.mse_loss(image, moving, reduction="none")
+        lower_quantile = torch.quantile(
+            L2_image[mask == 1], 0.05, interpolation="linear"
+        ).detach()
+        upper_quantile = torch.quantile(
+            L2_image[mask == 1], 0.95, interpolation="linear"
+        ).detach()
+        image_hist = torch.histc(image[mask == 1], bins=bins)
+        moving_hist = torch.histc(moving[mask == 1], bins=bins)
+        diff_hist = torch.histc(
+            L2_image[mask == 1], bins=bins, min=lower_quantile, max=upper_quantile
+        )
+
+        return torch.cat((image_hist, moving_hist, diff_hist), 0)
+
     def warp_moving(self, image, mask, moving, original_image_spacing):
         # register moving image onto fixed image
         if len(image.shape) == 4:
@@ -275,7 +314,7 @@ class TrainableVarRegBlock(nn.Module):
         elif len(image.shape) == 5:
             dim_vf = 3
         full_size_moving = moving
-
+        features = []
         metrics_all_level = []
         vector_field = None
         with torch.no_grad():
@@ -301,13 +340,26 @@ class TrainableVarRegBlock(nn.Module):
                 spatial_transformer = self.get_submodule(
                     f"spatial_transformer_level_{i_level}",
                 )
+
+                warped_moving = spatial_transformer(scaled_moving, vector_field)
+                feature_vector = self.generate_feature_vector(
+                    scaled_image, scaled_mask, warped_moving, bins=20
+                )
+
                 for i in range(iterations):
-                    if (i % 100) == 0:
-                        print(f"*** LEVEL {i_level + 1} *** ITERATION {i} ***")
+                    # if (i % 100) == 0:
+                    #     print(f"*** LEVEL {i_level + 1} *** ITERATION {i} ***")
 
                     warped_moving = spatial_transformer(scaled_moving, vector_field)
 
-                    metrics.append(float(F.mse_loss(scaled_image[scaled_mask == 1], warped_moving[scaled_mask == 1])))
+                    metrics.append(
+                        float(
+                            F.mse_loss(
+                                scaled_image[scaled_mask == 1],
+                                warped_moving[scaled_mask == 1],
+                            )
+                        )
+                    )
 
                     if self.early_stopping_fn[i_level] == "lstsq":
                         if self._check_early_stopping_lstsq(metrics, i_level):
@@ -341,8 +393,11 @@ class TrainableVarRegBlock(nn.Module):
                     )
                     vector_field = _regularization_layer(vector_field)
 
-                print(f'LEVEL {i_level + 1} stopped at ITERATION {i + 1}: Metric: {metrics[-1]}')
+                loss = -(metrics[0] - metrics[-1]) / metrics[0]
+
+                # print(f'LEVEL {i_level + 1} stopped at ITERATION {i + 1}: Metric: {metrics[-1]}')
                 metrics_all_level.append(metrics)
+                features.append(feature_vector)
 
         if self.disable_correction:
             corrected_vector_field = vector_field
@@ -380,6 +435,7 @@ class TrainableVarRegBlock(nn.Module):
             corrected_vector_field,
             vector_field,
             metrics_all_level,
+            features,
         )
 
     def forward(self, image, mask, moving, original_image_spacing):
@@ -389,6 +445,7 @@ class TrainableVarRegBlock(nn.Module):
             corrected_vector_field,
             vector_field,
             metrics_all_level,
+            features,
         ) = self.warp_moving(image, mask, moving, original_image_spacing)
 
         return (
@@ -397,4 +454,5 @@ class TrainableVarRegBlock(nn.Module):
             corrected_vector_field,
             vector_field,
             metrics_all_level,
+            features,
         )

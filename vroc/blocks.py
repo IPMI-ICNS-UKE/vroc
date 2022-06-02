@@ -124,7 +124,7 @@ class BaseGaussianSmoothing(ABC, nn.Module):
         sigma: Tuple[float, ...],
         sigma_cutoff: Tuple[float, ...],
         same_size: bool = False,
-        radius: int = None
+        radius: int = None,
     ):
         if len(sigma) != len(sigma_cutoff):
             raise ValueError("sigma and sigma_cutoff has to be same length")
@@ -163,7 +163,7 @@ class GaussianSmoothing2d(BaseGaussianSmoothing):
         sigma: Tuple[float, float] = (1.0, 1.0),
         sigma_cutoff: Tuple[float, float] = (1.0, 1.0),
         same_size: bool = False,
-        radius: int = None
+        radius: int = None,
     ):
         super().__init__()
 
@@ -175,7 +175,10 @@ class GaussianSmoothing2d(BaseGaussianSmoothing):
         self.same_size = same_size
 
         kernel_x, kernel_y = GaussianSmoothing2d.make_gaussian_kernel(
-            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff, same_size=same_size, radius=radius
+            sigma=self.sigma,
+            sigma_cutoff=self.sigma_cutoff,
+            same_size=same_size,
+            radius=radius,
         )
         self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1])
 
@@ -209,6 +212,8 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
         sigma_cutoff: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         same_size: bool = False,
         radius: int = None,
+        spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
+        use_image_spacing: bool = False,
     ):
         super().__init__()
 
@@ -218,9 +223,18 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
         self.sigma = sigma
         self.sigma_cutoff = sigma_cutoff
         self.same_size = same_size
+        self.use_image_spacing = use_image_spacing
+        self.spacing = spacing
 
+        if self.use_image_spacing:
+            self.sigma = tuple(
+                elem_1 * elem_2 for elem_1, elem_2 in zip(self.sigma, self.spacing)
+            )
         kernel_x, kernel_y, kernel_z = GaussianSmoothing3d.make_gaussian_kernel(
-            sigma=self.sigma, sigma_cutoff=self.sigma_cutoff, same_size=same_size, radius=radius
+            sigma=self.sigma,
+            sigma_cutoff=self.sigma_cutoff,
+            same_size=same_size,
+            radius=radius,
         )
         self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1], kernel_z.shape[-1])
 
