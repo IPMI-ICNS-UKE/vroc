@@ -1,5 +1,7 @@
 import matplotlib
 import torch
+import os
+from glob import glob
 from torch.utils.data import DataLoader
 
 from vroc.models import TrainableVarRegBlock
@@ -12,14 +14,25 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dirlab_case = 1
 n_level = 2
 
-train_list = [
-    {
-        "fixed": f"/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack/Images/phase_0.mha",
-        "mask": f"/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack/segmentation/mask_0.mha",
-        "moving": f"/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack/Images/phase_5.mha",
-    }
-]
 
+def generate_train_list(root_dir, image_folder, mask_folder):
+    image_path = os.path.join(root_dir, image_folder)
+    mask_path = os.path.join(root_dir, mask_folder)
+    flist = os.listdir(image_path)
+    train_list = []
+    for i in range(len(flist) // 2):
+        fixed = os.path.join(image_path, f"NLST_{i:04d}_0000.nii.gz")
+        moving = os.path.join(image_path, f"NLST_{i:04d}_0001.nii.gz")
+        mask = os.path.join(mask_path, f"NLST_{i:04d}_0000.nii.gz")
+        train_list.append({"fixed": fixed, "moving": moving, "mask": mask})
+    return train_list
+
+
+train_list = generate_train_list(
+    root_dir="/home/tsentker/Documents/projects/learn2reg/NLST",
+    image_folder="imagesTr",
+    mask_folder="masksTr",
+)
 train_dataset = VrocDataset(dir_list=train_list)
 
 dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=0)
