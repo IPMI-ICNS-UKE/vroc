@@ -13,17 +13,12 @@ class ConvBlock(nn.Module):
         out_channels: int,
         mid_channels: int = None,
         dimensions: int = 2,
+        norm_type: str = 'BatchNorm'
     ):
         super().__init__()
 
-        if dimensions == 2:
-            conv = nn.Conv2d
-            norm = nn.BatchNorm2d
-        elif dimensions == 3:
-            conv = nn.Conv3d
-            norm = nn.BatchNorm3d
-        else:
-            raise ValueError(f"Cannot handle {dimensions=}")
+        conv = getattr(nn, f'Conv{dimensions}d')
+        norm = getattr(nn, f'{norm_type}{dimensions}d')
 
         if not mid_channels:
             mid_channels = out_channels
@@ -47,10 +42,13 @@ class DownBlock(nn.Module):
         out_channels: int,
         dimensions: int = 2,
         pooling: Union[int, Tuple[int, ...]] = 2,
+        norm_type: str = 'BatchNorm'
     ):
         super().__init__()
 
-        if dimensions == 2:
+        if dimensions == 1:
+            pool = nn.MaxPool1d
+        elif dimensions == 2:
             pool = nn.MaxPool2d
         elif dimensions == 3:
             pool = nn.MaxPool3d
@@ -58,7 +56,7 @@ class DownBlock(nn.Module):
             raise ValueError(f"Cannot handle {dimensions=}")
 
         self.maxpool_conv = nn.Sequential(
-            pool(pooling), ConvBlock(in_channels, out_channels, dimensions=dimensions)
+            pool(pooling), ConvBlock(in_channels, out_channels, dimensions=dimensions, norm_type=norm_type)
         )
 
     def forward(self, x):

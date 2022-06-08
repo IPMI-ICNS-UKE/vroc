@@ -23,7 +23,7 @@ def transform_landmarks_and_flip_z(point_list, reference_image):
 
 
 def target_registration_errors_snapped(
-    tx, point_list, reference_point_list, reference_image, world=True
+        tx, point_list, reference_point_list, reference_image, world=True
 ):
     """
     Distances between points transformed by the given transformation and their
@@ -95,7 +95,7 @@ def plot_TRE_landmarks(tx, point_list, reference_point_list):
 
 
 def rescale_range(
-    values: np.ndarray, input_range: Tuple, output_range: Tuple, clip: bool = True
+        values: np.ndarray, input_range: Tuple, output_range: Tuple, clip: bool = True
 ):
     in_min, in_max = input_range
     out_min, out_max = output_range
@@ -116,7 +116,7 @@ def batch_array(array: np.ndarray, batch_size: int = 32):
     n_batches = ceil(n_total / batch_size)
 
     for i_batch in range(n_batches):
-        yield array[i_batch * batch_size : (i_batch + 1) * batch_size]
+        yield array[i_batch * batch_size: (i_batch + 1) * batch_size]
 
 
 def detach_and_squeeze(img, is_vf=False):
