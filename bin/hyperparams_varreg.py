@@ -92,7 +92,7 @@ def reg(params):
             # radius=(params['radius'],) * params['level'],
             scale_factors=scale_factors,
             disable_correction=True,
-            early_stopping_fn=early_stopping_fn,
+            early_stopping_method=early_stopping_fn,
             early_stopping_delta=early_stopping_delta,
             early_stopping_window=(20,) * params["level"],
         ).to(device)

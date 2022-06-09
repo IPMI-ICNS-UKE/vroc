@@ -59,7 +59,7 @@ model = TrainableVarRegBlock(
     # radius=(4, 4, 4, 4),
     scale_factors=(1 / 2, 1 / 1),
     disable_correction=True,
-    early_stopping_fn=("none", "lstsq"),
+    early_stopping_method=("none", "lstsq"),
     early_stopping_delta=(10, 1e-3),
     early_stopping_window=(10, 20),
 ).to(device)

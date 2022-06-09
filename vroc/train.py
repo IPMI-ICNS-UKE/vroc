@@ -13,7 +13,7 @@ from pathlib import Path
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 dirlab_case = 1
-n_level = 1
+n_levels = 3
 
 
 def generate_train_list(root_dir, image_folder, mask_folder):
@@ -44,14 +44,16 @@ train_dataset = VrocDataset(dir_list=train_list)
 
 dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=0)
 
+scale_factors = tuple(1/2**i_level for i_level in reversed(range(n_levels)))
+
 model = TrainableVarRegBlock(
-    iterations=(21,) * n_level,
+    iterations=(100,) * n_levels,
     demon_forces="symmetric",
-    tau=(6,) * n_level,
-    regularization_sigma=((3.0, 3.0, 3.0),) * n_level,
-    scale_factors=(0.5,), #(1 / 2, 1 / 1),
+    tau=(6,) * n_levels,
+    regularization_sigma=((3.0, 3.0, 3.0),) * n_levels,
+    scale_factors=scale_factors,
     disable_correction=True,
-    early_stopping_fn=("none", "none"),
+    early_stopping_method=None,
     # early_stopping_delta=(10, 1e-3),
     # early_stopping_window=N(10, 20),
 ).to(device)
@@ -62,10 +64,9 @@ for data in dataloader:
     mask = data["mask"][0].to(device)
     moving = data["moving"][0].to(device)
 
-    for i in range(100000):
-        print('go')
-        model.forward(
+    print('go')
+    with torch.no_grad():
+        warped_moving_image, vector_field, misc = model.forward(
             fixed, mask, moving, data["spacing"][0]
         )
-        pass
 

@@ -1,5 +1,5 @@
 import time
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 import numpy as np
 import torch
@@ -118,11 +118,10 @@ class TrainableVarRegBlock(nn.Module):
         disable_correction: bool = False,
         use_image_spacing: bool = False,
         scale_factors: Tuple[float, ...] = (0.5, 1.0),
-        early_stopping_fn: Tuple[str, ...] = ("no_impr", "lstsq"),
+        early_stopping_method: Optional[Tuple[str, ...]] = None,
         early_stopping_delta: Tuple[float, ...] = (0.0, 0.0),
         early_stopping_window: Tuple[int, ...] = (10, 10),
         radius: Tuple[int, ...] = None,
-        param_net_buffer_size: int = 1,
     ):
         super().__init__()
         self.iterations = iterations
@@ -134,24 +133,11 @@ class TrainableVarRegBlock(nn.Module):
         self.scale_factors = scale_factors
         self.demon_forces = demon_forces
 
-        self.early_stopping_fn = early_stopping_fn
+        self.early_stopping_fn = early_stopping_method
         self.early_stopping_delta = early_stopping_delta
         self.early_stopping_window = early_stopping_window
         self._metrics = []
         self._counter = 0
-
-        # stuff for param net
-        self._param_net_loss_buffer = []
-        self._param_net_buffer_size = param_net_buffer_size
-        self._param_net = ParamNet(
-            params={
-                "iterations": {"min": 0, "max": 1000, "dtype": int},
-                "tau": {"min": 0.0, "max": 10.0, "dtype": float},
-            },
-            n_channels=3,
-        )
-        self._param_net_optimizer = Adam(self._param_net.parameters())
-        self._param_net_optimizer.zero_grad()
 
         self._image_shape = None
         self._full_size_spatial_transformer = None
@@ -219,50 +205,6 @@ class TrainableVarRegBlock(nn.Module):
         ):
             return False
 
-    def _check_early_stopping(self, metrics: List[float], i_level):
-        if self._check_early_stopping_condition(metrics, i_level):
-            rel_change = (
-                metrics[-self.early_stopping_window[i_level]] - metrics[-1]
-            ) / (metrics[-self.early_stopping_window[i_level]] + 1e-9)
-
-            if rel_change < self.early_stopping_delta[i_level]:
-                return True
-        return False
-
-    def _check_early_stopping_average_improvement(self, metrics: List[float], i_level):
-        if self._check_early_stopping_condition(metrics, i_level):
-
-            window = np.array(metrics[-self.early_stopping_window[i_level] :])
-            window_rel_changes = 1 - window[1:] / window[:-1]
-
-            if window_rel_changes.mean() < self.early_stopping_delta[i_level]:
-                return True
-        return False
-
-    def _check_early_stopping_increase_count(self, metrics: List[float], i_level):
-        window = np.array(metrics)
-        if np.argmin(window) == (len(window) - 1):
-            self._counter = 0
-        else:
-            self._counter += 1
-        if self._counter == self.early_stopping_delta[i_level]:
-            return True
-        return False
-
-    def _check_early_stopping_lstsq(self, metrics: List[float], i_level):
-        if self._check_early_stopping_condition(metrics, i_level):
-
-            window = np.array(metrics[-self.early_stopping_window[i_level] :])
-            scaled_window = rescale_range(
-                window, (np.min(metrics), np.max(metrics)), (0, 1)
-            )
-            lstsq_result = stats.linregress(
-                np.arange(self.early_stopping_window[i_level]), scaled_window
-            )
-            if lstsq_result.slope > -self.early_stopping_delta[i_level]:
-                return True
-        return False
-
     def _perform_scaling(self, image, mask, moving, scale_factor: float = 1.0):
         if len(image.shape) == 3:
             mode = "linear"
@@ -275,7 +217,10 @@ class TrainableVarRegBlock(nn.Module):
         image = F.interpolate(
             image, scale_factor=scale_factor, mode=mode, align_corners=False
         )
+        # interpolation is not implemented for dtype bool
+        mask = torch.as_tensor(mask, dtype=torch.uint8)
         mask = F.interpolate(mask, scale_factor=scale_factor, mode="nearest")
+        mask = torch.as_tensor(mask, dtype=torch.bool)
         moving = F.interpolate(
             moving,
             scale_factor=scale_factor,
@@ -313,88 +258,86 @@ class TrainableVarRegBlock(nn.Module):
 
         return vector_field * scale_factor.to(vector_field)
 
-    def generate_param_net_features(self, fixed_image, mask, moving_image, bins=32):
-        # fixed_image = fixed_image.detach()
-        # mask = mask.detach()
-        # moving_image = moving_image.detach()
+    def _calculate_features(self, fixed_image, mask, moving_image, bins=32) -> dict:
+        mask = torch.as_tensor(mask, dtype=torch.bool)
+        l2_diff = F.mse_loss(fixed_image, moving_image, reduction="none")
 
-        valid_mask = mask == 1
-        l2_image = F.mse_loss(fixed_image, moving_image, reduction="none")
-        lower_quantile = torch.quantile(
-            l2_image[valid_mask], 0.05, interpolation="linear"
-        ).detach()
-        upper_quantile = torch.quantile(
-            l2_image[valid_mask], 0.95, interpolation="linear"
-        ).detach()
+        masked_fixed_image = fixed_image[mask]
+        masked_moving_image = moving_image[mask]
+        masked_l2_diff = l2_diff[mask]
 
-        fixed_image_hist = torch.histc(fixed_image[valid_mask], bins=bins)
-        moving_image_hist = torch.histc(moving_image[valid_mask], bins=bins)
-        diff_hist = torch.histc(
-            l2_image[valid_mask], bins=bins, min=lower_quantile, max=upper_quantile
+        def to_numpy(tensor: torch.Tensor) -> np.ndarray:
+            t = tensor.detach().cpu().numpy()
+            if t.ndim == 0:
+                t = float(t)
+
+            return t
+
+        def calculate_image_features(image) -> dict:
+            lower_percentile = torch.quantile(
+                masked_l2_diff, 0.05, interpolation="linear"
+            )
+            upper_percentile = torch.quantile(
+                masked_l2_diff, 0.95, interpolation="linear"
+            )
+            image_histogram = torch.histc(masked_moving_image, bins=bins)
+
+            return {
+                "histogram": to_numpy(image_histogram),
+                "normalized_histogram": to_numpy(
+                    image_histogram / image_histogram.sum()
+                ),
+                "percentile_5": to_numpy(lower_percentile),
+                "percentile_95": to_numpy(upper_percentile),
+                "min": to_numpy(image.min()),
+                "max": to_numpy(image.max()),
+                "mean": to_numpy(image.mean()),
+                "median": to_numpy(image.median()),
+            }
+
+        return {
+            "fixed_image": calculate_image_features(masked_fixed_image),
+            "moving_image": calculate_image_features(masked_moving_image),
+            "l2_difference": calculate_image_features(masked_l2_diff),
+        }
+
+    def run_registration(self, fixed_image, mask, moving_image, original_image_spacing):
+        # create new spatial transformers if needed (skip batch and color dimension)
+        self._create_spatial_transformers(
+            fixed_image.shape[2:], device=fixed_image.device
         )
 
-        histograms = torch.vstack((fixed_image_hist, moving_image_hist, diff_hist))
-
-        # transform to density histograms
-        histograms = histograms / histograms.sum(dim=1)[:, None]
-
-        return histograms #.detach()
-
-    def get_loss_from_metrics(self, metrics):
-        return (metrics[-1] - metrics[0]) / metrics[-1]
-
-    def train_param_net(self):
-        if len(self._param_net_loss_buffer) >= self._param_net_buffer_size:
-            loss = torch.mean(torch.stack(self._param_net_loss_buffer))
-            print("loss", loss)
-            loss.backward()
-            self._param_net_optimizer.step()
-            self._param_net_optimizer.zero_grad()
-            self._param_net_loss_buffer = []
-
-    def _predict_params(self, fixed_image, mask, moving_image):
-        features = self.generate_param_net_features(
-            fixed_image=fixed_image, mask=mask, moving_image=moving_image
-        )
-        predicted_params = self._param_net(features[None])
-
-        return predicted_params
-
-    def warp_moving(self, image, mask, moving, original_image_spacing):
         # register moving image onto fixed image
-        if len(image.shape) == 4:
+        if len(fixed_image.shape) == 4:
             dim_vf = 2
-        elif len(image.shape) == 5:
+        elif len(fixed_image.shape) == 5:
             dim_vf = 3
-        full_size_moving = moving
+        full_size_moving = moving_image
         features = []
-        metrics_all_level = []
+        metrics = []
         vector_field = None
+        mask = torch.as_tensor(mask, dtype=torch.bool)
 
         for i_level, (scale_factor, iterations) in enumerate(
             zip(self.scale_factors, self.iterations)
         ):
-            metrics = []
+
             self._counter = 0
 
             (
                 scaled_fixed_image,
                 scaled_mask,
                 scaled_moving_image,
-            ) = self._perform_scaling(image, mask, moving, scale_factor=scale_factor)
-
-            # detach images to avoid backprop through levels
-            scaled_fixed_image = scaled_fixed_image.detach()
-            scaled_mask = scaled_mask.detach()
-            scaled_moving_image = scaled_moving_image.detach()
-
+            ) = self._perform_scaling(
+                fixed_image, mask, moving_image, scale_factor=scale_factor
+            )
 
             if vector_field is None:
                 vector_field = torch.zeros(
                     scaled_fixed_image.shape[:1]
                     + (dim_vf,)
                     + scaled_fixed_image.shape[2:],
-                    device=moving.device,
+                    device=moving_image.device,
                 )
             elif vector_field.shape[2:] != scaled_fixed_image.shape[2:]:
                 vector_field = self._match_vector_field(
@@ -407,15 +350,11 @@ class TrainableVarRegBlock(nn.Module):
 
             warped_moving = spatial_transformer(scaled_moving_image, vector_field)
 
-            predicted_params = self._predict_params(
-                fixed_image=scaled_fixed_image,
-                mask=scaled_mask,
-                moving_image=warped_moving,
-            )
-            print("level", i_level)
-            print(predicted_params)
-
-            # TODO: Test if e.g. minip is better as feature
+            # calculate features of fixed/moving image at current level
+            level_features = self._calculate_features(fixed_image, mask, moving_image)
+            level_features["current_level"] = i_level
+            level_features["scale_factors"] = len(self.scale_factors)
+            level_metrics = []
 
             for i in range(iterations):
                 # if (i % 100) == 0:
@@ -423,30 +362,32 @@ class TrainableVarRegBlock(nn.Module):
 
                 warped_moving = spatial_transformer(scaled_moving_image, vector_field)
 
-                metrics.append(
-                    F.mse_loss(
-                        scaled_fixed_image[scaled_mask == 1],
-                        warped_moving[scaled_mask == 1],
+                level_metrics.append(
+                    float(
+                        F.mse_loss(
+                            scaled_fixed_image[scaled_mask],
+                            warped_moving[scaled_mask],
+                        )
                     )
                 )
 
-                if self.early_stopping_fn[i_level] == "lstsq":
-                    if self._check_early_stopping_lstsq(metrics, i_level):
-                        break
-                elif self.early_stopping_fn[i_level] == "no_impr":
-                    if self._check_early_stopping_increase_count(metrics, i_level):
-                        break
-                elif self.early_stopping_fn[i_level] == "no_average_impr":
-                    if self._check_early_stopping_average_improvement(metrics, i_level):
-                        break
-                elif self.early_stopping_fn[i_level] == "none":
-                    pass
-                else:
-                    raise Exception(
-                        f"Early stopping method {self.early_stopping_fn[i_level]} is not implemented"
-                    )
+                # if self.early_stopping_fn[i_level] == "lstsq":
+                #     if self._check_early_stopping_lstsq(metrics, i_level):
+                #         break
+                # elif self.early_stopping_fn[i_level] == "no_impr":
+                #     if self._check_early_stopping_increase_count(metrics, i_level):
+                #         break
+                # elif self.early_stopping_fn[i_level] == "no_average_impr":
+                #     if self._check_early_stopping_average_improvement(metrics, i_level):
+                #         break
+                # elif self.early_stopping_fn[i_level] == "none":
+                #     pass
+                # else:
+                #     raise Exception(
+                #         f"Early stopping method {self.early_stopping_fn[i_level]} "
+                #         f"is not implemented"
+                #     )
 
-                # with torch.no_grad():
                 forces = self._demon_forces_layer(
                     warped_moving,
                     scaled_fixed_image,
@@ -455,8 +396,8 @@ class TrainableVarRegBlock(nn.Module):
                 )
                 # mask forces with artifact mask (artifact = 0, valid = 1)
 
-                # vector_field += self.tau[i_level] * (forces * scaled_mask)
-                vector_field += predicted_params["tau"] * (forces * scaled_mask)
+                vector_field += self.tau[i_level] * (forces * scaled_mask)
+                # vector_field += predicted_params["tau"] * (forces * scaled_mask)
                 _regularization_layer = self.get_submodule(
                     f"regularization_layer_level_{i_level}",
                 )
@@ -464,73 +405,22 @@ class TrainableVarRegBlock(nn.Module):
 
             # print(f'LEVEL {i_level + 1} stopped at ITERATION {i + 1}: Metric: {metrics[-1]}')
 
-            # param net loss buffer
-            self._param_net_loss_buffer.append(self.get_loss_from_metrics(metrics))
-
-            self.train_param_net()
-
-            metrics_all_level.append(metrics)
-            # features.append(feature_vector)
-
-        if self.disable_correction:
-            corrected_vector_field = vector_field
-        else:
-            # update/correct DVF at artifact region
-            masked_image = image * mask
-            stacked = torch.cat((vector_field, masked_image, warped_moving), dim=1)
-
-            vector_field_correction = self._vector_field_updater(stacked)
-            corrected_vector_field = vector_field + vector_field_correction
-
-            if not corrected_vector_field.isfinite().all():
-                raise ValueError()
-
-            _regularization_layer = self.get_submodule(
-                f"regularization_layer_level_{i_level}",
-            )
-            corrected_vector_field = _regularization_layer(corrected_vector_field)
+            metrics.append(level_metrics)
+            features.append(level_features)
 
         vector_field = self._match_vector_field(vector_field, full_size_moving)
-        corrected_vector_field = self._match_vector_field(
-            corrected_vector_field, full_size_moving
-        )
-
-        corrected_warped_moving = self._full_size_spatial_transformer(
-            full_size_moving, corrected_vector_field
-        )
-        warped_moving = self._full_size_spatial_transformer(
+        warped_moving_image = self._full_size_spatial_transformer(
             full_size_moving, vector_field
         )
 
-        return (
-            corrected_warped_moving,
-            warped_moving,
-            corrected_vector_field,
-            vector_field,
-            metrics_all_level,
-            # features,
-        )
+        misc = {"features": features, "metrics": metrics}
 
-    def forward(self, image, mask, moving, original_image_spacing):
-        # create new spatial transformers if needed (skip batch and color dimension)
-        self._create_spatial_transformers(image.shape[2:], device=image.device)
+        return warped_moving_image, vector_field, misc
 
-        (
-            corrected_warped_moving,
-            warped_moving,
-            corrected_vector_field,
-            vector_field,
-            metrics_all_level,
-            # features_all_level,
-        ) = self.warp_moving(image, mask, moving, original_image_spacing)
-
-        # self.train_param_net()
-
-        return (
-            corrected_warped_moving,
-            warped_moving,
-            corrected_vector_field,
-            vector_field,
-            metrics_all_level,
-            # features_all_level,
+    def forward(self, fixed_image, mask, moving_image, original_image_spacing):
+        return self.run_registration(
+            fixed_image=fixed_image,
+            mask=mask,
+            moving_image=moving_image,
+            original_image_spacing=original_image_spacing,
         )
