@@ -100,3 +100,4 @@ if __name__ == "__main__":
             "/home/fmadesta/research/4d_ct_artifact_detection/saved_models/lung_segmenter.pth"
         ),
     )
+    lung_segmenter.segment()

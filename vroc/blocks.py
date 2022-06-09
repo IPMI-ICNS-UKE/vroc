@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 
 import torch
 import torch.nn as nn
@@ -13,23 +13,33 @@ class ConvBlock(nn.Module):
         out_channels: int,
         mid_channels: int = None,
         dimensions: int = 2,
-        norm_type: str = 'BatchNorm'
+        norm_type: Optional[str] = 'BatchNorm'
     ):
         super().__init__()
 
-        conv = getattr(nn, f'Conv{dimensions}d')
-        norm = getattr(nn, f'{norm_type}{dimensions}d')
-
         if not mid_channels:
             mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            conv(in_channels, mid_channels, kernel_size=3, padding=1),
-            norm(mid_channels),
-            nn.ReLU(inplace=True),
-            conv(mid_channels, out_channels, kernel_size=3, padding=1),
-            norm(out_channels),
-            nn.ReLU(inplace=True),
-        )
+
+        conv = getattr(nn, f'Conv{dimensions}d')
+        if norm_type:
+            norm = getattr(nn, f'{norm_type}{dimensions}d')
+            layers = [
+                conv(in_channels, mid_channels, kernel_size=3, padding=1),
+                norm(mid_channels),
+                nn.ReLU(inplace=True),
+                conv(mid_channels, out_channels, kernel_size=3, padding=1),
+                norm(out_channels),
+                nn.ReLU(inplace=True),
+            ]
+        else:
+            layers = [
+                conv(in_channels, mid_channels, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                conv(mid_channels, out_channels, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+            ]
+
+        self.double_conv = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.double_conv(x)
@@ -42,7 +52,7 @@ class DownBlock(nn.Module):
         out_channels: int,
         dimensions: int = 2,
         pooling: Union[int, Tuple[int, ...]] = 2,
-        norm_type: str = 'BatchNorm'
+        norm_type: Optional[str] = 'BatchNorm'
     ):
         super().__init__()
 
