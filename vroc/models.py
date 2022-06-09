@@ -275,12 +275,12 @@ class TrainableVarRegBlock(nn.Module):
 
         def calculate_image_features(image) -> dict:
             lower_percentile = torch.quantile(
-                masked_l2_diff, 0.05, interpolation="linear"
+                image, 0.05, interpolation="linear"
             )
             upper_percentile = torch.quantile(
-                masked_l2_diff, 0.95, interpolation="linear"
+                image, 0.95, interpolation="linear"
             )
-            image_histogram = torch.histc(masked_moving_image, bins=bins)
+            image_histogram = torch.histc(image, bins=bins)
 
             return {
                 "histogram": to_numpy(image_histogram),
@@ -348,12 +348,16 @@ class TrainableVarRegBlock(nn.Module):
                 f"spatial_transformer_level_{i_level}",
             )
 
-            warped_moving = spatial_transformer(scaled_moving_image, vector_field)
+            warped_scaled_moving_image = spatial_transformer(
+                scaled_moving_image, vector_field
+            )
 
             # calculate features of fixed/moving image at current level
-            level_features = self._calculate_features(fixed_image, mask, moving_image)
+            level_features = self._calculate_features(
+                scaled_fixed_image, scaled_mask, warped_scaled_moving_image
+            )
             level_features["current_level"] = i_level
-            level_features["scale_factors"] = len(self.scale_factors)
+            level_features["scale_factors"] = self.scale_factors
             level_metrics = []
 
             for i in range(iterations):
