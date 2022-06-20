@@ -19,27 +19,30 @@ class VrocDataset(Dataset):
         mask_path = self.dir_list[item]["mask"]
         moving_path = self.dir_list[item]["moving"]
 
-        fixed = load_and_preprocess(fixed_path)
-        spacing = torch.tensor(fixed.GetSpacing())
-        moving = load_and_preprocess(moving_path)
+        fixed_image = load_and_preprocess(fixed_path)
+        spacing = torch.tensor(fixed_image.GetSpacing())
+        moving_image = load_and_preprocess(moving_path)
         mask = sitk.ReadImage(mask_path)
-        moving = sitk.HistogramMatching(
-            moving, fixed, numberOfHistogramLevels=1024, numberOfMatchPoints=7
+        moving_image = sitk.HistogramMatching(
+            moving_image,
+            fixed_image,
+            numberOfHistogramLevels=1024,
+            numberOfMatchPoints=7,
         )
-        fixed = sitk.GetArrayFromImage(fixed)
-        moving = sitk.GetArrayFromImage(moving)
+        fixed_image = sitk.GetArrayFromImage(fixed_image)
+        moving_image = sitk.GetArrayFromImage(moving_image)
         mask = sitk.GetArrayFromImage(mask)
 
-        patch_shape = torch.tensor(fixed.shape)
+        patch_shape = torch.tensor(fixed_image.shape)
 
-        fixed = torch_prepare(fixed)
-        moving = torch_prepare(moving)
+        fixed_image = torch_prepare(fixed_image)
+        moving_image = torch_prepare(moving_image)
         mask = torch_prepare(mask)
 
         return {
-            "fixed": fixed,
+            "fixed_image": fixed_image,
             "mask": mask,
-            "moving": moving,
+            "moving_image": moving_image,
             "patch_shape": patch_shape,
             "spacing": spacing,
         }
