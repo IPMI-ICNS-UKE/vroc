@@ -75,12 +75,13 @@ class NCC(torch.nn.Module):
         return result
 
 
-import time
+if __name__ == "__main__":
+    import time
 
-a = torch.ones((1, 512, 512, 300), device="cuda")
-b = torch.ones((1, 512, 512, 300), device="cuda")
+    a = torch.ones((1, 512, 512, 300), device="cuda")
+    b = torch.ones((1, 512, 512, 300), device="cuda")
 
-t = time.time()
-ncc = NCC(a)
-n = ncc(b)
-print(time.time() - t)
+    t = time.time()
+    ncc = NCC(a)
+    n = ncc(b)
+    print(time.time() - t)
