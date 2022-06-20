@@ -1,16 +1,17 @@
-import SimpleITK as sitk
 import os
-import torch
-import numpy as np
-from hyperopt import tpe, hp, fmin
 
-from vroc.models import TrainableVarRegBlock
+import numpy as np
+import SimpleITK as sitk
+import torch
+from hyperopt import fmin, hp, tpe
+
 from vroc.helper import (
-    read_landmarks,
-    transform_landmarks_and_flip_z,
-    target_registration_errors_snapped,
     load_and_preprocess,
+    read_landmarks,
+    target_registration_errors_snapped,
+    transform_landmarks_and_flip_z,
 )
+from vroc.models import TrainableVarRegBlock
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -1,23 +1,23 @@
-import SimpleITK as sitk
 import os
 import time
 
 import matplotlib
 import matplotlib.pyplot as plt
-import torch
 import numpy as np
+import SimpleITK as sitk
+import torch
 
-from vroc.models import TrainableVarRegBlock
 from vroc.helper import (
-    read_landmarks,
-    transform_landmarks_and_flip_z,
-    target_registration_errors_snapped,
-    load_and_preprocess,
+    detach_and_squeeze,
     landmark_distance,
+    load_and_preprocess,
+    read_landmarks,
     scale_vf,
     target_registration_errors,
-    detach_and_squeeze,
+    target_registration_errors_snapped,
+    transform_landmarks_and_flip_z,
 )
+from vroc.models import TrainableVarRegBlock
 
 matplotlib.use("module://backend_interagg")
 

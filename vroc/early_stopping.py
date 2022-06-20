@@ -1,8 +1,10 @@
 from enum import Enum, auto
-import numpy as np
 from typing import Sequence
-from vroc.helper import rescale_range
+
+import numpy as np
 import scipy.stats as stats
+
+from vroc.helper import rescale_range
 
 
 class EarlyStopping(Enum):

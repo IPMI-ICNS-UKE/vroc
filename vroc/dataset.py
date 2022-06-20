@@ -1,8 +1,10 @@
 import os
+
+import SimpleITK as sitk
 import torch
 from torch.utils.data import Dataset
+
 from vroc.helper import load_and_preprocess, torch_prepare
-import SimpleITK as sitk
 
 
 class VrocDataset(Dataset):

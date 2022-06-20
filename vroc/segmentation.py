@@ -1,12 +1,12 @@
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import numpy as np
 import scipy.ndimage as ndi
 import torch
 import torch.nn as nn
-from pathlib import Path
 
-from vroc.helper import rescale_range, batch_array
+from vroc.helper import batch_array, rescale_range
 
 
 class Segmenter2D(ABC):

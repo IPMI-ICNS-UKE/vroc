@@ -1,8 +1,9 @@
+import os
 import re
 from pathlib import Path
-import os
-import SimpleITK as sitk
+
 import numpy as np
+import SimpleITK as sitk
 
 
 def read_meta(filepath: Path) -> dict:

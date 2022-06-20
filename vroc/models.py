@@ -1,22 +1,22 @@
 import time
-from typing import Tuple, List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy import stats
+from torch.optim import Adam
 
 from vroc.blocks import (
-    SpatialTransformer,
-    DemonForces3d,
-    GaussianSmoothing3d,
-    DownBlock,
-    UpBlock,
     ConvBlock,
+    DemonForces3d,
+    DownBlock,
+    GaussianSmoothing3d,
+    SpatialTransformer,
+    UpBlock,
 )
 from vroc.helper import rescale_range
-from torch.optim import Adam
 
 
 class UNet(nn.Module):
@@ -274,12 +274,8 @@ class TrainableVarRegBlock(nn.Module):
             return t
 
         def calculate_image_features(image) -> dict:
-            lower_percentile = torch.quantile(
-                image, 0.05, interpolation="linear"
-            )
-            upper_percentile = torch.quantile(
-                image, 0.95, interpolation="linear"
-            )
+            lower_percentile = torch.quantile(image, 0.05, interpolation="linear")
+            upper_percentile = torch.quantile(image, 0.95, interpolation="linear")
             image_histogram = torch.histc(image, bins=bins)
 
             return {

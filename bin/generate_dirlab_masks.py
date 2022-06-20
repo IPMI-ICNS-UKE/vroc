@@ -1,10 +1,11 @@
 import os
-import SimpleITK as sitk
-import numpy as np
 from pathlib import Path
 
-from vroc.segmentation import LungSegmenter2D
+import numpy as np
+import SimpleITK as sitk
+
 from vroc.models import UNet
+from vroc.segmentation import LungSegmenter2D
 
 dirlab_case = 8
 phase = (0, 5)

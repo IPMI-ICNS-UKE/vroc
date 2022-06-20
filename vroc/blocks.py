@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import Tuple, Union, Optional
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -13,16 +13,16 @@ class ConvBlock(nn.Module):
         out_channels: int,
         mid_channels: int = None,
         dimensions: int = 2,
-        norm_type: Optional[str] = 'BatchNorm'
+        norm_type: Optional[str] = "BatchNorm",
     ):
         super().__init__()
 
         if not mid_channels:
             mid_channels = out_channels
 
-        conv = getattr(nn, f'Conv{dimensions}d')
+        conv = getattr(nn, f"Conv{dimensions}d")
         if norm_type:
-            norm = getattr(nn, f'{norm_type}{dimensions}d')
+            norm = getattr(nn, f"{norm_type}{dimensions}d")
             layers = [
                 conv(in_channels, mid_channels, kernel_size=3, padding=1),
                 norm(mid_channels),
@@ -52,7 +52,7 @@ class DownBlock(nn.Module):
         out_channels: int,
         dimensions: int = 2,
         pooling: Union[int, Tuple[int, ...]] = 2,
-        norm_type: Optional[str] = 'BatchNorm'
+        norm_type: Optional[str] = "BatchNorm",
     ):
         super().__init__()
 
@@ -66,7 +66,10 @@ class DownBlock(nn.Module):
             raise ValueError(f"Cannot handle {dimensions=}")
 
         self.maxpool_conv = nn.Sequential(
-            pool(pooling), ConvBlock(in_channels, out_channels, dimensions=dimensions, norm_type=norm_type)
+            pool(pooling),
+            ConvBlock(
+                in_channels, out_channels, dimensions=dimensions, norm_type=norm_type
+            ),
         )
 
     def forward(self, x):
@@ -273,9 +276,7 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
 
 
 class SpatialTransformer(nn.Module):
-    """
-    N-D Spatial Transformer
-    """
+    """N-D Spatial Transformer."""
 
     def __init__(self, shape, mode="bilinear"):
         super().__init__()

@@ -1,14 +1,16 @@
-import matplotlib
-import torch
 import os
 from glob import glob
-from torch.utils.data import DataLoader
-
-from vroc.models import TrainableVarRegBlock
-from vroc.dataset import VrocDataset
 from pathlib import Path
 
-# matplotlib.use("module://backend_interagg")
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from vroc.dataset import VrocDataset
+from vroc.metrics import calculate_mutual_information
+from vroc.models import TrainableVarRegBlock
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -30,8 +32,8 @@ def generate_train_list(root_dir, image_folder, mask_folder):
 
 
 root_dir = (
-    Path('/home/tsentker/Documents/projects/learn2reg/NLST'),
-    Path('/datalake/NLST'),
+    Path("/home/tsentker/Documents/projects/learn2reg/NLST"),
+    Path("/datalake/NLST"),
 )
 root_dir = next(p for p in root_dir if p.exists())
 
@@ -44,7 +46,7 @@ train_dataset = VrocDataset(dir_list=train_list)
 
 dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=0)
 
-scale_factors = tuple(1/2**i_level for i_level in reversed(range(n_levels)))
+scale_factors = tuple(1 / 2**i_level for i_level in reversed(range(n_levels)))
 
 model = TrainableVarRegBlock(
     iterations=(100,) * n_levels,
@@ -64,9 +66,14 @@ for data in dataloader:
     mask = data["mask"][0].to(device)
     moving = data["moving"][0].to(device)
 
-    print('go')
-    with torch.no_grad():
-        warped_moving_image, vector_field, misc = model.forward(
-            fixed, mask, moving, data["spacing"][0]
-        )
+    f = fixed.cpu().numpy()
+    m = moving.cpu().numpy()
 
+    hist2d, _, _ = np.histogram2d(f.ravel(), m.ravel(), bins=128)
+    mi = calculate_mutual_information(f, m, bins=128)
+
+    # print('go')
+    # with torch.no_grad():
+    #     warped_moving_image, vector_field, misc = model.forward(
+    #         fixed, mask, moving, data["spacing"][0]
+    #     )
