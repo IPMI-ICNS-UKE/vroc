@@ -141,6 +141,31 @@ class FlexUNet(nn.Module):
         return inputs, outputs[-1]
 
 
+class AutoEncoder(FlexUNet):
+    def forward(self, *inputs, **kwargs):
+        outputs = []
+        inputs = self.init_conv(*inputs)
+        outputs.append(inputs)
+        for i_level in range(self.n_levels):
+            inputs = self.get_submodule(f"enc_{i_level}")(inputs)
+            outputs.append(inputs)
+
+        encoded_size = outputs[-1].size()
+        embedded = F.avg_pool3d(outputs[-1], kernel_size=encoded_size[2:]).view(
+            encoded_size[0], -1
+        )
+        outputs[-1] = embedded[(...,) + (None,) * len(encoded_size[2:])].repeat(
+            (1, 1) + encoded_size[2:]
+        )
+
+        for i_level in reversed(range(self.n_levels)):
+            inputs = self.get_submodule(f"dec_{i_level}")(inputs, outputs[i_level])
+
+        inputs = self.final_conv(inputs)
+
+        return inputs, embedded
+
+
 class UNet(nn.Module):
     def __init__(self, n_channels: int = 1, n_classes: int = 1, bilinear: bool = True):
         super(UNet, self).__init__()
@@ -559,5 +584,5 @@ if __name__ == "__main__":
     import torch
 
     a = torch.ones((1, 1, 128, 128, 128), device="cuda")
-    unet = FlexUNet(n_levels=3).to(a)
-    b, encoded = unet(a)
+    AE = AutoEncoder().to(a)
+    b, encoded = AE(a)
