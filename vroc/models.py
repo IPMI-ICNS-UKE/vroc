@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -10,13 +10,135 @@ from torch.optim import Adam
 
 from vroc.blocks import (
     ConvBlock,
+    DecoderBlock,
     DemonForces3d,
     DownBlock,
+    EncoderBlock,
     GaussianSmoothing3d,
     SpatialTransformer,
     UpBlock,
 )
 from vroc.helper import rescale_range
+from vroc.logger import LoggerMixin
+
+
+class FlexUNet(nn.Module):
+    def __init__(
+        self,
+        n_channels: int = 1,
+        n_classes: int = 1,
+        n_levels: int = 3,
+        filter_base: int = 32,
+        convolution_layer=nn.Conv3d,
+        downsampling_layer=nn.MaxPool3d,
+        upsampling_layer=nn.Upsample,
+        norm_layer=nn.BatchNorm3d,
+        convolution_kwargs=None,
+        downsampling_kwargs=None,
+        upsampling_kwargs=None,
+    ):
+        super().__init__()
+
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.n_levels = n_levels
+        self.filter_base = filter_base
+
+        self.convolution_layer = convolution_layer
+        self.downsampling_layer = downsampling_layer
+        self.upsampling_layer = upsampling_layer
+        self.norm_layer = norm_layer
+
+        self.convolution_kwargs = convolution_kwargs or {
+            "kernel_size": 3,
+            "padding": "same",
+        }
+        self.downsampling_kwargs = downsampling_kwargs or {"kernel_size": 2}
+        self.upsampling_kwargs = upsampling_kwargs or {"scale_factor": 2}
+
+        self._build_layers()
+
+    @property
+    def encoder_block(self):
+        return EncoderBlock
+
+    @property
+    def decoder_block(self):
+        return DecoderBlock
+
+    def _build_layers(self):
+        enc_out_channels = []
+
+        self.init_conv = self.convolution_layer(
+            in_channels=self.n_channels,
+            out_channels=self.filter_base,
+            **self.convolution_kwargs,
+        )
+
+        self.final_conv = self.convolution_layer(
+            in_channels=self.filter_base,
+            out_channels=self.n_classes,
+            **self.convolution_kwargs,
+        )
+
+        enc_out_channels.append(self.filter_base)
+        previous_out_channels = self.filter_base
+
+        for i_level in range(self.n_levels):
+            out_channels = self.filter_base * 2**i_level
+            enc_out_channels.append(out_channels)
+            self.add_module(
+                f"enc_{i_level}",
+                self.encoder_block(
+                    in_channels=previous_out_channels,
+                    out_channels=out_channels,
+                    n_convolutions=2,
+                    convolution_layer=self.convolution_layer,
+                    downsampling_layer=self.downsampling_layer,
+                    norm_layer=self.norm_layer,
+                    convolution_kwargs=self.convolution_kwargs,
+                    downsampling_kwargs=self.downsampling_kwargs,
+                ),
+            )
+            previous_out_channels = out_channels
+
+        for i_level in reversed(range(self.n_levels)):
+
+            out_channels = self.filter_base * 2**i_level
+            if i_level > 0:  # deeper levels
+                in_channels = previous_out_channels + enc_out_channels[i_level]
+            else:
+                in_channels = previous_out_channels + self.filter_base
+
+            self.add_module(
+                f"dec_{i_level}",
+                self.decoder_block(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    n_convolutions=2,
+                    convolution_layer=self.convolution_layer,
+                    upsampling_layer=self.upsampling_layer,
+                    norm_layer=self.norm_layer,
+                    convolution_kwargs=self.convolution_kwargs,
+                    upsampling_kwargs=self.upsampling_kwargs,
+                ),
+            )
+            previous_out_channels = out_channels
+
+    def forward(self, *inputs, **kwargs):
+        outputs = []
+        inputs = self.init_conv(*inputs)
+        outputs.append(inputs)
+        for i_level in range(self.n_levels):
+            inputs = self.get_submodule(f"enc_{i_level}")(inputs)
+            outputs.append(inputs)
+
+        for i_level in reversed(range(self.n_levels)):
+            inputs = self.get_submodule(f"dec_{i_level}")(inputs, outputs[i_level])
+
+        inputs = self.final_conv(inputs)
+
+        return inputs, outputs[-1]
 
 
 class UNet(nn.Module):
@@ -107,7 +229,7 @@ class ParamNet(nn.Module):
         return out_dict
 
 
-class TrainableVarRegBlock(nn.Module):
+class TrainableVarRegBlock(nn.Module, LoggerMixin):
     def __init__(
         self,
         iterations: Tuple[int, ...] = (100, 100),
@@ -119,8 +241,8 @@ class TrainableVarRegBlock(nn.Module):
         use_image_spacing: bool = False,
         scale_factors: Tuple[float, ...] = (0.5, 1.0),
         early_stopping_method: Optional[Tuple[str, ...]] = None,
-        early_stopping_delta: Tuple[float, ...] = (0.0, 0.0),
-        early_stopping_window: Tuple[int, ...] = (10, 10),
+        early_stopping_delta: Optional[Tuple[float, ...]] = None,
+        early_stopping_window: Optional[Tuple[int, ...]] = None,
         radius: Tuple[int, ...] = None,
     ):
         super().__init__()
@@ -258,7 +380,7 @@ class TrainableVarRegBlock(nn.Module):
 
         return vector_field * scale_factor.to(vector_field)
 
-    def _calculate_features(self, fixed_image, mask, moving_image, bins=32) -> dict:
+    def _calculate_features(self, fixed_image, mask, moving_image, bins=128) -> dict:
         mask = torch.as_tensor(mask, dtype=torch.bool)
         l2_diff = F.mse_loss(fixed_image, moving_image, reduction="none")
 
@@ -289,6 +411,7 @@ class TrainableVarRegBlock(nn.Module):
                 "max": to_numpy(image.max()),
                 "mean": to_numpy(image.mean()),
                 "median": to_numpy(image.median()),
+                "std": to_numpy(image.std()),
             }
 
         return {
@@ -313,6 +436,8 @@ class TrainableVarRegBlock(nn.Module):
         metrics = []
         vector_field = None
         mask = torch.as_tensor(mask, dtype=torch.bool)
+
+        timings = []
 
         for i_level, (scale_factor, iterations) in enumerate(
             zip(self.scale_factors, self.iterations)
@@ -356,10 +481,8 @@ class TrainableVarRegBlock(nn.Module):
             level_features["scale_factors"] = self.scale_factors
             level_metrics = []
 
+            t_start = time.time()
             for i in range(iterations):
-                # if (i % 100) == 0:
-                #     print(f"*** LEVEL {i_level + 1} *** ITERATION {i} ***")
-
                 warped_moving = spatial_transformer(scaled_moving_image, vector_field)
 
                 level_metrics.append(
@@ -369,6 +492,9 @@ class TrainableVarRegBlock(nn.Module):
                             warped_moving[scaled_mask],
                         )
                     )
+                )
+                self.logger.debug(
+                    {"level": i_level, "iteration": i, "metric": level_metrics[-1]}
                 )
 
                 # if self.early_stopping_fn[i_level] == "lstsq":
@@ -405,6 +531,9 @@ class TrainableVarRegBlock(nn.Module):
 
             # print(f'LEVEL {i_level + 1} stopped at ITERATION {i + 1}: Metric: {metrics[-1]}')
 
+            t_end = time.time()
+
+            timings.append(t_end - t_start)
             metrics.append(level_metrics)
             features.append(level_features)
 
@@ -413,7 +542,7 @@ class TrainableVarRegBlock(nn.Module):
             full_size_moving, vector_field
         )
 
-        misc = {"features": features, "metrics": metrics}
+        misc = {"features": features, "metrics": metrics, "timings": timings}
 
         return warped_moving_image, vector_field, misc
 
@@ -424,3 +553,11 @@ class TrainableVarRegBlock(nn.Module):
             moving_image=moving_image,
             original_image_spacing=original_image_spacing,
         )
+
+
+if __name__ == "__main__":
+    import torch
+
+    a = torch.ones((1, 1, 128, 128, 128), device="cuda")
+    unet = FlexUNet(n_levels=3).to(a)
+    b, encoded = unet(a)

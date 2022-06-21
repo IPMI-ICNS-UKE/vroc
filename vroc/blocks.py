@@ -1,9 +1,88 @@
 from abc import ABC
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class EncoderBlock(nn.Module):
+    def __init__(
+        self,
+        convolution_layer: Type[nn.Module],
+        downsampling_layer: Type[nn.Module],
+        norm_layer: Type[nn.Module],
+        in_channels,
+        out_channels,
+        n_convolutions: int = 1,
+        convolution_kwargs: Optional[dict] = None,
+        downsampling_kwargs: Optional[dict] = None,
+    ):
+        super().__init__()
+
+        if not convolution_kwargs:
+            convolution_kwargs = {}
+        if not downsampling_kwargs:
+            downsampling_kwargs = {}
+
+        self.down = downsampling_layer(**downsampling_kwargs)
+
+        layers = []
+        for i_conv in range(n_convolutions):
+            layers.append(
+                convolution_layer(
+                    in_channels=in_channels if i_conv == 0 else out_channels,
+                    out_channels=out_channels,
+                    **convolution_kwargs,
+                )
+            )
+            layers.extend([norm_layer(out_channels), nn.LeakyReLU(inplace=True)])
+        self.convs = nn.Sequential(*layers)
+
+    def forward(self, *inputs):
+        x = self.down(*inputs)
+        return self.convs(x)
+
+
+class DecoderBlock(nn.Module):
+    def __init__(
+        self,
+        convolution_layer: Type[nn.Module],
+        upsampling_layer: Type[nn.Module],
+        norm_layer: Type[nn.Module],
+        in_channels,
+        out_channels,
+        n_convolutions: int = 1,
+        convolution_kwargs: Optional[dict] = None,
+        upsampling_kwargs: Optional[dict] = None,
+    ):
+        super().__init__()
+
+        if not convolution_kwargs:
+            convolution_kwargs = {}
+        if not upsampling_kwargs:
+            upsampling_kwargs = {}
+
+        self.up = upsampling_layer(**upsampling_kwargs)
+
+        layers = []
+        for i_conv in range(n_convolutions):
+            layers.append(
+                convolution_layer(
+                    in_channels=in_channels if i_conv == 0 else out_channels,
+                    out_channels=out_channels,
+                    **convolution_kwargs,
+                )
+            )
+            layers.extend([norm_layer(out_channels), nn.LeakyReLU(inplace=True)])
+        self.convs = nn.Sequential(*layers)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        x = torch.cat([x2, x1], dim=1)
+        x = self.convs(x)
+
+        return x
 
 
 class ConvBlock(nn.Module):
