@@ -4,7 +4,8 @@ import SimpleITK as sitk
 import torch
 from torch.utils.data import Dataset
 
-from vroc.helper import load_and_preprocess, torch_prepare
+from vroc.helper import load_and_preprocess, rescale_range, torch_prepare
+from vroc.preprocessing import crop_background, resample_image_size
 
 
 class VrocDataset(Dataset):
@@ -46,3 +47,15 @@ class VrocDataset(Dataset):
             "patch_shape": patch_shape,
             "spacing": spacing,
         }
+
+
+class AutoEncoderDataset(VrocDataset):
+    def __getitem__(self, item):
+        image_path = self.dir_list[item]
+        image = load_and_preprocess(image_path)
+        image = crop_background(image)
+        image = resample_image_size(image, new_size=(128, 128, 128))
+        image = sitk.GetArrayFromImage(image)
+        image = rescale_range(image, input_range=(-1024, 3071), output_range=(0, 1))
+        image = torch_prepare(image)
+        return image

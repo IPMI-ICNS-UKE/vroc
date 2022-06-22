@@ -110,7 +110,7 @@ def rescale_range(
 
 def torch_prepare(img):
     img = torch.from_numpy(img.copy())
-    img = img[None, None, :].float()
+    img = img[None, :].float()
     return img
 
 
