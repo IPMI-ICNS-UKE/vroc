@@ -81,9 +81,11 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
-        x = torch.cat([x2, x1], dim=1)
+        if x2:
+            x = torch.cat([x2, x1], dim=1)
+        else:
+            x = x1
         x = self.convs(x)
-
         return x
 
 
@@ -174,14 +176,17 @@ class UpBlock(nn.Module):
     def forward(self, x1, x2):
         x1 = self.up(x1)
         # input is CHW
-        diff_y = x2.size()[2] - x1.size()[2]
-        diff_x = x2.size()[3] - x1.size()[3]
+        if x2:
+            diff_y = x2.size()[2] - x1.size()[2]
+            diff_x = x2.size()[3] - x1.size()[3]
 
-        x1 = F.pad(
-            x1, [diff_x // 2, diff_x - diff_x // 2, diff_y // 2, diff_y - diff_y // 2]
-        )
-
-        x = torch.cat([x2, x1], dim=1)
+            x1 = F.pad(
+                x1,
+                [diff_x // 2, diff_x - diff_x // 2, diff_y // 2, diff_y - diff_y // 2],
+            )
+            x = torch.cat([x2, x1], dim=1)
+        else:
+            x = x1
         return self.conv(x)
 
 

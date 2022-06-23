@@ -29,12 +29,13 @@ class FlexUNet(nn.Module):
         self,
         n_channels: int = 1,
         n_classes: int = 1,
-        n_levels: int = 3,
+        n_levels: int = 7,
         filter_base: int = 32,
         convolution_layer=nn.Conv3d,
         downsampling_layer=nn.MaxPool3d,
         upsampling_layer=nn.Upsample,
         norm_layer=nn.BatchNorm3d,
+        skip_connections=False,
         convolution_kwargs=None,
         downsampling_kwargs=None,
         upsampling_kwargs=None,
@@ -50,10 +51,12 @@ class FlexUNet(nn.Module):
         self.downsampling_layer = downsampling_layer
         self.upsampling_layer = upsampling_layer
         self.norm_layer = norm_layer
+        self.skip_connections = skip_connections
 
         self.convolution_kwargs = convolution_kwargs or {
             "kernel_size": 3,
             "padding": "same",
+            "bias": False,
         }
         self.downsampling_kwargs = downsampling_kwargs or {"kernel_size": 2}
         self.upsampling_kwargs = upsampling_kwargs or {"scale_factor": 2}
@@ -108,9 +111,15 @@ class FlexUNet(nn.Module):
 
             out_channels = self.filter_base * 2**i_level
             if i_level > 0:  # deeper levels
-                in_channels = previous_out_channels + enc_out_channels[i_level]
+                if self.skip_connections:
+                    in_channels = previous_out_channels + enc_out_channels[i_level]
+                else:
+                    in_channels = previous_out_channels
             else:
-                in_channels = previous_out_channels + self.filter_base
+                if self.skip_connections:
+                    in_channels = previous_out_channels + self.filter_base
+                else:
+                    in_channels = previous_out_channels
 
             self.add_module(
                 f"dec_{i_level}",
@@ -141,6 +150,31 @@ class FlexUNet(nn.Module):
         inputs = self.final_conv(inputs)
 
         return inputs, outputs[-1]
+
+
+class AutoEncoder(FlexUNet):
+    def forward(self, *inputs, **kwargs):
+        outputs = []
+        inputs = self.init_conv(*inputs)
+        outputs.append(inputs)
+        for i_level in range(self.n_levels):
+            inputs = self.get_submodule(f"enc_{i_level}")(inputs)
+            outputs.append(inputs)
+
+        encoded_size = outputs[-1].size()
+        embedded = F.avg_pool3d(outputs[-1], kernel_size=encoded_size[2:]).view(
+            encoded_size[0], -1
+        )
+        inputs = embedded[(...,) + (None,) * len(encoded_size[2:])].repeat(
+            (1, 1) + encoded_size[2:]
+        )
+
+        for i_level in reversed(range(self.n_levels)):
+            inputs = self.get_submodule(f"dec_{i_level}")(inputs, None)
+
+        inputs = self.final_conv(inputs)
+
+        return inputs, embedded
 
 
 class UNet(nn.Module):
