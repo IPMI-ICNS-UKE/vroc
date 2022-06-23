@@ -58,4 +58,4 @@ class AutoEncoderDataset(VrocDataset):
         image = sitk.GetArrayFromImage(image)
         image = rescale_range(image, input_range=(-1024, 3071), output_range=(0, 1))
         image = torch_prepare(image)
-        return image
+        return image, image_path
