@@ -68,12 +68,6 @@ def landmark_distance(point_list, reference_point_list):
     ]
 
 
-def load_and_preprocess(filepath):
-    filepath = str(filepath)
-    image = sitk.ReadImage(filepath, sitk.sitkFloat32)
-    return image
-
-
 def plot_TRE_landmarks(tx, point_list, reference_point_list):
     transformed_point_list = [tx.TransformPoint(p) for p in point_list]
     fig = plt.figure()
@@ -141,3 +135,25 @@ def scale_vf(vf, spacing):
     )
     vf = sitk.Cast(vf, sitk.sitkVectorFloat64)
     return vf
+
+
+def get_bounding_box(mask: torch.Tensor, padding: int = 0):
+    def get_axis_bbox(mask, axis: int, padding: int = 0):
+        mask_shape = mask.shape
+        for i_axis in range(mask.ndim):
+            if i_axis == axis:
+                continue
+            mask = mask.any(dim=i_axis, keepdim=True)
+
+        mask = mask.squeeze()
+        mask = torch.where(mask)
+
+        bbox_min = int(mask[0][0])
+        bbox_max = int(mask[0][-1])
+
+        bbox_min = max(bbox_min - padding, 0)
+        bbox_max = min(bbox_max + padding + 1, mask_shape[axis])
+
+        return slice(bbox_min, bbox_max)
+
+    return tuple(get_axis_bbox(mask, axis=i, padding=padding) for i in range(mask.ndim))

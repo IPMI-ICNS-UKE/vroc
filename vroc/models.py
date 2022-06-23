@@ -475,9 +475,15 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
             "l2_difference": calculate_image_features(masked_l2_diff),
         }
 
-    def run_registration(self, fixed_image, mask, moving_image, original_image_spacing):
-        self
+    def _calculate_metric(self, fixed_image, mask, moving_image) -> float:
+        return float(
+            F.mse_loss(
+                fixed_image[mask],
+                moving_image[mask],
+            )
+        )
 
+    def run_registration(self, fixed_image, mask, moving_image, original_image_spacing):
         if self.restrict_to_mask and mask is not None:
             bbox = get_bounding_box(mask, padding=5)
             self.logger.debug(f"Restricting registration to bounding box {bbox}")
@@ -502,6 +508,8 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
         mask = torch.as_tensor(mask, dtype=torch.bool)
 
         runtimes = []
+
+        metric_before = self._calculate_metric(fixed_image, mask, moving_image)
 
         for i_level, (scale_factor, iterations) in enumerate(
             zip(self.scale_factors, self.iterations)
@@ -547,19 +555,15 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
 
             t_start = time.time()
             for i in range(iterations):
+                t_step_start = time.time()
                 warped_moving = spatial_transformer(scaled_moving_image, vector_field)
 
                 level_metrics.append(
-                    float(
-                        F.mse_loss(
-                            scaled_fixed_image[scaled_mask],
-                            warped_moving[scaled_mask],
-                        )
+                    self._calculate_metric(
+                        scaled_fixed_image, scaled_mask, warped_moving
                     )
                 )
-                self.logger.debug(
-                    {"level": i_level, "iteration": i, "metric": level_metrics[-1]}
-                )
+                log = {"level": i_level, "iteration": i, "metric": level_metrics[-1]}
 
                 # if self.early_stopping_fn[i_level] == "lstsq":
                 #     if self._check_early_stopping_lstsq(metrics, i_level):
@@ -591,6 +595,10 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
                 )
                 vector_field = _regularization_layer(vector_field)
 
+                t_step_end = time.time()
+                log["step_runtime"] = t_step_end - t_step_start
+                self.logger.debug(log)
+
             t_end = time.time()
             runtimes.append(t_end - t_start)
             metrics.append(level_metrics)
@@ -601,7 +609,15 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
             full_size_moving, vector_field
         )
 
-        misc = {"features": features, "metrics": metrics, "runtimes": runtimes}
+        metric_after = self._calculate_metric(fixed_image, mask, warped_moving_image)
+
+        misc = {
+            "features": features,
+            "metric_before": metric_before,
+            "metric_after": metric_after,
+            "level_metrics": metrics,
+            "runtimes": runtimes,
+        }
 
         return warped_moving_image, vector_field, misc
 
@@ -615,12 +631,6 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
 
 
 if __name__ == "__main__":
-    # import torch
-    #
-    # a = torch.ones((1, 1, 128, 128, 128), device="cuda")
-    # unet = FlexUNet(n_levels=3).to(a)
-    # b, encoded = unet(a)
-
     model = TrainableVarRegBlock(
         scale_factors=1.0,
         iterations=200,

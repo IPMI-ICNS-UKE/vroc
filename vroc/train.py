@@ -1,3 +1,4 @@
+import logging
 import os
 from glob import glob
 from pathlib import Path
@@ -9,13 +10,17 @@ import torch
 from torch.utils.data import DataLoader
 
 from vroc.dataset import VrocDataset
-from vroc.metrics import calculate_mutual_information
+
+# from vroc.metrics import calculate_mutual_information
 from vroc.models import TrainableVarRegBlock
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 dirlab_case = 1
 n_levels = 3
+LOG_LEVEL = logging.DEBUG
+
+logging.basicConfig(level=LOG_LEVEL)
 
 
 def generate_train_list(root_dir, image_folder, mask_folder):

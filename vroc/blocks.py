@@ -339,7 +339,7 @@ class SpatialTransformer(nn.Module):
 
     def _create_grid(self, shape):
         vectors = [torch.arange(0, s) for s in shape]
-        grids = torch.meshgrid(vectors)
+        grids = torch.meshgrid(vectors, indexing="ij")
         grid = torch.stack(grids)
         grid = torch.unsqueeze(grid, 0)
         grid = grid.type(torch.FloatTensor)
