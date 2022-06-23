@@ -85,9 +85,9 @@ def sample_parameter_space(
                 ).to(device)
 
                 image_id = data["id"][0]
-                fixed_image = data["fixed_image"][0].to(device)
-                fixed_mask = data["fixed_mask"][0].to(device)
-                moving_image = data["moving_image"][0].to(device)
+                fixed_image = data["fixed_image"].to(device)
+                fixed_mask = data["fixed_mask"].to(device)
+                moving_image = data["moving_image"].to(device)
                 spacing = data["spacing"][0]
 
                 with torch.no_grad():
@@ -109,3 +109,8 @@ def sample_parameter_space(
 
 if __name__ == "__main__":
     typer.run(sample_parameter_space)
+
+    # sample_parameter_space(
+    #     nlst_dir=Path('/datalake/learn2reg/NLST'),
+    #     database_filepath=Path('/datalake/learn2reg/runs.sqlite')
+    # )

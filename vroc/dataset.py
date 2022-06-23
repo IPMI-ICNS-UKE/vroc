@@ -87,12 +87,13 @@ class NLSTDataset(Dataset):
 
         spacing = torch.tensor(fixed_image.GetSpacing())
 
-        moving_image = sitk.HistogramMatching(
-            moving_image,
-            fixed_image,
-            numberOfHistogramLevels=1024,
-            numberOfMatchPoints=7,
-        )
+        # moving_image = sitk.HistogramMatching(
+        #     moving_image,
+        #     fixed_image,
+        #     numberOfHistogramLevels=1024,
+        #     numberOfMatchPoints=7,
+        # )
+
         fixed_image = sitk.GetArrayFromImage(fixed_image)
         moving_image = sitk.GetArrayFromImage(moving_image)
         fixed_mask = sitk.GetArrayFromImage(fixed_mask)
@@ -127,3 +128,8 @@ class NLSTDataset(Dataset):
 #         image = rescale_range(image, input_range=(-1024, 3071), output_range=(0, 1))
 #         image = torch_prepare(image)
 #         return image
+
+
+# if __name__ == '__main__':
+#     d = NLSTDataset("")
+#
