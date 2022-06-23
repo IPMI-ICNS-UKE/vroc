@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional, Tuple, Type
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -18,7 +18,9 @@ from vroc.blocks import (
     SpatialTransformer,
     UpBlock,
 )
-from vroc.helper import rescale_range
+from vroc.checks import are_of_same_length, is_tuple, is_tuple_of_tuples
+from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
+from vroc.helper import get_bounding_box, rescale_range
 from vroc.logger import LoggerMixin
 
 
@@ -232,32 +234,68 @@ class ParamNet(nn.Module):
 class TrainableVarRegBlock(nn.Module, LoggerMixin):
     def __init__(
         self,
-        iterations: Tuple[int, ...] = (100, 100),
-        tau: Tuple[float, ...] = (1.0, 1.0),
-        demon_forces="active",
-        regularization_sigma=(1.0, 1.0, 1.0),
-        original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
-        disable_correction: bool = False,
+        scale_factors: Union[FloatTuple, float] = (1.0,),
+        iterations: Union[IntTuple, int] = 100,
+        tau: Union[FloatTuple, float] = 1.0,
+        demon_forces: str = "active",
+        regularization_sigma: Union[FloatTuple3D, Tuple[FloatTuple3D, ...]] = (
+            1.0,
+            1.0,
+            1.0,
+        ),
+        regularization_radius: Union[IntTuple3D, Tuple[IntTuple3D, ...]] = None,
+        original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         use_image_spacing: bool = False,
-        scale_factors: Tuple[float, ...] = (0.5, 1.0),
         early_stopping_method: Optional[Tuple[str, ...]] = None,
         early_stopping_delta: Optional[Tuple[float, ...]] = None,
         early_stopping_window: Optional[Tuple[int, ...]] = None,
-        radius: Tuple[int, ...] = None,
+        restrict_to_mask: bool = False,
     ):
         super().__init__()
-        self.iterations = iterations
-        self.tau = tau
-        self.regularization_sigma = regularization_sigma
-        self.original_image_spacing = original_image_spacing
-        self.disable_correction = disable_correction
-        self.use_image_spacing = use_image_spacing
+
+        if not is_tuple(scale_factors, min_length=1):
+            scale_factors = (scale_factors,)
         self.scale_factors = scale_factors
+
+        self.scale_factors = scale_factors  # this also defines "n_levels"
+        self.iterations = TrainableVarRegBlock._expand_to_level_tuple(
+            iterations, n_levels=self.n_levels
+        )
+
+        self.tau = TrainableVarRegBlock._expand_to_level_tuple(
+            tau, n_levels=self.n_levels
+        )
+        self.regularization_sigma = TrainableVarRegBlock._expand_to_level_tuple(
+            regularization_sigma, n_levels=self.n_levels, is_tuple=True
+        )
+        self.regularization_sigma = TrainableVarRegBlock._expand_to_level_tuple(
+            regularization_sigma, n_levels=self.n_levels, is_tuple=True
+        )
+        self.regularization_radius = TrainableVarRegBlock._expand_to_level_tuple(
+            regularization_radius, n_levels=self.n_levels, is_tuple=True
+        )
+        self.original_image_spacing = original_image_spacing
+        self.use_image_spacing = use_image_spacing
+
         self.demon_forces = demon_forces
 
         self.early_stopping_fn = early_stopping_method
         self.early_stopping_delta = early_stopping_delta
         self.early_stopping_window = early_stopping_window
+
+        # TODO: Implement restriction of reg to mask bbox
+        self.restrict_to_mask = restrict_to_mask
+
+        # check if params are passed with/converted to consistent length
+        # (== self.n_levels)
+        if not are_of_same_length(
+            self.scale_factors,
+            self.iterations,
+            self.tau,
+            self.regularization_sigma,
+        ):
+            raise ValueError("Inconsistent lengths of passed parameters")
+
         self._metrics = []
         self._counter = 0
 
@@ -266,15 +304,14 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
 
         self._demon_forces_layer = DemonForces3d()
 
-        for i_level, sigma in enumerate(regularization_sigma):
-            if radius:
+        for i_level, sigma in enumerate(self.regularization_sigma):
+            if self.regularization_radius:
                 self.add_module(
                     name=f"regularization_layer_level_{i_level}",
                     module=GaussianSmoothing3d(
                         sigma=sigma,
-                        sigma_cutoff=(3.0, 3.0, 3.0),
-                        same_size=True,
-                        radius=radius[i_level],
+                        sigma_cutoff=None,
+                        radius=self.regularization_radius[i_level],
                         spacing=self.original_image_spacing,
                         use_image_spacing=self.use_image_spacing,
                     ),
@@ -284,12 +321,30 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
                     name=f"regularization_layer_level_{i_level}",
                     module=GaussianSmoothing3d(
                         sigma=sigma,
-                        sigma_cutoff=(3.0, 3.0, 3.0),
-                        same_size=True,
+                        sigma_cutoff=(2.0, 2.0, 2.0),
+                        force_same_size=True,
                         spacing=self.original_image_spacing,
                         use_image_spacing=self.use_image_spacing,
                     ),
                 )
+
+    @staticmethod
+    def _expand_to_level_tuple(
+        value: Any, n_levels: int, is_tuple: bool = False, skip_none: bool = True
+    ) -> Optional[Tuple]:
+        if skip_none and value is None:
+            return value
+        else:
+            if isinstance(value, (int, float)):
+                return (value,) * n_levels
+            elif is_tuple and not is_tuple_of_tuples(value):
+                return (value,) * n_levels
+            else:
+                return value
+
+    @property
+    def n_levels(self):
+        return len(self.scale_factors)
 
     @property
     def config(self):
@@ -421,6 +476,15 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
         }
 
     def run_registration(self, fixed_image, mask, moving_image, original_image_spacing):
+        self
+
+        if self.restrict_to_mask and mask is not None:
+            bbox = get_bounding_box(mask, padding=5)
+            self.logger.debug(f"Restricting registration to bounding box {bbox}")
+            fixed_image = fixed_image[bbox]
+            mask = mask[bbox]
+            moving_image = moving_image[bbox]
+
         # create new spatial transformers if needed (skip batch and color dimension)
         self._create_spatial_transformers(
             fixed_image.shape[2:], device=fixed_image.device
@@ -437,7 +501,7 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
         vector_field = None
         mask = torch.as_tensor(mask, dtype=torch.bool)
 
-        timings = []
+        runtimes = []
 
         for i_level, (scale_factor, iterations) in enumerate(
             zip(self.scale_factors, self.iterations)
@@ -520,20 +584,15 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
                     self.demon_forces,
                     original_image_spacing,
                 )
-                # mask forces with artifact mask (artifact = 0, valid = 1)
-
                 vector_field += self.tau[i_level] * (forces * scaled_mask)
-                # vector_field += predicted_params["tau"] * (forces * scaled_mask)
+
                 _regularization_layer = self.get_submodule(
                     f"regularization_layer_level_{i_level}",
                 )
                 vector_field = _regularization_layer(vector_field)
 
-            # print(f'LEVEL {i_level + 1} stopped at ITERATION {i + 1}: Metric: {metrics[-1]}')
-
             t_end = time.time()
-
-            timings.append(t_end - t_start)
+            runtimes.append(t_end - t_start)
             metrics.append(level_metrics)
             features.append(level_features)
 
@@ -542,7 +601,7 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
             full_size_moving, vector_field
         )
 
-        misc = {"features": features, "metrics": metrics, "timings": timings}
+        misc = {"features": features, "metrics": metrics, "runtimes": runtimes}
 
         return warped_moving_image, vector_field, misc
 
@@ -556,8 +615,17 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
 
 
 if __name__ == "__main__":
-    import torch
+    # import torch
+    #
+    # a = torch.ones((1, 1, 128, 128, 128), device="cuda")
+    # unet = FlexUNet(n_levels=3).to(a)
+    # b, encoded = unet(a)
 
-    a = torch.ones((1, 1, 128, 128, 128), device="cuda")
-    unet = FlexUNet(n_levels=3).to(a)
-    b, encoded = unet(a)
+    model = TrainableVarRegBlock(
+        scale_factors=1.0,
+        iterations=200,
+        demon_forces="symmetric",
+        tau=2.0,
+        regularization_sigma=(4.0, 2.0, 2.0),
+        early_stopping_method=None,
+    )

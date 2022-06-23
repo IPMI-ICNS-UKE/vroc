@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
+
 
 class EncoderBlock(nn.Module):
     def __init__(
@@ -211,108 +213,74 @@ class BaseGaussianSmoothing(ABC, nn.Module):
 
     @staticmethod
     def make_gaussian_kernel(
-        sigma: Tuple[float, ...],
-        sigma_cutoff: Tuple[float, ...],
-        same_size: bool = False,
-        radius: int = None,
+        sigma: FloatTuple,
+        sigma_cutoff: FloatTuple,
+        force_same_size: bool = False,
+        radius: Optional[IntTuple] = None,
     ):
-        if len(sigma) != len(sigma_cutoff):
+        if sigma_cutoff and len(sigma) != len(sigma_cutoff):
             raise ValueError("sigma and sigma_cutoff has to be same length")
 
         n_dim = len(sigma)
 
-        if not radius:
-            radius = max(
-                BaseGaussianSmoothing.get_kernel_radius(s, c)
-                for s, c in zip(sigma, sigma_cutoff)
-            )
+        if force_same_size:
+            # this forces same size of the kernels for more efficient convolution
+            if not radius:
+                max_radius = max(
+                    BaseGaussianSmoothing.get_kernel_radius(s, c)
+                    for s, c in zip(sigma, sigma_cutoff)
+                )
+            else:
+                max_radius = max(radius)
+
+            radius = (max_radius,) * n_dim
+            sigma_cutoff = None  # we don't need cutoff anymore, we use max radius
 
         kernels = []
         for i in range(n_dim):
-            if same_size:
+            if radius:
                 kernel_1d = BaseGaussianSmoothing._make_gaussian_kernel_1d(
-                    sigma=sigma[i], radius=radius
+                    sigma=sigma[i], radius=radius[i]
                 )
             else:
                 kernel_1d = BaseGaussianSmoothing._make_gaussian_kernel_1d(
                     sigma=sigma[i], sigma_cutoff=sigma_cutoff[i]
                 )
-            if n_dim == 3:
-                kernel = torch.einsum("i,j,k->ijk", kernel_1d, kernel_1d, kernel_1d)
-            elif n_dim == 2:
+
+            if n_dim == 2:
                 kernel = torch.einsum("i,j->ij", kernel_1d, kernel_1d)
+            elif n_dim == 3:
+                kernel = torch.einsum("i,j,k->ijk", kernel_1d, kernel_1d, kernel_1d)
+            else:
+                raise RuntimeError(f"Dimension {n_dim} not supported")
+
             kernel = kernel / kernel.sum()
             kernels.append(kernel)
 
         return kernels
 
 
-class GaussianSmoothing2d(BaseGaussianSmoothing):
-    def __init__(
-        self,
-        sigma: Tuple[float, float] = (1.0, 1.0),
-        sigma_cutoff: Tuple[float, float] = (1.0, 1.0),
-        same_size: bool = False,
-        radius: int = None,
-    ):
-        super().__init__()
-
-        if not (len(sigma) == len(sigma_cutoff) == 2):
-            raise ValueError("Length of sigma and sigma_cutoff has to be 2")
-
-        self.sigma = sigma
-        self.sigma_cutoff = sigma_cutoff
-        self.same_size = same_size
-
-        kernel_x, kernel_y = GaussianSmoothing2d.make_gaussian_kernel(
-            sigma=self.sigma,
-            sigma_cutoff=self.sigma_cutoff,
-            same_size=same_size,
-            radius=radius,
-        )
-        self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1])
-
-        kernel_x, kernel_y = (
-            kernel_x[None, None],
-            kernel_y[None, None],
-        )
-        if self.same_size:
-            kernel = torch.cat((kernel_x, kernel_y), dim=0)
-            self.register_buffer("weight", kernel)
-
-        else:
-            self.register_buffer("weight_x", kernel_x)
-            self.register_buffer("weight_y", kernel_y)
-
-    def forward(self, image):
-        if self.same_size:
-            image = F.conv2d(image, self.weight, groups=2, stride=1, padding="same")
-        else:
-            image_x = F.conv2d(image[:, 0:1], self.weight_x, stride=1, padding="same")
-            image_y = F.conv2d(image[:, 1:2], self.weight_y, stride=1, padding="same")
-            image = torch.cat((image_x, image_y), dim=1)
-
-        return image
-
-
 class GaussianSmoothing3d(BaseGaussianSmoothing):
     def __init__(
         self,
-        sigma: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        sigma_cutoff: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        same_size: bool = False,
-        radius: int = None,
-        spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
+        sigma: FloatTuple3D = (1.0, 1.0, 1.0),
+        sigma_cutoff: Optional[FloatTuple3D] = (1.0, 1.0, 1.0),
+        radius: Optional[IntTuple3D] = None,
+        force_same_size: bool = False,
+        spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         use_image_spacing: bool = False,
     ):
         super().__init__()
 
-        if not (len(sigma) == len(sigma_cutoff) == 3):
+        if sigma_cutoff and not (len(sigma) == len(sigma_cutoff) == 3):
             raise ValueError("Length of sigma and sigma_cutoff has to be 3")
+
+        if sigma_cutoff and radius:
+            raise RuntimeError("Please set either sigma_cutoff or radius")
 
         self.sigma = sigma
         self.sigma_cutoff = sigma_cutoff
-        self.same_size = same_size
+        self.force_same_size = force_same_size
         self.use_image_spacing = use_image_spacing
         self.spacing = spacing
 
@@ -323,7 +291,7 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
         kernel_x, kernel_y, kernel_z = GaussianSmoothing3d.make_gaussian_kernel(
             sigma=self.sigma,
             sigma_cutoff=self.sigma_cutoff,
-            same_size=same_size,
+            force_same_size=self.force_same_size,
             radius=radius,
         )
         self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1], kernel_z.shape[-1])
@@ -333,6 +301,9 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
             kernel_y[None, None],
             kernel_z[None, None],
         )
+
+        self.same_size = kernel_x.shape == kernel_y.shape == kernel_z.shape
+
         if self.same_size:
             self.kernel = torch.cat((kernel_x, kernel_y, kernel_z), dim=0)
             self.register_buffer("weight", self.kernel)
@@ -444,3 +415,24 @@ class DemonForces3d(nn.Module):
             method=method,
             original_image_spacing=original_image_spacing,
         )
+
+
+if __name__ == "__main__":
+    d1 = GaussianSmoothing3d(
+        sigma=(1.0, 2.0, 3.0),
+        # radius=(1, 2, 3),
+        sigma_cutoff=(2.0, 2.0, 2.0),
+        force_same_size=True,
+    )
+
+    d2 = GaussianSmoothing3d(
+        sigma=(1.0, 2.0, 3.0), radius=(1, 2, 3), sigma_cutoff=None, force_same_size=True
+    )
+
+    d3 = GaussianSmoothing3d(
+        sigma=(1.0, 2.0, 3.0), radius=(1, 2, 3), sigma_cutoff=None, force_same_size=True
+    )
+
+    print(d1.kernel_size)
+    print(d2.kernel_size)
+    print(d3.kernel_size)
