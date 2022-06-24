@@ -78,13 +78,12 @@ class AutoencoderGym:
         return running_loss
 
     def inference(self, dataloader, state_dict_path):
-        model = AutoEncoder().to(device=self.device)
-        model.load_state_dict(torch.load(state_dict_path)["state_dict"])
-        model.eval()
+        self.model.load_state_dict(torch.load(state_dict_path)["state_dict"])
+        self.model.eval()
         features = {}
         for data, path in tqdm(dataloader):
             with torch.no_grad():
                 images = data.to(self.device)
-                _, embedded = model(images)
+                _, embedded = self.model(images)
                 features[os.path.basename(path[0])] = embedded.detach().cpu().numpy()
         return features
