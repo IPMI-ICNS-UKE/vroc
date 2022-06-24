@@ -29,7 +29,7 @@ class FlexUNet(nn.Module):
         self,
         n_channels: int = 1,
         n_classes: int = 1,
-        n_levels: int = 7,
+        n_levels: int = 6,
         filter_base: int = 32,
         convolution_layer=nn.Conv3d,
         downsampling_layer=nn.MaxPool3d,
