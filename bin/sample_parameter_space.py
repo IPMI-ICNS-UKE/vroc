@@ -103,7 +103,7 @@ def sample_parameter_space(
                     level_metrics=misc["level_metrics"],
                 )
         iterations_done += 1
-        if iterations_done >= iterations:
+        if 0 < iterations <= iterations_done:
             break
 
 
