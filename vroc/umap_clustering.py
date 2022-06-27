@@ -13,16 +13,33 @@ from tqdm import tqdm
 from vroc.helper import rescale_range
 
 
-def load_file(filepath: os.path) -> dict:
+def load_file(
+    filepath: os.path,
+    filter_features=None,
+) -> dict:
+    """filter_features can be None, str: NLST, list/tuple of phase(s) (phase_3,
+    phase_2)"""
     assert os.path.isfile(filepath)
     data = pickle.load(open(filepath, "rb"))
-    filenames = np.asarray(list(data.keys()))
-    prepro_data = np.concatenate(list(data.values()), axis=0)
+    filenames = list(data.keys())
+    if filter_features:
+        filenames = list(filter(lambda x: x[1] in filter_features, list(filenames)))
+    prepro_data = np.zeros((len(filenames), 1024))
+    for index, key in enumerate(filenames):
+        prepro_data[index] = data[key]
+
+    if isinstance(filenames[0], tuple):
+        filenames = ["_".join(sub) for sub in filenames]
     return filenames, prepro_data
 
 
 def draw_umap(
-    image_features, n_neighbors=10, min_dist=0.1, n_components=2, metric="euclidean"
+    image_features,
+    filenames,
+    n_neighbors=10,
+    min_dist=0.1,
+    n_components=2,
+    metric="euclidean",
 ):
     """Finds a 2-dimensional embedding of image_features that approximates an
     underlying manifold and plots the results."""
@@ -37,12 +54,24 @@ def draw_umap(
 
     if n_components == 2:
         ax = fig.add_subplot(111)
-        ax.scatter(u[:, 0], u[:, 1])
+        if filenames:
+            # index of filenames list where nlst dataset starts
+            constant = next(
+                i for i, filename in enumerate(filenames) if filename.startswith("NLST")
+            )
+        else:
+            constant = 0
+        ax.scatter(
+            u[:constant, 0], u[:constant, 1], c="b", marker="+", label="Not NLST"
+        )
+        ax.scatter(u[constant:, 0], u[constant:, 1], c="r", marker="+", label="NLST")
+        ax.legend(loc=1)
     else:
         raise ValueError
 
-    fig.savefig("umap.png")
-    return u
+    fig.savefig("umap_n.pdf")
+    fig.savefig("umap_n.png")
+    return filenames, u
 
 
 def get_neighbors(
@@ -65,7 +94,6 @@ def get_neighbors(
     distances, indices = nbrs.kneighbors(x)
     summed_distances = distances.sum(axis=1).reshape(-1, 1)
 
-    # for each
     cohorts = keys[indices]
 
     if plot_cases:
@@ -103,24 +131,18 @@ def get_neighbors(
     return cohorts
 
 
-def main(
-    filepath_features: os.path = os.path.join(".", "features_data", "features.p"),
-    plot_cases: bool = False,
-    saving_dir: str = False,
-) -> np.array:
-
-    filenames, prepro_data = load_file(filepath_features)
-
-    x = draw_umap(image_features=prepro_data)
-
-    cohorts = get_neighbors(
-        x, keys=filenames, plot_cases=plot_cases, saving_dir=saving_dir
-    )
-    return cohorts
-
-
 if __name__ == "__main__":
-    cohorts = main(
-        plot_cases=True,
-        saving_dir=os.path.join(".", "features_data", "neighbors_examples"),
+    database = os.path.join("/media/lwimmert/5E57-FB01/learn2reg/Features")
+    filenames_nlst, prepro_data_nlst = load_file(
+        os.path.join(database, "features.p"), filter_features="NLST"
     )
+    filenames_dir, prepro_data_dir = load_file(
+        os.path.join(database, "dirlab_features.p"), filter_features=("phase_4")
+    )
+    filenames = filenames_dir + filenames_nlst
+    prepro_data = np.concatenate((prepro_data_dir, prepro_data_nlst), axis=0)
+    filenames, u_map = draw_umap(image_features=prepro_data, filenames=filenames)
+
+    # cohorts = get_neighbors(
+    #     u_map, keys=filenames, plot_cases=False, saving_dir=None
+    # )
