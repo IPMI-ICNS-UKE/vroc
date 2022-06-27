@@ -1,3 +1,4 @@
+from glob import glob
 from pathlib import Path
 from typing import List
 
@@ -130,10 +131,14 @@ class AutoencoderDataset(BaseDataset):
         root_dirs: List[Path]
 
         filepaths = []
-        allowed_extensions = [".nii.gz", ".mhd"]
+        allowed_extensions = [".nii.gz", ".mhd", ".mha"]
         for root_dir in root_dirs:
             for ext in allowed_extensions:
-                filepaths.extend(sorted(root_dir.glob("*" + ext)))
+                filepaths.extend(
+                    sorted(
+                        Path(p) for p in glob(str(Path.joinpath(root_dir, "*" + ext)))
+                    )
+                )
 
         return filepaths
 
