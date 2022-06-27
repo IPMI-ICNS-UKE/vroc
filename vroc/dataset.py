@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import List
 
 import SimpleITK as sitk
 import torch
@@ -10,7 +11,17 @@ from vroc.helper import rescale_range, torch_prepare
 from vroc.preprocessing import crop_background, resample_image_size
 
 
-class NLSTDataset(Dataset):
+class BaseDataset(Dataset):
+    @staticmethod
+    def load_and_preprocess(filepath: PathLike, is_mask: bool = False) -> sitk.Image:
+        filepath = str(filepath)
+        dtype = sitk.sitkUInt8 if is_mask else sitk.sitkFloat32
+        image = sitk.ReadImage(filepath, dtype)
+
+        return image
+
+
+class NLSTDataset(BaseDataset):
     def __init__(self, root_dir: PathLike):
         self.filepaths = self.fetch_filepaths(root_dir)
 
@@ -59,14 +70,6 @@ class NLSTDataset(Dataset):
             }
             for i in range(length)
         ]
-
-    @staticmethod
-    def load_and_preprocess(filepath: PathLike, is_mask: bool = False) -> sitk.Image:
-        filepath = str(filepath)
-        dtype = sitk.sitkUInt8 if is_mask else sitk.sitkFloat32
-        image = sitk.ReadImage(filepath, dtype)
-
-        return image
 
     def __len__(self):
         return len(self.filepaths)
@@ -117,19 +120,32 @@ class NLSTDataset(Dataset):
         }
 
 
-# TODO: fix this
-# class AutoEncoderDataset(VrocDataset):
-#     def __getitem__(self, item):
-#         image_path = self.dir_list[item]
-#         image = load_and_preprocess(image_path)
-#         image = crop_background(image)
-#         image = resample_image_size(image, new_size=(128, 128, 128))
-#         image = sitk.GetArrayFromImage(image)
-#         image = rescale_range(image, input_range=(-1024, 3071), output_range=(0, 1))
-#         image = torch_prepare(image)
-#         return image
+class AutoencoderDataset(BaseDataset):
+    def __init__(self, filepaths: List[PathLike]):
+        self.filepaths = filepaths
 
+    @staticmethod
+    @convert("root_dirs", lambda paths: [Path(p) for p in paths])
+    def fetch_filepaths(root_dirs: List[PathLike]):
+        root_dirs: List[Path]
 
-# if __name__ == '__main__':
-#     d = NLSTDataset("")
-#
+        filepaths = []
+        allowed_extensions = [".nii.gz", ".mhd"]
+        for root_dir in root_dirs:
+            for ext in allowed_extensions:
+                filepaths.extend(sorted(root_dir.glob("*" + ext)))
+
+        return filepaths
+
+    def __len__(self):
+        return len(self.filepaths)
+
+    def __getitem__(self, item):
+        image_path = self.filepaths[item]
+        image = NLSTDataset.load_and_preprocess(image_path)
+        image = crop_background(image)
+        image = resample_image_size(image, new_size=(128, 128, 128))
+        image = sitk.GetArrayFromImage(image)
+        image = rescale_range(image, input_range=(-1024, 3071), output_range=(0, 1))
+        image = torch_prepare(image)
+        return image, str(image_path)
