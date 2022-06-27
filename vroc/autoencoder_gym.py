@@ -76,14 +76,3 @@ class AutoencoderGym:
             self.optimizer.step()
             running_loss += loss.item() * images.size(0)
         return running_loss
-
-    def inference(self, dataloader, state_dict_path):
-        self.model.load_state_dict(torch.load(state_dict_path)["state_dict"])
-        self.model.eval()
-        features = {}
-        for data, path in tqdm(dataloader):
-            with torch.no_grad():
-                images = data.to(self.device)
-                _, embedded = self.model(images)
-                features[os.path.basename(path[0])] = embedded.detach().cpu().numpy()
-        return features
