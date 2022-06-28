@@ -1,7 +1,9 @@
+from functools import cache
 from glob import glob
 from pathlib import Path
 from typing import List
 
+import numpy as np
 import SimpleITK as sitk
 import torch
 from torch.utils.data import Dataset
@@ -126,6 +128,15 @@ class AutoencoderDataset(BaseDataset):
         self.filepaths = filepaths
 
     @staticmethod
+    def load_and_preprocess(filepath: PathLike, is_mask: bool = False) -> np.ndarray:
+        filepath = str(filepath)
+        dtype = sitk.sitkUInt8 if is_mask else sitk.sitkFloat32
+        image = sitk.ReadImage(filepath, dtype)
+        image = crop_background(image)
+        image = resample_image_size(image, new_size=(128, 128, 128))
+        return sitk.GetArrayFromImage(image)
+
+    @staticmethod
     @convert("root_dirs", lambda paths: [Path(p) for p in paths])
     def fetch_filepaths(root_dirs: List[PathLike]):
         root_dirs: List[Path]
@@ -145,12 +156,10 @@ class AutoencoderDataset(BaseDataset):
     def __len__(self):
         return len(self.filepaths)
 
+    @cache
     def __getitem__(self, item):
         image_path = self.filepaths[item]
-        image = NLSTDataset.load_and_preprocess(image_path)
-        image = crop_background(image)
-        image = resample_image_size(image, new_size=(128, 128, 128))
-        image = sitk.GetArrayFromImage(image)
+        image = self.load_and_preprocess(image_path)
         image = rescale_range(image, input_range=(-1024, 3071), output_range=(0, 1))
         image = torch_prepare(image)
         return image, str(image_path)

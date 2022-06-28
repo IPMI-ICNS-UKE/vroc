@@ -102,10 +102,9 @@ def rescale_range(
     return rescaled
 
 
-def torch_prepare(img):
-    img = torch.from_numpy(img.copy())
-    img = img[None, :].float()
-    return img
+def torch_prepare(image: np.ndarray) -> torch.tensor:
+    image = torch.as_tensor(image.copy(), dtype=torch.float32)
+    return image[None, :]
 
 
 def batch_array(array: np.ndarray, batch_size: int = 32):

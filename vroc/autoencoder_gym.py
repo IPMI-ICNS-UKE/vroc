@@ -17,6 +17,7 @@ class AutoencoderGym:
         self.model = AutoEncoder().to(device=self.device)
         self.criterion = torch.nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        self.scaler = torch.cuda.amp.GradScaler()
 
     def workout(self, n_epochs=100, validation_epoch=5, intermediate_save=False):
         pbar = trange(1, n_epochs + 1)
@@ -28,7 +29,7 @@ class AutoencoderGym:
                 f"epoch: {epoch} \ttrain loss: {epoch_loss:.3f} \tval loss: {val_loss:.3f}"
             )
             running_loss = self._train()
-            epoch_loss = running_loss / len(self.train_loader)
+            epoch_loss = running_loss / len(self.train_loader.dataset)
 
             if epoch % validation_epoch == 0:
                 val_loss = self._validation()
@@ -41,6 +42,7 @@ class AutoencoderGym:
     def _validation(self):
         val_loss = 0.0
         for data, _ in self.val_loader:
+            self.model.eval()
             with torch.no_grad():
                 images = data.to(self.device)
                 outputs, embedded = self.model(images)
@@ -48,7 +50,7 @@ class AutoencoderGym:
                 loss = self.criterion(outputs, images)
                 val_loss += loss.item() * images.size(0)
 
-        val_loss = val_loss / len(self.val_loader)
+        val_loss = val_loss / len(self.val_loader.dataset)
         return val_loss
 
     def _save_model(self, epoch, val_loss):
@@ -66,13 +68,16 @@ class AutoencoderGym:
 
     def _train(self):
         running_loss = 0.0
+        self.model.train()
         for data, _ in self.train_loader:
             images = data.to(self.device)
             self.optimizer.zero_grad()
-            outputs, _ = self.model(images)
-            outputs = torch.sigmoid(outputs)
-            loss = self.criterion(outputs, images)
-            loss.backward()
-            self.optimizer.step()
+            with torch.cuda.amp.autocast():
+                outputs, _ = self.model(images)
+                outputs = torch.sigmoid(outputs)
+                loss = self.criterion(outputs, images)
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             running_loss += loss.item() * images.size(0)
         return running_loss

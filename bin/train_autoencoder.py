@@ -32,8 +32,8 @@ train_list, val_list = train_test_split(
 
 train_dataset = AutoencoderDataset(filepaths=train_list)
 val_dataset = AutoencoderDataset(filepaths=val_list)
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=16)
-val_loader = DataLoader(val_dataset, batch_size=4, shuffle=True, num_workers=16)
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=True)
 
 Gym = AutoencoderGym(
     train_loader=train_loader,
@@ -41,6 +41,4 @@ Gym = AutoencoderGym(
     device=device,
     out_path="/home/tsentker/Documents/results/vroc_AE/models",
 )
-Gym.workout()
-
-# Gym.inference(dataloader=val_loader, state_dict_path="/home/tsentker/Documents/results/vroc_AE/models/test.pth")
+Gym.workout(validation_epoch=5, intermediate_save=True)
