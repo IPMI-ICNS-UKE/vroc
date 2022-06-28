@@ -17,6 +17,7 @@ class AutoencoderGym:
         self.model = AutoEncoder().to(device=self.device)
         self.criterion = torch.nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        self.scaler = torch.cuda.amp.GradScaler()
 
     def workout(self, n_epochs=100, validation_epoch=5, intermediate_save=False):
         pbar = trange(1, n_epochs + 1)
@@ -69,10 +70,12 @@ class AutoencoderGym:
         for data, _ in self.train_loader:
             images = data.to(self.device)
             self.optimizer.zero_grad()
-            outputs, _ = self.model(images)
-            outputs = torch.sigmoid(outputs)
-            loss = self.criterion(outputs, images)
-            loss.backward()
-            self.optimizer.step()
+            with torch.cuda.amp.autocast():
+                outputs, _ = self.model(images)
+                outputs = torch.sigmoid(outputs)
+                loss = self.criterion(outputs, images)
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             running_loss += loss.item() * images.size(0)
         return running_loss

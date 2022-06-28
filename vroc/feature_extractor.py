@@ -39,6 +39,7 @@ if __name__ == "__main__":
     dataset_paths = [
         "dirlab2022/data/**/Images",
     ]
+
     dataset_paths = [os.path.join(root_dir, path) for path in dataset_paths]
     filepaths = AutoencoderDataset.fetch_filepaths(dataset_paths)
 

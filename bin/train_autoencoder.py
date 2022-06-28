@@ -41,6 +41,6 @@ Gym = AutoencoderGym(
     device=device,
     out_path="/home/tsentker/Documents/results/vroc_AE/models",
 )
-Gym.workout()
+Gym.workout(validation_epoch=2, intermediate_save=True)
 
 # Gym.inference(dataloader=val_loader, state_dict_path="/home/tsentker/Documents/results/vroc_AE/models/test.pth")
