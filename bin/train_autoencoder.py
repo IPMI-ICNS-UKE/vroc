@@ -32,8 +32,8 @@ train_list, val_list = train_test_split(
 
 train_dataset = AutoencoderDataset(filepaths=train_list)
 val_dataset = AutoencoderDataset(filepaths=val_list)
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=16)
-val_loader = DataLoader(val_dataset, batch_size=4, shuffle=True, num_workers=16)
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=4, shuffle=True)
 
 Gym = AutoencoderGym(
     train_loader=train_loader,
