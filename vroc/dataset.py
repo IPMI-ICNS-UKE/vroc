@@ -1,7 +1,7 @@
 from functools import cache
 from glob import glob
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import SimpleITK as sitk
@@ -25,8 +25,18 @@ class BaseDataset(Dataset):
 
 
 class NLSTDataset(BaseDataset):
-    def __init__(self, root_dir: PathLike):
+    def __init__(
+        self,
+        root_dir: PathLike,
+        i_worker: Optional[int] = None,
+        n_worker: Optional[int] = None,
+    ):
         self.filepaths = self.fetch_filepaths(root_dir)
+        self.i_worker = i_worker
+        self.n_worker = n_worker
+
+        if i_worker is not None and n_worker is not None:
+            self.filepaths = self.filepaths[self.i_worker :: self.n_worker]
 
     @staticmethod
     @convert("root_dir", Path)
@@ -161,5 +171,6 @@ class AutoencoderDataset(BaseDataset):
         image_path = self.filepaths[item]
         image = self.load_and_preprocess(image_path)
         image = rescale_range(image, input_range=(-1024, 3071), output_range=(0, 1))
+
         image = torch_prepare(image)
         return image, str(image_path)

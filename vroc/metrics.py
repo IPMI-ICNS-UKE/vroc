@@ -2,6 +2,10 @@ import torch
 from torch.nn import functional as F
 
 
+def mse_improvement(before: float, after: float) -> float:
+    return (after - before) / before
+
+
 def patch_mean(images, patch_shape):
 
     channels, *patch_size = patch_shape

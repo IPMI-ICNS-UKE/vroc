@@ -1,6 +1,9 @@
 from typing import List, Optional, Union
+from uuid import uuid4
 
+import numpy as np
 import pandas as pd
+import peewee
 
 import vroc.database.models as orm
 from vroc.common_types import PathLike
@@ -52,25 +55,59 @@ class DatabaseClient(LoggerMixin):
 
         return runs
 
-    def fetch_best_run(self, image_id: str) -> dict:
+    def fetch_best_run(
+        self,
+        image_id: str,
+        k_best: int = 1,
+        reduce: bool = True,
+        as_dataframe: bool = False,
+    ) -> Union[dict, List[dict], pd.DataFrame]:
         query = (
             orm.Run.select()
             .where(orm.Run.image == image_id)
-            .order_by(orm.Run.metric_after)
-            .limit(1)
+            .order_by(orm.Run.metric_after.asc())
+            .limit(k_best)
             .dicts()
-            .first()
+            .first(n=k_best)
         )
+        if k_best > 1 and reduce:
+            query = {
+                "uuid": uuid4(),
+                "image": query[0]["image"],
+                "parameters": self._reduce_parameters([q["parameters"] for q in query]),
+                "metric_before": float(np.mean([q["metric_before"] for q in query])),
+                "metric_after": float(np.mean([q["metric_after"] for q in query])),
+                "level_metrics": None,
+                "created": None,
+            }
+
+        if as_dataframe:
+            query = DatabaseClient._to_dataframe(query)
 
         return query
 
+    def _reduce_parameters(self, parameters: List[dict]):
+        reduced = {}
+        for params in parameters:
+            for param_name, param_value in params.items():
+                try:
+                    reduced[param_name].append(param_value)
+                except KeyError:
+                    reduced[param_name] = [param_value]
+
+        # reduce
+        for param_name, param_values in reduced.items():
+            reduced[param_name] = np.mean(param_values)
+
+        return reduced
+
     def fetch_best_runs(
-        self, as_dataframe: bool = False
+        self, k_best: int = 1, as_dataframe: bool = False
     ) -> Union[List[dict], pd.DataFrame]:
         best_runs = []
 
         for image in orm.Image.select():
-            best_runs.append(self.fetch_best_run(image))
+            best_runs.append(self.fetch_best_run(image, k_best=k_best))
 
         if as_dataframe:
             best_runs = DatabaseClient._to_dataframe(best_runs)
@@ -88,6 +125,8 @@ class DatabaseClient(LoggerMixin):
 
     @staticmethod
     def _to_dataframe(runs: List[dict]) -> pd.DataFrame:
+        if isinstance(runs, dict):
+            runs = [runs]
         runs = [DatabaseClient._expand_param_dict(r) for r in runs]
 
         return pd.DataFrame.from_records(runs, index="uuid")
