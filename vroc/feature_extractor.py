@@ -56,8 +56,8 @@ if __name__ == "__main__":
 
     features = {}
     for filepath in tqdm(filepaths):
-        image = AutoencoderDataset.load_and_preprocess(filepath=filepath)
-        feature_vector = feature_extractor.infer(image=image)
+        img = AutoencoderDataset.load_and_preprocess(filepath=filepath)
+        feature_vector = feature_extractor.infer(image=img)
         case = re.search(r"Case(\d*)Pack", str(filepath))[1]
         features[(case, os.path.splitext(os.path.basename(filepath))[0])] = (
             feature_vector.detach().cpu().numpy()
