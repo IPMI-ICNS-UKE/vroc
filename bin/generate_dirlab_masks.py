@@ -1,4 +1,5 @@
 import os
+from glob import glob
 from pathlib import Path
 
 import numpy as np
@@ -7,11 +8,29 @@ import SimpleITK as sitk
 from vroc.models import UNet
 from vroc.segmentation import LungSegmenter2D
 
-dirlab_case = 8
-phase = (0, 5)
-DIRLAB_PATH = f"/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack"
-data_path = os.path.join(DIRLAB_PATH, "Images")
-out_path = os.path.join(DIRLAB_PATH, "segmentation")
+
+def generate_dirlab_copd_masks(root_path):
+    filelist = sorted(glob(os.path.join(root_path, "**/**/phase*.mha")))
+
+    for file in filelist:
+        img = sitk.ReadImage(file)
+        img_arr = sitk.GetArrayFromImage(img)
+        img_arr = np.swapaxes(img_arr, 0, 2)
+        out_arr = lung_segmenter.segment(img_arr)
+        out_arr = np.swapaxes(out_arr, 0, 2)
+        out_arr = out_arr.astype(np.uint8)
+        out = sitk.GetImageFromArray(out_arr)
+        out.CopyInformation(img)
+        sitk.WriteImage(
+            out,
+            os.path.join(
+                root_path,
+                os.path.split(os.path.dirname(os.path.dirname(file)))[1],
+                "segmentation",
+                "mask_" + file[-5:],
+            ),
+        )
+
 
 lung_segmenter = LungSegmenter2D(
     model=UNet().to("cuda"),
@@ -20,16 +39,4 @@ lung_segmenter = LungSegmenter2D(
         "/home/tsentker/Documents/projects/ebolagnul/lung_segmenter.pth"
     ),
 )
-
-for p in phase:
-    img = sitk.ReadImage(os.path.join(data_path, f"phase_{p}.mha"))
-    img_arr = sitk.GetArrayFromImage(img)
-    # img_arr = np.swapaxes(img_arr, 0, 2)
-    out_mask_arr = lung_segmenter.segment(image=img_arr)
-    # out_mask_arr = np.swapaxes(out_mask_arr, 0, 2)
-    out_mask_arr = out_mask_arr.astype(int)
-    out_mask = sitk.GetImageFromArray(out_mask_arr)
-    out_mask = sitk.Cast(out_mask, sitk.sitkUInt8)
-    out_mask.CopyInformation(img)
-    out_name = f"ebolagnul_mask_{p}.mha"
-    sitk.WriteImage(out_mask, os.path.join(out_path, out_name))
+generate_dirlab_copd_masks(root_path="/home/tsentker/data/copd_dirlab2022/data/")
