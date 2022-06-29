@@ -81,7 +81,7 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
-        if x2:
+        if x2 is not None:
             x = torch.cat([x2, x1], dim=1)
         else:
             x = x1
@@ -176,7 +176,7 @@ class UpBlock(nn.Module):
     def forward(self, x1, x2):
         x1 = self.up(x1)
         # input is CHW
-        if x2:
+        if x2 is not None:
             diff_y = x2.size()[2] - x1.size()[2]
             diff_x = x2.size()[3] - x1.size()[3]
 
