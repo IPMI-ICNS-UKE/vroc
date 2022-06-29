@@ -41,4 +41,4 @@ Gym = AutoencoderGym(
     device=device,
     out_path="/home/tsentker/Documents/results/vroc_AE/models",
 )
-Gym.workout(validation_epoch=5, intermediate_save=True)
+Gym.workout(validation_epoch=1)

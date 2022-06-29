@@ -18,8 +18,9 @@ class AutoencoderGym:
         self.criterion = torch.nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
         self.scaler = torch.cuda.amp.GradScaler()
+        self.save_best_model = SaveBestModel(out_path=out_path)
 
-    def workout(self, n_epochs=100, validation_epoch=5, intermediate_save=False):
+    def workout(self, n_epochs=100, validation_epoch=5):
         pbar = trange(1, n_epochs + 1, unit="epoch")
         val_loss = np.NAN
         epoch_loss = np.NAN
@@ -32,11 +33,7 @@ class AutoencoderGym:
 
             if epoch % validation_epoch == 0:
                 val_loss = self._validation()
-
-                if intermediate_save:
-                    self._save_model(epoch=epoch, val_loss=val_loss)
-
-        self._save_model(epoch=pbar[-1], val_loss=val_loss)
+                self.save_best_model(val_loss, epoch, self.model, self.optimizer)
 
     def _validation(self):
         val_loss = 0.0
@@ -80,3 +77,27 @@ class AutoencoderGym:
             self.scaler.update()
             running_loss += loss.item() * images.size(0)
         return running_loss
+
+
+class SaveBestModel:
+    """Class to save the best model while training.
+
+    If the current epoch's validation loss is less than the previous
+    least less, then save the model state.
+    """
+
+    def __init__(self, out_path, best_valid_loss=float("inf")):
+        self.best_valid_loss = best_valid_loss
+        self.out_path = out_path
+
+    def __call__(self, current_valid_loss, epoch, model, optimizer):
+        if current_valid_loss < self.best_valid_loss:
+            self.best_valid_loss = current_valid_loss
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+                os.path.join(self.out_path, "best_model.pth"),
+            )

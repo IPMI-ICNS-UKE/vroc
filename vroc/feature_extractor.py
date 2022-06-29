@@ -17,9 +17,11 @@ from vroc.preprocessing import crop_background, resample_image_size
 class FeatureExtractor:
     def __init__(self, model_path):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = torch.load(model_path, map_location=torch.device(self.device))
-        # self.model = AutoEncoder()
-        # self.model.load_state_dict(torch.load(model_path)["state_dict"])
+        # self.model = torch.load(model_path, map_location=torch.device(self.device))
+        self.model = AutoEncoder().to(device=self.device)
+        self.model.load_state_dict(
+            torch.load(model_path, map_location=torch.device(self.device))["state_dict"]
+        )
         self.model.eval()
 
     def infer(self, image: np.ndarray):
@@ -39,7 +41,7 @@ class FeatureExtractor:
 
 if __name__ == "__main__":
     feature_extractor = FeatureExtractor(
-        model_path="/home/tsentker/Documents/results/vroc_AE/models/AE_100_epochs_luna16_NLST.pth"
+        model_path="/home/tsentker/Documents/results/vroc_AE/models/epoch075_val_loss_=_0.004.pth"
     )
     root_dir = (
         Path("/home/tsentker/data"),
