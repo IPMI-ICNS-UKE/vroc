@@ -15,7 +15,7 @@ class Segmenter2D(ABC):
         model: nn.Module,
         state_filepath: Path = None,
         device="cuda",
-        iter_axis: int = 2,
+        iter_axis: int = 2,  # Model input: axial slices
     ):
         self.model = model
         self.device = device
@@ -43,9 +43,9 @@ class Segmenter2D(ABC):
     def _prepare_axes(self, image: np.ndarray, inverse: bool = False):
         if inverse:
             image = np.swapaxes(image, 0, self.iter_axis)
-            # image = np.flip(image, axis=1)
+            image = np.flip(image, axis=1)
         else:
-            # image = np.flip(image, axis=1)
+            image = np.flip(image, axis=1)
             image = np.swapaxes(image, self.iter_axis, 0)
         return image
 
@@ -56,8 +56,8 @@ class Segmenter2D(ABC):
         fill_holes: bool = True,
         clear_cuda_cache: bool = False,
     ):
-        image = self._prepare_image(image=image)
         image = self._prepare_axes(image=image, inverse=False)
+        image = self._prepare_image(image=image)
         predicted_batches = []
         for image_batch in batch_array(image, batch_size=batch_size):
             image_batch = torch.as_tensor(
@@ -97,7 +97,6 @@ if __name__ == "__main__":
     lung_segmenter = LungSegmenter2D(
         model=UNet().to("cuda"),
         state_filepath=Path(
-            "/home/fmadesta/research/4d_ct_artifact_detection/saved_models/lung_segmenter.pth"
+            "/home/tsentker/Documents/projects/ebolagnul/lung_segmenter.pth"
         ),
     )
-    lung_segmenter.segment()
