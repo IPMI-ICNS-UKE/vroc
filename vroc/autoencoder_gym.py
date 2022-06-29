@@ -2,7 +2,7 @@ import os
 
 import numpy as np
 import torch
-from tqdm import tqdm, trange
+from tqdm import trange
 
 from vroc.models import AutoEncoder
 
@@ -20,14 +20,13 @@ class AutoencoderGym:
         self.scaler = torch.cuda.amp.GradScaler()
 
     def workout(self, n_epochs=100, validation_epoch=5, intermediate_save=False):
-        pbar = trange(1, n_epochs + 1)
+        pbar = trange(1, n_epochs + 1, unit="epoch")
         val_loss = np.NAN
         epoch_loss = np.NAN
 
         for epoch in pbar:
-            pbar.set_description(
-                f"epoch: {epoch} \ttrain loss: {epoch_loss:.3f} \tval loss: {val_loss:.3f}"
-            )
+            pbar.set_description(f"Epoch: {epoch}")
+            pbar.set_postfix_str(f"loss: {epoch_loss:.5f}, val. loss: {val_loss:.5f}")
             running_loss = self._train()
             epoch_loss = running_loss / len(self.train_loader.dataset)
 
