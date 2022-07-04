@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 import torch
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 
 from vroc.models import AutoEncoder
@@ -19,21 +20,29 @@ class AutoencoderGym:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
         self.scaler = torch.cuda.amp.GradScaler()
         self.save_best_model = SaveBestModel(out_path=out_path)
+        self.writer = SummaryWriter()
 
     def workout(self, n_epochs=100, validation_epoch=5):
         pbar = trange(1, n_epochs + 1, unit="epoch")
         val_loss = np.NAN
         epoch_loss = np.NAN
+        val_losses = []
+        epoch_losses = []
 
         for epoch in pbar:
             pbar.set_description(f"Epoch: {epoch}")
             pbar.set_postfix_str(f"loss: {epoch_loss:.5f}, val. loss: {val_loss:.5f}")
             running_loss = self._train()
             epoch_loss = running_loss / len(self.train_loader.dataset)
+            epoch_losses.append(epoch_loss)
 
             if epoch % validation_epoch == 0:
                 val_loss = self._validation()
                 self.save_best_model(val_loss, epoch, self.model, self.optimizer)
+                val_losses.append(val_loss)
+
+            self.writer.add_scalar("Loss/train", epoch_loss, epoch)
+            self.writer.add_scalar("Loss/val", val_loss, epoch)
 
     def _validation(self):
         val_loss = 0.0

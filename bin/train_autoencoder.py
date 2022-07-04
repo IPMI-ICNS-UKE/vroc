@@ -19,8 +19,12 @@ root_dir = (
 root_dir = next(p for p in root_dir if p.exists())
 
 dataset_paths = [
-    "NLST/imagesTr",
+    "NLST_fixed/imagesTr",
     "luna16/images",
+    "dirlab2022/data/**/Images",
+    "copd_dirlab2022/data/**/Images",
+    "creatis/OrigData/**/",
+    "learn2reg/LungCT/imagesTr",
 ]
 dataset_paths = [os.path.join(root_dir, path) for path in dataset_paths]
 
@@ -41,4 +45,4 @@ Gym = AutoencoderGym(
     device=device,
     out_path="/home/tsentker/Documents/results/vroc_AE/models",
 )
-Gym.workout(validation_epoch=1)
+Gym.workout(validation_epoch=1, n_epochs=125)
