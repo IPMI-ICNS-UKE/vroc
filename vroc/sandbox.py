@@ -1,8 +1,6 @@
 import os
-import time
 
 import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 import torch
@@ -15,7 +13,7 @@ matplotlib.use("module://backend_interagg")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-dirlab_case = 1
+dirlab_case = 2
 n_level = 2
 
 data_path = f"/home/tsentker/data/dirlab2022/data/Case{dirlab_case:02d}Pack"
@@ -76,7 +74,6 @@ fixed_LM = read_landmarks(
 moving_LM = read_landmarks(
     os.path.join(data_path, "extremePhases", f"Case{dirlab_case}_300_T50_xyz.txt")
 )
-
 
 # Fixes DIRLAB z orientation in landmarks by flipping last dimension
 fixed_LM = [(p[0], p[1], orig_ref.GetSize()[2] - p[2]) for p in fixed_LM]

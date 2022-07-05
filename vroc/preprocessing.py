@@ -8,6 +8,33 @@ import SimpleITK as sitk
 from tqdm import tqdm
 
 
+def resample_image_spacing(
+    image: sitk.Image,
+    new_spacing: Tuple[float, float, float],
+    resampler=sitk.sitkLinear,
+    default_voxel_value=0.0,
+):
+    original_spacing = image.GetSpacing()
+    original_size = image.GetSize()
+    new_size = [
+        int(round(original_size[0] * (original_spacing[0] / new_spacing[0]))),
+        int(round(original_size[1] * (original_spacing[1] / new_spacing[1]))),
+        int(round(original_size[2] * (original_spacing[2] / new_spacing[2]))),
+    ]
+    resampled_img = sitk.Resample(
+        image,
+        new_size,
+        sitk.Transform(),
+        resampler,
+        image.GetOrigin(),
+        new_spacing,
+        image.GetDirection(),
+        default_voxel_value,
+        image.GetPixelID(),
+    )
+    return resampled_img
+
+
 def resample_image_size(
     image: sitk.Image,
     new_size: Tuple[int, int, int],
@@ -123,19 +150,20 @@ def affine_registration(fixed: sitk.Image, moving: sitk.Image) -> sitk.Image:
 
 
 def multires_registration(
-    fixed: sitk.Image, moving: sitk.Image, mask_fixed, mask_moving
-) -> sitk.Image:
+    fixed: sitk.Image, moving: sitk.Image, mask=None
+) -> (sitk.Image, sitk.Transform):
     min_filter = sitk.MinimumMaximumImageFilter()
     min_filter.Execute(fixed)
     min_intensity = min_filter.GetMinimum()
 
-    mask_filter = sitk.MaskImageFilter()
-    masked_fixed = mask_filter.Execute(fixed, mask_fixed)
-    masked_moving = mask_filter.Execute(moving, mask_moving)
+    if mask:
+        mask_filter = sitk.MaskImageFilter()
+        fixed = mask_filter.Execute(fixed, mask)
+        moving = mask_filter.Execute(moving, mask)
 
     initial_transform = sitk.CenteredTransformInitializer(
-        masked_fixed,
-        masked_moving,
+        fixed,
+        moving,
         sitk.AffineTransform(3),
         sitk.CenteredTransformInitializerFilter.GEOMETRY,
     )
@@ -160,7 +188,7 @@ def multires_registration(
     registration_method.SetMovingInitialTransform(initial_transform)
     registration_method.SetInitialTransform(optimized_transform, inPlace=False)
 
-    optimized_transform = registration_method.Execute(masked_fixed, masked_moving)
+    optimized_transform = registration_method.Execute(fixed, moving)
     warped_moving = sitk.Resample(
         moving,
         fixed,
@@ -171,7 +199,7 @@ def multires_registration(
     )
 
     warped_moving.CopyInformation(fixed)
-    return warped_moving
+    return warped_moving, optimized_transform
 
 
 if __name__ == "__main__":
@@ -195,7 +223,7 @@ if __name__ == "__main__":
     mask_moving = sitk.ReadImage(mask_moving_path, sitk.sitkUInt8)
 
     start = time.time()
-    warped = multires_registration(fixed, moving, mask_fixed, mask_moving)
+    warped, transform = multires_registration(fixed, moving, mask_fixed, mask_moving)
     print(time.time() - start)
 
     mse_pre = (
