@@ -95,8 +95,122 @@ def crop_background_wrapper(input_dir: os.path, output_dir: os.path):
         sitk.WriteImage(cropped_img, os.path.join(output_dir, "Cropped_" + file))
 
 
+def affine_registration(fixed: sitk.Image, moving: sitk.Image) -> sitk.Image:
+    initial_transform = sitk.CenteredTransformInitializer(
+        fixed,
+        moving,
+        sitk.AffineTransform(3),
+        sitk.CenteredTransformInitializerFilter.GEOMETRY,
+    )
+
+    reg_method = sitk.ImageRegistrationMethod()
+    reg_method.SetMetricAsMeanSquares()
+    reg_method.SetMetricSamplingStrategy(reg_method.RANDOM)
+    reg_method.SetMetricSamplingPercentage(0.01)
+    reg_method.SetInterpolator(sitk.sitkLinear)
+
+    # reg_method.SetOptimizerAsGradientDescent(learning_rate=1.0, numberOfIterations=100)
+    reg_method.SetShrinkFactorsPerLevel(shrinkFactors=[4, 1])
+    reg_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2, 0])
+    reg_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+    reg_method.SetInitialTransform(initial_transform, inPlace=False)
+
+    final_transform = reg_method.Execute(fixed, moving)
+    warped_moving = sitk.Resample(
+        moving, fixed, final_transform, sitk.sitkLinear, 0.0, moving.GetPixelID()
+    )
+    return warped_moving
+
+
+def multires_registration(
+    fixed: sitk.Image, moving: sitk.Image, mask_fixed, mask_moving
+) -> sitk.Image:
+    min_filter = sitk.MinimumMaximumImageFilter()
+    min_filter.Execute(fixed)
+    min_intensity = min_filter.GetMinimum()
+
+    mask_filter = sitk.MaskImageFilter()
+    masked_fixed = mask_filter.Execute(fixed, mask_fixed)
+    masked_moving = mask_filter.Execute(moving, mask_moving)
+
+    initial_transform = sitk.CenteredTransformInitializer(
+        masked_fixed,
+        masked_moving,
+        sitk.AffineTransform(3),
+        sitk.CenteredTransformInitializerFilter.GEOMETRY,
+    )
+
+    registration_method = sitk.ImageRegistrationMethod()
+    registration_method.SetInterpolator(sitk.sitkBSpline)
+    registration_method.SetMetricAsMeanSquares()
+    registration_method.SetMetricSamplingStrategy(registration_method.RANDOM)
+    registration_method.SetMetricSamplingPercentage(0.01)
+    registration_method.SetOptimizerAsGradientDescent(
+        learningRate=0.5,
+        numberOfIterations=100,
+        convergenceMinimumValue=1e-6,
+        convergenceWindowSize=10,
+    )
+    registration_method.SetOptimizerScalesFromPhysicalShift()
+    registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4, 2])
+    registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2, 1])
+    registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+
+    optimized_transform = sitk.AffineTransform(fixed.GetDimension())
+    registration_method.SetMovingInitialTransform(initial_transform)
+    registration_method.SetInitialTransform(optimized_transform, inPlace=False)
+
+    optimized_transform = registration_method.Execute(masked_fixed, masked_moving)
+    warped_moving = sitk.Resample(
+        moving,
+        fixed,
+        optimized_transform,
+        sitk.sitkLinear,
+        min_intensity,
+        moving.GetPixelID(),
+    )
+
+    warped_moving.CopyInformation(fixed)
+    return warped_moving
+
+
 if __name__ == "__main__":
-    crop_background_wrapper(
-        input_dir=os.path.join("test_ct_images"),
-        output_dir=os.path.join("cropped_images"),
+
+    fixed_path = (
+        "/home/tsentker/data/learn2reg/NLST_fixed/imagesTr/NLST_0019_0000.nii.gz"
+    )
+    mask_fixed_path = (
+        "/home/tsentker/data/learn2reg/NLST_fixed/masksTr/NLST_0019_0000.nii.gz"
+    )
+    mask_moving_path = (
+        "/home/tsentker/data/learn2reg/NLST_fixed/masksTr/NLST_0019_0000.nii.gz"
+    )
+    moving_path = (
+        "/home/tsentker/data/learn2reg/NLST_fixed/imagesTr/NLST_0019_0001.nii.gz"
+    )
+
+    fixed = sitk.ReadImage(fixed_path)
+    moving = sitk.ReadImage(moving_path)
+    mask_fixed = sitk.ReadImage(mask_fixed_path, sitk.sitkUInt8)
+    mask_moving = sitk.ReadImage(mask_moving_path, sitk.sitkUInt8)
+
+    start = time.time()
+    warped = multires_registration(fixed, moving, mask_fixed, mask_moving)
+    print(time.time() - start)
+
+    mse_pre = (
+        np.square(
+            sitk.GetArrayFromImage(fixed) * sitk.GetArrayFromImage(mask_fixed)
+            - sitk.GetArrayFromImage(moving) * sitk.GetArrayFromImage(mask_fixed)
+        )
+    ).mean(axis=None)
+    mse_post = (
+        np.square(
+            sitk.GetArrayFromImage(fixed) * sitk.GetArrayFromImage(mask_fixed)
+            - sitk.GetArrayFromImage(warped) * sitk.GetArrayFromImage(mask_fixed)
+        )
+    ).mean(axis=None)
+
+    sitk.WriteImage(
+        warped, "/home/tsentker/data/learn2reg/NLST_fixed/29_to_01_affine.nii.gz"
     )

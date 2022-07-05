@@ -3,15 +3,12 @@ import re
 from pathlib import Path
 
 import numpy as np
-import SimpleITK as sitk
 import torch
 from dataset import AutoencoderDataset
 from helper import rescale_range
 from tqdm import tqdm
 
-from vroc.dataset import BaseDataset
 from vroc.models import AutoEncoder
-from vroc.preprocessing import crop_background, resample_image_size
 
 
 class FeatureExtractor:

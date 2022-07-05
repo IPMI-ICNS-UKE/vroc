@@ -5,12 +5,30 @@ import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 import torch
+from scipy.ndimage import map_coordinates
 
 
 def read_landmarks(filepath):
     with open(filepath) as f:
         lines = [tuple(map(float, line.rstrip().split("\t"))) for line in f]
     return lines
+
+
+def compute_tre(fix_lms, mov_lms, disp, spacing_mov=None, snap_to_voxel=False):
+    if not spacing_mov:
+        spacing_mov = np.repeat(1, disp.shape[0])
+    fix_lms_disp_x = map_coordinates(disp[0, :, :, :], fix_lms.transpose())
+    fix_lms_disp_y = map_coordinates(disp[1, :, :, :], fix_lms.transpose())
+    fix_lms_disp_z = map_coordinates(disp[2, :, :, :], fix_lms.transpose())
+    fix_lms_disp = np.array(
+        (fix_lms_disp_x, fix_lms_disp_y, fix_lms_disp_z)
+    ).transpose()
+
+    fix_lms_warped = fix_lms + fix_lms_disp
+    if snap_to_voxel:
+        fix_lms_warped = np.round(fix_lms_warped)
+
+    return np.linalg.norm((fix_lms_warped - mov_lms) * spacing_mov, axis=1)
 
 
 def transform_landmarks_and_flip_z(point_list, reference_image):
