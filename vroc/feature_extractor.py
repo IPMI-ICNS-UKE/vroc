@@ -8,7 +8,89 @@ from dataset import AutoencoderDataset
 from helper import rescale_range
 from tqdm import tqdm
 
-from vroc.models import AutoEncoder
+from vroc.common_types import FloatTuple3D
+from vroc.interpolation import resize_spacing
+from vroc.models import AutoEncoder, TrainableVarRegBlock
+from vroc.oriented_histogram import OrientedHistogram
+
+
+def calculate_oriented_histogram(
+    fixed_image: np.ndarray,
+    moving_image: np.ndarray,
+    fixed_mask: np.ndarray,
+    moving_mask: np.ndarray,
+    image_spacing: FloatTuple3D,
+    target_image_spacing: FloatTuple3D = (4.0, 4.0, 4.0),
+    n_bins: int = 16,
+    device: str = "cuda",
+):
+    fixed_image = resize_spacing(
+        fixed_image,
+        input_image_spacing=image_spacing,
+        output_image_spacing=target_image_spacing,
+    )
+    moving_image = resize_spacing(
+        moving_image,
+        input_image_spacing=image_spacing,
+        output_image_spacing=target_image_spacing,
+    )
+    fixed_mask = resize_spacing(
+        fixed_mask.astype(np.uint8),
+        input_image_spacing=image_spacing,
+        output_image_spacing=target_image_spacing,
+        order=0,
+    )
+    moving_mask = resize_spacing(
+        moving_mask.astype(np.uint8),
+        input_image_spacing=image_spacing,
+        output_image_spacing=target_image_spacing,
+        order=0,
+    )
+
+    fixed_mask = np.asarray(fixed_mask, dtype=bool)
+    moving_mask = np.asarray(moving_mask, dtype=bool)
+
+    union_mask = fixed_mask | moving_mask
+
+    _fixed_image = torch.as_tensor(fixed_image, device=device)[None, None]
+    _moving_image = torch.as_tensor(moving_image, device=device)[None, None]
+
+    _fixed_mask = torch.as_tensor(fixed_mask, device=device)[None, None]
+    _moving_mask = torch.as_tensor(moving_mask, device=device)[None, None]
+    _union_mask = torch.as_tensor(union_mask, device=device)[None, None]
+    _mask = torch.ones_like(_fixed_image)
+
+    varreg = TrainableVarRegBlock(
+        iterations=200,
+        scale_factors=1.0,
+        demon_forces="symmetric",
+        tau=1.0,
+        regularization_sigma=(1, 1, 1),
+        restrict_to_mask=False,
+    ).to(device)
+
+    with torch.no_grad():
+        warped_moving_image, vector_field, misc = varreg.forward(
+            _fixed_image, _mask, _moving_image, (1.0, 1.0, 1.0)
+        )
+    vector_field1 = vector_field.detach().cpu().numpy().squeeze(axis=0)
+    oh1 = OrientedHistogram(n_bins=n_bins).calculate(vector_field1, mask=union_mask)
+
+    with torch.no_grad():
+        warped_moving_image, vector_field, misc = varreg.forward(
+            _moving_image, _mask, _fixed_image, (1.0, 1.0, 1.0)
+        )
+    vector_field2 = vector_field.detach().cpu().numpy().squeeze(axis=0)
+
+    oh2 = OrientedHistogram(n_bins=n_bins).calculate(vector_field2, mask=union_mask)
+
+    return np.mean(
+        (
+            oh1,
+            oh2,
+        ),
+        axis=0,
+    )
 
 
 class FeatureExtractor:
@@ -61,3 +143,38 @@ if __name__ == "__main__":
         features[(case, os.path.splitext(os.path.basename(filepath))[0])] = (
             feature_vector.detach().cpu().numpy()
         )
+from pathlib import Path
+
+# def extract_histogram_features(image: np.ndarray):
+#     lower_percentile = np.percentile(image, 1)
+#     upper_percentile = np.percentile(image, 99)
+#
+#     histogram, _ = np.histogram(
+#         image,
+#         range=(lower_percentile, upper_percentile),
+#         bins=128,
+#         density=True
+#     )
+#
+#     return histogram
+#
+#
+# if __name__ == '__main__':
+#     import SimpleITK as sitk
+#     import matplotlib.pyplot as plt
+#     for i in range(1, 4):
+#         moving = sitk.ReadImage(f'/datalake/learn2reg/NLST/imagesTr/NLST_000{i}_0000.nii.gz')
+#         moving = sitk.GetArrayFromImage(moving)
+#         moving = np.clip(moving, -1024, 3071)
+#
+#         fixed = sitk.ReadImage(f'/datalake/learn2reg/NLST/imagesTr/NLST_000{i}_0001.nii.gz')
+#         fixed = sitk.GetArrayFromImage(fixed)
+#         fixed = np.clip(fixed, -1024, 3071)
+#
+#         l2 = (moving - fixed) ** 2
+#
+#         hm = extract_histogram_features(moving)
+#         hf = extract_histogram_features(fixed)
+#         hl2 = extract_histogram_features(l2)
+#
+#         plt.plot(hm - hf)
