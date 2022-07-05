@@ -32,7 +32,6 @@ def compute_tre(fix_lms, mov_lms, disp, spacing_mov=None, snap_to_voxel=False):
 
 
 def transform_landmarks_and_flip_z(point_list, reference_image):
-    # point_list = [(p[0], p[1], reference_image.GetSize()[2] - p[2]) for p in point_list]
     return [
         reference_image.TransformContinuousIndexToPhysicalPoint(
             (p[0], p[1], reference_image.GetSize()[2] - p[2])

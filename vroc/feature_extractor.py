@@ -94,12 +94,14 @@ def calculate_oriented_histogram(
 
 
 class FeatureExtractor:
-    def __init__(self, model_path):
+    def __init__(self, state_filepath):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # self.model = torch.load(model_path, map_location=torch.device(self.device))
         self.model = AutoEncoder().to(device=self.device)
         self.model.load_state_dict(
-            torch.load(model_path, map_location=torch.device(self.device))["state_dict"]
+            torch.load(state_filepath, map_location=torch.device(self.device))[
+                "state_dict"
+            ]
         )
         self.model.eval()
 
@@ -120,7 +122,7 @@ class FeatureExtractor:
 
 if __name__ == "__main__":
     feature_extractor = FeatureExtractor(
-        model_path="/home/tsentker/Documents/results/vroc_AE/models/epoch075_val_loss_=_0.004.pth"
+        state_filepath="/home/tsentker/Documents/results/vroc_AE/models/epoch075_val_loss_=_0.004.pth"
     )
     root_dir = (
         Path("/home/tsentker/data"),
