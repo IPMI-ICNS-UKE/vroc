@@ -77,7 +77,24 @@ fixed = torch.as_tensor(image_array_fixed, device=device)[None, None]
 moving = torch.as_tensor(image_array_warped, device=device)[None, None]
 mask = torch.as_tensor(mask_array_fixed, device=device)[None, None]
 
-model = TrainableVarRegBlock(hyperparams).to(device)
-warped, demons_transform, _ = model.forward(fixed, mask, moving, spacing)
+params = {}
+
+scale_factors = tuple(
+    1 / 2**i_level for i_level in reversed(range(params["n_levels"]))
+)
+varreg = TrainableVarRegBlock(
+    iterations=params["iterations"],
+    scale_factors=scale_factors,
+    demon_forces="symmetric",
+    tau=params["tau"],
+    regularization_sigma=(
+        params["sigma_x"],
+        params["sigma_y"],
+        params["sigma_z"],
+    ),
+    restrict_to_mask=True,
+).to(device)
+
+warped, demons_transform, _ = varreg.forward(fixed, mask, moving, spacing)
 
 total_transform = sitk.CompositeTransform([affine_transform, demons_transform])
