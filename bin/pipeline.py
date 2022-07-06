@@ -7,7 +7,7 @@ import torch
 from vroc.dataset import BaseDataset
 from vroc.feature_extractor import FeatureExtractor, calculate_oriented_histogram
 from vroc.models import TrainableVarRegBlock, UNet
-from vroc.preprocessing import multires_registration, resample_image_spacing
+from vroc.preprocessing import affine_registration, resample_image_spacing
 from vroc.segmentation import LungSegmenter2D
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -33,7 +33,7 @@ image_fixed = resample_image_spacing(image=image_fixed, new_spacing=spacing)
 image_moving = resample_image_spacing(image=image_moving, new_spacing=spacing)
 
 # TODO: check affine registration performance
-image_warped, initial_transform = multires_registration(image_fixed, image_moving)
+image_warped, affine_transform = affine_registration(image_fixed, image_moving)
 
 # TODO: scale intensity range
 
@@ -80,4 +80,4 @@ mask = torch.as_tensor(mask_array_fixed, device=device)[None, None]
 model = TrainableVarRegBlock(hyperparams).to(device)
 warped, demons_transform, _ = model.forward(fixed, mask, moving, spacing)
 
-total_transform = initial_transform + demons_transform
+total_transform = sitk.CompositeTransform([affine_transform, demons_transform])
