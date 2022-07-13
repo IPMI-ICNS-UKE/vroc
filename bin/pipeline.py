@@ -71,12 +71,11 @@ demons_features = calculate_oriented_histogram(
 ae_features_fixed = feature_extractor.infer(image_array_fixed)
 ae_features_warped = feature_extractor.infer(image_array_warped)
 
-# TODO: match new features with database features and get corresponding demons hyperparams
-
 fixed = torch.as_tensor(image_array_fixed, device=device)[None, None]
 moving = torch.as_tensor(image_array_warped, device=device)[None, None]
 mask = torch.as_tensor(mask_array_fixed, device=device)[None, None]
 
+# TODO: match new features with database features and get corresponding demons hyperparams
 params = {}
 
 scale_factors = tuple(
