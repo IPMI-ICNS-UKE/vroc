@@ -11,7 +11,7 @@ from scipy.ndimage import map_coordinates
 def read_landmarks(filepath):
     with open(filepath) as f:
         lines = [tuple(map(float, line.rstrip().split("\t"))) for line in f]
-    return lines
+    return np.array(lines)
 
 
 def compute_tre(fix_lms, mov_lms, disp, spacing_mov=None, snap_to_voxel=False):
@@ -31,51 +31,21 @@ def compute_tre(fix_lms, mov_lms, disp, spacing_mov=None, snap_to_voxel=False):
     return np.linalg.norm((fix_lms_warped - mov_lms) * spacing_mov, axis=1)
 
 
-def transform_landmarks_and_flip_z(point_list, reference_image):
-    return [
-        reference_image.TransformContinuousIndexToPhysicalPoint(
-            (p[0], p[1], reference_image.GetSize()[2] - p[2])
-        )
-        for p in point_list
-    ]
-
-
-def target_registration_errors_snapped(
-    tx, point_list, reference_point_list, reference_image, world=True
+def compute_tre_sitk(
+    fix_lms, mov_lms, transform, ref_img, spacing_mov=None, snap_to_voxel=False
 ):
-    """Distances between points transformed by the given transformation and
-    their location in another coordinate system.
+    if not spacing_mov:
+        spacing_mov = np.repeat(1, ref_img.GetDimensions())
+    fix_lms = [ref_img.TransformContinuousIndexToPhysicalPoint(p) for p in fix_lms]
+    fix_lms_warped = [np.array(transform.TransformPoint(p)) for p in fix_lms]
 
-    When the points are only used to evaluate registration accuracy (not
-    used in the registration) this is the target registration error
-    (TRE).
-    """
-    TRE = []
-    for p, p_ref in zip(point_list, reference_point_list):
-        t_p = np.array(tx.TransformPoint(p))
-        t_p_idx = np.round(reference_image.TransformPhysicalPointToContinuousIndex(t_p))
-        r_p = np.array(p_ref)
-        if world:
-            t_p = reference_image.TransformContinuousIndexToPhysicalPoint(t_p_idx)
-        else:
-            r_p = reference_image.TransformPhysicalPointToContinuousIndex(r_p)
-            t_p = t_p_idx
-        TRE.append(np.linalg.norm(t_p - r_p))
-    return TRE
+    fix_lms_warped = np.array(
+        [ref_img.TransformPhysicalPointToContinuousIndex(p) for p in fix_lms_warped]
+    )
+    if snap_to_voxel:
+        fix_lms_warped = np.round(fix_lms_warped)
 
-
-def target_registration_errors(tx, point_list, reference_point_list):
-    """Distances between points transformed by the given transformation and
-    their location in another coordinate system.
-
-    When the points are only used to evaluate registration accuracy (not
-    used in the registration) this is the target registration error
-    (TRE).
-    """
-    return [
-        np.linalg.norm(np.array(tx.TransformPoint(p)) - np.array(p_ref))
-        for p, p_ref in zip(point_list, reference_point_list)
-    ]
+    return np.linalg.norm((fix_lms_warped - mov_lms) * spacing_mov, axis=1)
 
 
 def landmark_distance(point_list, reference_point_list):
@@ -83,29 +53,6 @@ def landmark_distance(point_list, reference_point_list):
         np.linalg.norm(np.array(p) - np.array(p_ref))
         for p, p_ref in zip(point_list, reference_point_list)
     ]
-
-
-def plot_TRE_landmarks(tx, point_list, reference_point_list):
-    transformed_point_list = [tx.TransformPoint(p) for p in point_list]
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-    orig = ax.scatter(
-        list(np.array(reference_point_list).T)[0],
-        list(np.array(reference_point_list).T)[1],
-        list(np.array(reference_point_list).T)[2],
-        marker="o",
-        color="blue",
-        label="Original points",
-    )
-    transformed = ax.scatter(
-        list(np.array(transformed_point_list).T)[0],
-        list(np.array(transformed_point_list).T)[1],
-        list(np.array(transformed_point_list).T)[2],
-        marker="^",
-        color="red",
-        label="Transformed points",
-    )
-    plt.legend(loc=(0.0, 1.0))
 
 
 def rescale_range(
@@ -137,7 +84,7 @@ def detach_and_squeeze(img, is_vf=False):
     img = np.squeeze(img)
     if is_vf:
         img = np.rollaxis(img, 0, img.ndim)
-        img = img[..., ::-1]
+        img = np.swapaxes(img, 0, 2)
         img = sitk.GetImageFromArray(img, isVector=True)
         img = sitk.Cast(img, sitk.sitkVectorFloat64)
     else:
