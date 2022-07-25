@@ -32,6 +32,18 @@ def generate_dirlab_copd_masks(root_path):
         )
 
 
+def generate_mask(img_path, out_path):
+    img = sitk.ReadImage(img_path)
+    img_arr = sitk.GetArrayFromImage(img)
+    img_arr = np.swapaxes(img_arr, 0, 2)
+    out_arr = lung_segmenter.segment(img_arr)
+    out_arr = np.swapaxes(out_arr, 0, 2)
+    out_arr = out_arr.astype(np.uint8)
+    out = sitk.GetImageFromArray(out_arr)
+    out.CopyInformation(img)
+    sitk.WriteImage(out, out_path)
+
+
 lung_segmenter = LungSegmenter2D(
     model=UNet().to("cuda"),
     iter_axis=0,
@@ -39,4 +51,8 @@ lung_segmenter = LungSegmenter2D(
         "/home/tsentker/Documents/projects/ebolagnul/lung_segmenter.pth"
     ),
 )
-generate_dirlab_copd_masks(root_path="/home/tsentker/data/copd_dirlab2022/data/")
+# generate_dirlab_copd_masks(root_path="/home/tsentker/data/copd_dirlab2022/data/")
+generate_mask(
+    img_path="/home/tsentker/data/creatis/OrigData/Case03/50.mhd",
+    out_path="/home/tsentker/data/creatis/Segm/Lungs_as_MHA/T50-Case03_Lungs.mha",
+)
