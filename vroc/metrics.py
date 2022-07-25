@@ -1,5 +1,46 @@
+from __future__ import annotations
+
+import logging
+from math import sqrt
+from typing import Optional, Tuple
+
+import numpy as np
 import torch
 from torch.nn import functional as F
+
+from vroc.decorators import timing
+from vroc.interpolation import resize_spacing
+
+logger = logging.getLogger(__name__)
+
+
+def _apply_mask(
+    image: np.ndarray, reference_image: np.ndarray, mask: Optional[np.ndarray] = None
+):
+    if mask is not None:
+        assert image.shape == reference_image.shape == mask.shape, "Dimension mismach"
+        if mask.dtype is not np.bool:
+            mask = mask.astype(np.bool)
+        image = image[mask]
+        reference_image = reference_image[mask]
+    return image, reference_image
+
+
+def mean_squared_error(
+    image: np.ndarray, reference_image: np.ndarray, mask: Optional[np.ndarray] = None
+) -> float:
+    assert image.shape == reference_image.shape, "Dimension mismach"
+    image, reference_image = _apply_mask(image, reference_image, mask)
+
+    return float(((image - reference_image) ** 2).mean())
+
+
+def root_mean_squared_error(
+    image: np.ndarray, reference_image: np.ndarray, mask: Optional[np.ndarray] = None
+) -> float:
+    return sqrt(
+        mean_squared_error(image=image, reference_image=reference_image, mask=mask)
+    )
 
 
 def mse_improvement(before: float, after: float) -> float:
@@ -79,13 +120,52 @@ class NCC(torch.nn.Module):
         return result
 
 
-if __name__ == "__main__":
-    import time
+@timing()
+def dice_coefficient(
+    prediction: np.ndarray,
+    ground_truth: np.ndarray,
+    image_spacing: Tuple[int, ...] | None = None,
+    label: int = 1,
+):
+    logger.debug(f"Calculate dice score on segmentations with shape {prediction.shape}")
+    prediction = np.asarray(prediction)
+    ground_truth = np.asarray(ground_truth)
+    if image_spacing:
+        isotropic_spacing = (1.0,) * len(image_spacing)
 
-    a = torch.ones((1, 512, 512, 300), device="cuda")
-    b = torch.ones((1, 512, 512, 300), device="cuda")
+        if isotropic_spacing != image_spacing:
+            prediction = resize_spacing(
+                prediction,
+                input_image_spacing=image_spacing,
+                output_image_spacing=isotropic_spacing,
+                order=0,
+            )
+            ground_truth = resize_spacing(
+                ground_truth,
+                input_image_spacing=image_spacing,
+                output_image_spacing=isotropic_spacing,
+                order=0,
+            )
+            logger.debug(
+                f"Resampled to isotropic image spacing, new shape is {prediction.shape}"
+            )
 
-    t = time.time()
-    ncc = NCC(a)
-    n = ncc(b)
-    print(time.time() - t)
+    if prediction.shape != ground_truth.shape:
+        raise ValueError("Shape mismatch")
+
+    ground_truth = ground_truth == label
+    prediction = prediction == label
+
+    ground_truth_sum = ground_truth.sum()
+    prediction_sum = prediction.sum()
+
+    if ground_truth_sum == 0 and prediction_sum == 0:
+        dice = 1.0
+    elif (ground_truth_sum + prediction_sum) != 0:
+        dice = (
+            2 * (prediction & ground_truth).sum() / (prediction_sum + ground_truth_sum)
+        )
+    else:
+        dice = 0.0
+
+    return dice

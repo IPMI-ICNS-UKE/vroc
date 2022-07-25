@@ -75,7 +75,7 @@ fixed = torch.as_tensor(image_array_fixed, device=device)[None, None]
 moving = torch.as_tensor(image_array_warped, device=device)[None, None]
 mask = torch.as_tensor(mask_array_fixed, device=device)[None, None]
 
-# TODO: match new features with database features and get corresponding demons hyperparams
+# TODO: match new features with hyperopt_database features and get corresponding demons hyperparams
 params = {}
 
 scale_factors = tuple(

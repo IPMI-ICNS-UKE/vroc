@@ -1,5 +1,8 @@
+from __future__ import annotations
+
+import pickle
 from typing import List, Optional, Union
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
@@ -19,114 +22,71 @@ class DatabaseClient(LoggerMixin):
     def _create_tables(self):
         orm.database.create_tables(
             (
+                orm.Modality,
+                orm.Anatomy,
+                orm.Dataset,
                 orm.Image,
-                orm.Run,
+                orm.BestParameters,
+                orm.ImagePairFeatures,
             )
         )
 
-    def insert_run(
+    def insert_image(self, image_name: str, modality: str, anatomy: str, dataset: str):
+        modality, _ = orm.Modality.get_or_create(name=modality.upper())
+        anatomy, _ = orm.Anatomy.get_or_create(name=anatomy.upper())
+        dataset, _ = orm.Dataset.get_or_create(name=dataset.upper())
+
+        return orm.Image.create(
+            name=image_name, modality=modality, anatomy=anatomy, dataset=dataset
+        )
+
+    def fetch_image(self, uuid: UUID):
+        return orm.Image.get(uuid=uuid)
+
+    def insert_best_parameters(
         self,
-        image_id: str,
+        moving_image: orm.Image,
+        fixed_image: orm.Image,
         parameters: dict,
         metric_before: float,
         metric_after: float,
-        level_metrics: List[List],
     ):
-        image, _ = orm.Image.get_or_create(id=image_id)
-        orm.Run.create(
-            image=image,
+        orm.BestParameters.create(
+            moving_image=moving_image,
+            fixed_image=fixed_image,
             parameters=parameters,
             metric_before=metric_before,
             metric_after=metric_after,
-            level_metrics=level_metrics,
         )
 
-    def fetch_runs(
-        self, image_id: Optional[str] = None, as_dataframe: bool = False
-    ) -> Union[List[dict], pd.DataFrame]:
-        query = orm.Run.select()
-        if image_id is not None:
-            query = query.where(orm.Run.image == image_id)
-
-        runs = list(query.dicts())
-
-        if as_dataframe:
-            runs = DatabaseClient._to_dataframe(runs)
-
-        return runs
-
-    def fetch_best_run(
+    def fetch_best_parameters(
         self,
-        image_id: str,
-        k_best: int = 1,
-        reduce: bool = True,
-        as_dataframe: bool = False,
-    ) -> Union[dict, List[dict], pd.DataFrame]:
-        query = (
-            orm.Run.select()
-            .where(orm.Run.image == image_id)
-            .order_by(orm.Run.metric_after.asc())
-            .limit(k_best)
-            .dicts()
-            .first(n=k_best)
+        moving_image: orm.Image | UUID,
+        fixed_image: orm.Image | UUID,
+    ) -> dict:
+        best_parameters = (
+            orm.BestParameters.select(orm.BestParameters.parameters)
+            .where(
+                (orm.BestParameters.moving_image == moving_image)
+                & (orm.BestParameters.fixed_image == fixed_image)
+            )
+            .first()
         )
-        if k_best > 1 and reduce:
-            query = {
-                "uuid": uuid4(),
-                "image": query[0]["image"],
-                "parameters": self._reduce_parameters([q["parameters"] for q in query]),
-                "metric_before": float(np.mean([q["metric_before"] for q in query])),
-                "metric_after": float(np.mean([q["metric_after"] for q in query])),
-                "level_metrics": None,
-                "created": None,
-            }
 
-        if as_dataframe:
-            query = DatabaseClient._to_dataframe(query)
+        return best_parameters.parameters
 
-        return query
+    def insert_image_pair_features(
+        self, moving_image: orm.Image, fixed_image: orm.Image, features: np.ndarray
+    ):
+        features = pickle.dumps(features)
 
-    def _reduce_parameters(self, parameters: List[dict]):
-        reduced = {}
-        for params in parameters:
-            for param_name, param_value in params.items():
-                try:
-                    reduced[param_name].append(param_value)
-                except KeyError:
-                    reduced[param_name] = [param_value]
+        orm.ImagePairFeatures.create(
+            moving_image=moving_image, fixed_image=fixed_image, features=features
+        )
 
-        # reduce
-        for param_name, param_values in reduced.items():
-            reduced[param_name] = np.mean(param_values)
+    def fetch_image_pair_features(self) -> List:
+        results = list(orm.ImagePairFeatures.select().dicts())
+        for row in results:
+            row["features"] = pickle.loads(row["features"])
 
-        return reduced
-
-    def fetch_best_runs(
-        self, k_best: int = 1, as_dataframe: bool = False
-    ) -> Union[List[dict], pd.DataFrame]:
-        best_runs = []
-
-        for image in orm.Image.select():
-            best_runs.append(self.fetch_best_run(image, k_best=k_best))
-
-        if as_dataframe:
-            best_runs = DatabaseClient._to_dataframe(best_runs)
-
-        return best_runs
-
-    @staticmethod
-    def _expand_param_dict(run: dict):
-        run = run.copy()
-        params = run.pop("parameters")
-        for param_name, param_value in params.items():
-            run[param_name] = param_value
-
-        return run
-
-    @staticmethod
-    def _to_dataframe(runs: List[dict]) -> pd.DataFrame:
-        if isinstance(runs, dict):
-            runs = [runs]
-        runs = [DatabaseClient._expand_param_dict(r) for r in runs]
-
-        return pd.DataFrame.from_records(runs, index="uuid")
+        return results

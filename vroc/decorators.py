@@ -1,8 +1,12 @@
 import functools
 import inspect
+import logging
+import time
 from typing import Any, Dict, Tuple
 
 from vroc.common_types import Function
+
+logger = logging.getLogger(__name__)
 
 
 def _get_args_kwargs_with_values(
@@ -74,3 +78,18 @@ def convert(
         return func(*args_dict.values(), **kwargs_dict)
 
     return wrapper
+
+
+@_as_parameterizable_decorator
+def timing(func: Function, log_level: int = logging.DEBUG):
+    @functools.wraps(func)
+    def timing_wrapper(*args, **kwargs):
+        t_start = time.time()
+        result = func(*args, **kwargs)
+        t_end = time.time()
+        logger.log(
+            level=log_level, msg=f"{func.__name__} took {t_end - t_start} seconds"
+        )
+        return result
+
+    return timing_wrapper

@@ -28,7 +28,7 @@ def get_dicom_folders(folder: Path):
     return folders
 
 
-datasets = [
+dicom_datasets = [
     {
         "patient_folders": sorted(
             Path("/datalake/lung_ct_segmentation_challenge_2017/LCTSC").glob("LCTSC*")
@@ -49,7 +49,17 @@ datasets = [
     },
 ]
 
-for dataset in datasets:
+datasets = [
+    {
+        "images": sorted(Path("/datalake/mega/luna16/images").glob("*.mhd")),
+        "lung_segmentations": sorted(
+            Path("/datalake/mega/luna16/segmentations").glob("*.mhd")
+        ),
+        "lung_labels": (3, 4),
+    },
+]
+
+for dataset in dicom_datasets:
     for patient in dataset["patient_folders"]:
         print(patient.name)
         folders = get_dicom_folders(patient)
@@ -80,18 +90,45 @@ for dataset in datasets:
                     segmentation_output_folder=rtstruct_folder / "segmentations",
                 )
 
-            # merge segmentations, e.g. Lung_Left.nii.gz + Lung_Right.nii.gz
-            to_merge = []
-            for filepath in (rtstruct_folder / "segmentations").glob("*nii.gz"):
+            if not (rtstruct_folder / "segmentations" / "lungs.nii.gz").exists():
+                # merge segmentations, e.g. Lung_Left.nii.gz + Lung_Right.nii.gz
+                to_merge = []
+                for filepath in (rtstruct_folder / "segmentations").glob("*nii.gz"):
 
-                for pattern in dataset["lung_segmentations"]:
-                    if re.search(pattern, filepath.name.lower()):
-                        print("Merge", filepath.name)
-                        segmentation = sitk.ReadImage(str(filepath), sitk.sitkUInt8)
-                        to_merge.append(segmentation)
-            if to_merge:
-                lung_segmentation = reduce(lambda a, b: a | b, to_merge)
-                sitk.WriteImage(
-                    lung_segmentation,
-                    str(rtstruct_folder / "segmentations" / "lungs.nii.gz"),
-                )
+                    for pattern in dataset["lung_segmentations"]:
+                        if re.search(pattern, filepath.name.lower()):
+                            print("Merge", filepath.name)
+                            segmentation = sitk.ReadImage(str(filepath), sitk.sitkUInt8)
+                            to_merge.append(segmentation)
+                if to_merge:
+                    lung_segmentation = reduce(lambda a, b: a | b, to_merge)
+                    # fill holes
+                    lung_segmentation = sitk.BinaryFillhole(lung_segmentation)
+                    sitk.WriteImage(
+                        lung_segmentation,
+                        str(rtstruct_folder / "segmentations" / "lungs.nii.gz"),
+                    )
+
+
+for dataset in datasets:
+    for image_filepath, segmentation_filepath in zip(
+        dataset["images"], dataset["lung_segmentations"]
+    ):
+        print(image_filepath.name)
+        lung_segmentation_filepath = (
+            segmentation_filepath.parent
+            / "lung_segmentations"
+            / segmentation_filepath.name
+        )
+        lung_segmentation_filepath.parent.mkdir(exist_ok=True)
+
+        segmentation = sitk.ReadImage(str(segmentation_filepath), sitk.sitkUInt8)
+        lung_segmentation = sitk.Image(segmentation.GetSize(), sitk.sitkUInt8)
+        lung_segmentation.CopyInformation(segmentation)
+
+        for label in dataset["lung_labels"]:
+            lung_segmentation = lung_segmentation | (segmentation == label)
+
+        sitk.WriteImage(
+            lung_segmentation, str(lung_segmentation_filepath.with_suffix(".nii.gz"))
+        )

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 from typing import Tuple
@@ -123,17 +125,20 @@ def crop_background_wrapper(input_dir: os.path, output_dir: os.path):
 
 
 def affine_registration(
-    fixed: sitk.Image, moving: sitk.Image, mask_fixed=None, mask_moving=None
+    moving_image: sitk.Image,
+    fixed_image: sitk.Image,
+    moving_mask: sitk.Image | None = None,
+    fixed_mask: sitk.Image | None = None,
 ) -> (sitk.Image, sitk.Transform):
     min_filter = sitk.MinimumMaximumImageFilter()
-    min_filter.Execute(fixed)
+    min_filter.Execute(fixed_image)
     min_intensity = min_filter.GetMinimum()
 
     registration_method = sitk.ImageRegistrationMethod()
 
     initial_transform = sitk.CenteredTransformInitializer(
-        fixed,
-        moving,
+        fixed_image,
+        moving_image,
         sitk.Euler3DTransform(),
         sitk.CenteredTransformInitializerFilter.GEOMETRY,
     )
@@ -142,7 +147,7 @@ def affine_registration(
     # registration_method.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     registration_method.SetMetricAsMeanSquares()
     registration_method.SetMetricSamplingStrategy(registration_method.RANDOM)
-    registration_method.SetMetricSamplingPercentage(0.01)
+    registration_method.SetMetricSamplingPercentage(0.05, seed=1337)
 
     registration_method.SetInterpolator(sitk.sitkLinear)
 
@@ -154,6 +159,12 @@ def affine_registration(
         convergenceWindowSize=10,
     )
     registration_method.SetOptimizerScalesFromPhysicalShift()
+    if moving_mask is not None:
+        moving_mask = sitk.Cast(moving_mask, sitk.sitkUInt8)
+        registration_method.SetMetricMovingMask(moving_mask)
+    if fixed_mask is not None:
+        fixed_mask = sitk.Cast(fixed_mask, sitk.sitkUInt8)
+        registration_method.SetMetricFixedMask(fixed_mask)
 
     # Setup for the multi-resolution framework.
     registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4])
@@ -161,21 +172,21 @@ def affine_registration(
     registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
 
     # Set the initial moving and optimized transforms.
-    optimized_transform = sitk.AffineTransform(fixed.GetDimension())
+    optimized_transform = sitk.AffineTransform(fixed_image.GetDimension())
     registration_method.SetMovingInitialTransform(initial_transform)
     registration_method.SetInitialTransform(optimized_transform)
 
     # # Need to compose the transformations after registration.
-    registration_method.Execute(fixed, moving)
+    registration_method.Execute(fixed_image, moving_image)
     final_transform = sitk.CompositeTransform([initial_transform, optimized_transform])
 
     warped_moving = sitk.Resample(
-        moving,
-        fixed,
+        moving_image,
+        fixed_image,
         final_transform,
         sitk.sitkLinear,
         min_intensity,
-        moving.GetPixelID(),
+        moving_image.GetPixelID(),
     )
     return warped_moving, final_transform
 

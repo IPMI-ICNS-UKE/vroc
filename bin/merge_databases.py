@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from vroc.database.client import DatabaseClient
+from vroc.hyperopt_database.client import DatabaseClient
 
 folder = Path("/datalake/learn2reg/runs")
 

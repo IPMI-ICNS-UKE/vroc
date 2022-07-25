@@ -10,9 +10,9 @@ import typer
 from torch.utils.data import DataLoader
 
 from vroc.common_types import PathLike
-from vroc.database.client import DatabaseClient
 from vroc.dataset import NLSTDataset
 from vroc.decorators import convert
+from vroc.hyperopt_database.client import DatabaseClient
 from vroc.metrics import mse_improvement
 from vroc.models import TrainableVarRegBlock
 

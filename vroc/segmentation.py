@@ -65,7 +65,7 @@ class Segmenter2D(ABC):
             )
             with torch.no_grad():
                 logits = self.model(image_batch)
-            prediction = torch.sigmoid(logits) > 0.5
+            prediction = torch.sigmoid(logits) > 0.3
             prediction = prediction.detach().cpu().numpy()
             prediction = prediction.squeeze(axis=1)
             predicted_batches.append(prediction)

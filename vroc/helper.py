@@ -1,30 +1,123 @@
+from __future__ import annotations
+
+import threading
+from collections import MutableSequence
 from math import ceil
-from typing import Tuple
+from multiprocessing import Queue
+from pathlib import Path
+from typing import Any, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 import torch
 from scipy.ndimage import map_coordinates
+from torch.utils.data import default_collate
+
+from vroc.common_types import Function
 
 
-def read_landmarks(filepath):
-    with open(filepath) as f:
-        lines = [tuple(map(float, line.rstrip().split("\t"))) for line in f]
+class BackgroundGenerator(threading.Thread):
+    def __init__(self, generator, max_prefetch=1):
+        """This function transforms generator into a background-thead
+        generator.
+
+        :param generator: generator or genexp or any
+        It can be used with any minibatch generator.
+        It is quite lightweight, but not entirely weightless.
+        Using global variables inside generator is not recommended (may rise GIL and zero-out the benefit of having a background thread.)
+        The ideal use case is when everything it requires is store inside it and everything it outputs is passed through queue.
+        There's no restriction on doing weird stuff, reading/writing files, retrieving URLs [or whatever] wlilst iterating.
+        :param max_prefetch: defines, how many iterations (at most) can background generator keep stored at any moment of time.
+        Whenever there's already max_prefetch batches stored in queue, the background process will halt until one of these batches is dequeued.
+        !Default max_prefetch=1 is okay unless you deal with some weird file IO in your generator!
+        Setting max_prefetch to -1 lets it store as many batches as it can, which will work slightly (if any) faster, but will require storing
+        all batches in memory. If you use infinite generator with max_prefetch=-1, it will exceed the RAM size unless dequeued quickly enough.
+        """
+        threading.Thread.__init__(self)
+        self.queue = Queue(max_prefetch)
+        self.generator = generator
+        self.daemon = True
+        self.start()
+        self.exhausted = False
+
+    def run(self):
+        for item in self.generator:
+            self.queue.put(item)
+        self.queue.put(None)
+
+    def next(self):
+        if self.exhausted:
+            raise StopIteration
+        else:
+            next_item = self.queue.get()
+            if next_item is None:
+                raise StopIteration
+            return next_item
+
+    # Python 3 compatibility
+    def __next__(self):
+        return self.next()
+
+    def __iter__(self):
+        return self
+
+
+class LazyLoadableList(MutableSequence):
+    def __init__(self, sequence, loader: Function | None = None):
+        super().__init__()
+
+        self._loader = loader
+        self.items = list(sequence)
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        item = self.items[index]
+        if self._loader:
+            item = self._loader(item)
+
+        return item
+
+    def __setitem__(self, index, value):
+        self.items[index] = value
+
+    def __delitem__(self, index):
+        del self.items[index]
+
+    def insert(self, index, value):
+        self.items.insert(index, value)
+
+    def append(self, value):
+        self.insert(len(self) + 1, value)
+
+    def __repr__(self):
+        return repr(self.items)
+
+
+def read_landmarks(filepath, sep=","):
+    with open(filepath, "rt") as f:
+        lines = [tuple(map(float, line.rstrip().split(sep))) for line in f]
     return np.array(lines)
 
 
-def compute_tre(fix_lms, mov_lms, disp, spacing_mov=None, snap_to_voxel=False):
-    if not spacing_mov:
-        spacing_mov = np.repeat(1, disp.shape[0])
-    fix_lms_disp_x = map_coordinates(disp[0, :, :, :], fix_lms.transpose())
-    fix_lms_disp_y = map_coordinates(disp[1, :, :, :], fix_lms.transpose())
-    fix_lms_disp_z = map_coordinates(disp[2, :, :, :], fix_lms.transpose())
-    fix_lms_disp = np.array(
-        (fix_lms_disp_x, fix_lms_disp_y, fix_lms_disp_z)
-    ).transpose()
+def compute_tre(fix_lms, mov_lms, disp=None, spacing_mov=None, snap_to_voxel=False):
 
-    fix_lms_warped = fix_lms + fix_lms_disp
+    if not spacing_mov:
+        spacing_mov = np.repeat(1, disp.shape[-1])
+
+    if disp is not None:
+        fix_lms_disp_x = map_coordinates(disp[:, :, :, 0], fix_lms.transpose())
+        fix_lms_disp_y = map_coordinates(disp[:, :, :, 1], fix_lms.transpose())
+        fix_lms_disp_z = map_coordinates(disp[:, :, :, 2], fix_lms.transpose())
+        fix_lms_disp = np.array(
+            (fix_lms_disp_x, fix_lms_disp_y, fix_lms_disp_z)
+        ).transpose()
+        fix_lms_warped = fix_lms + fix_lms_disp
+    else:
+        fix_lms_warped = fix_lms
+
     if snap_to_voxel:
         fix_lms_warped = np.round(fix_lms_warped)
 
@@ -32,16 +125,24 @@ def compute_tre(fix_lms, mov_lms, disp, spacing_mov=None, snap_to_voxel=False):
 
 
 def compute_tre_sitk(
-    fix_lms, mov_lms, transform, ref_img, spacing_mov=None, snap_to_voxel=False
+    fix_lms,
+    mov_lms,
+    transform=None,
+    ref_img=None,
+    spacing_mov=None,
+    snap_to_voxel=False,
 ):
-    if not spacing_mov:
-        spacing_mov = np.repeat(1, ref_img.GetDimensions())
-    fix_lms = [ref_img.TransformContinuousIndexToPhysicalPoint(p) for p in fix_lms]
-    fix_lms_warped = [np.array(transform.TransformPoint(p)) for p in fix_lms]
+    if transform and ref_img:
+        if not spacing_mov:
+            spacing_mov = np.repeat(1, ref_img.GetDimensions())
+        fix_lms = [ref_img.TransformContinuousIndexToPhysicalPoint(p) for p in fix_lms]
+        fix_lms_warped = [np.array(transform.TransformPoint(p)) for p in fix_lms]
 
-    fix_lms_warped = np.array(
-        [ref_img.TransformPhysicalPointToContinuousIndex(p) for p in fix_lms_warped]
-    )
+        fix_lms_warped = np.array(
+            [ref_img.TransformPhysicalPointToContinuousIndex(p) for p in fix_lms_warped]
+        )
+    else:
+        fix_lms_warped = fix_lms
     if snap_to_voxel:
         fix_lms_warped = np.round(fix_lms_warped)
 
@@ -120,3 +221,68 @@ def get_bounding_box(mask: torch.Tensor, padding: int = 0):
         return slice(bbox_min, bbox_max)
 
     return tuple(get_axis_bbox(mask, axis=i, padding=padding) for i in range(mask.ndim))
+
+
+def remove_suffixes(path: Path) -> Path:
+    while path != (without_suffix := path.with_suffix("")):
+        path = without_suffix
+
+    return path
+
+
+def nearest_factor_pow_2(
+    value: int, factors: Tuple[int, ...] = (2, 3, 5, 6, 7, 9)
+) -> int:
+    factors = np.array(factors)
+    exponents = np.ceil(np.log2(value / factors))
+    nearest = factors * 2**exponents - value
+
+    nearest_factor = factors[np.argmin(nearest)]
+    nearest_exponent = exponents[np.argmin(nearest)]
+    return int(nearest_factor * 2**nearest_exponent)
+
+
+def merge_segmentation_labels(
+    segmentation: sitk.Image, labels: Sequence[int]
+) -> sitk.Image:
+    merged = sitk.Image(segmentation.GetSize(), sitk.sitkUInt8)
+    merged.CopyInformation(segmentation)
+
+    for label in labels:
+        merged = merged | (segmentation == label)
+
+    return merged
+
+
+def dict_collate(batch, noop_keys: Sequence[Any]) -> dict:
+    batch_torch = [
+        {key: value for (key, value) in b.items() if key not in noop_keys}
+        for b in batch
+    ]
+
+    batch_noop = [
+        {key: value for (key, value) in b.items() if key in noop_keys} for b in batch
+    ]
+
+    batch_torch = default_collate(batch_torch)
+    batch_noop = concat_dicts(batch_noop)
+
+    return batch_torch | batch_noop
+
+
+def concat_dicts(dicts: Sequence[dict], extend_lists: bool = False):
+    concat = {}
+    for d in dicts:
+        for key, value in d.items():
+            try:
+                if extend_lists and isinstance(value, list):
+                    concat[key].extend(value)
+                else:
+                    concat[key].append(value)
+            except KeyError:
+                if extend_lists and isinstance(value, list):
+                    concat[key] = value
+                else:
+                    concat[key] = [value]
+
+    return concat

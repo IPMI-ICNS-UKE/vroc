@@ -5,8 +5,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy import stats
-from torch.optim import Adam
 
 from vroc.blocks import (
     ConvBlock,
@@ -20,7 +18,8 @@ from vroc.blocks import (
 )
 from vroc.checks import are_of_same_length, is_tuple, is_tuple_of_tuples
 from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
-from vroc.helper import get_bounding_box, rescale_range
+from vroc.decorators import timing
+from vroc.helper import get_bounding_box
 from vroc.logger import LoggerMixin
 
 
@@ -56,7 +55,7 @@ class FlexUNet(nn.Module):
         self.convolution_kwargs = convolution_kwargs or {
             "kernel_size": 3,
             "padding": "same",
-            "bias": False,
+            "bias": True,
         }
         self.downsampling_kwargs = downsampling_kwargs or {"kernel_size": 2}
         self.upsampling_kwargs = upsampling_kwargs or {"scale_factor": 2}
@@ -150,6 +149,35 @@ class FlexUNet(nn.Module):
         inputs = self.final_conv(inputs)
 
         return inputs, outputs[-1]
+
+
+class LungCTSegmentationUnet3d(FlexUNet):
+    def __init__(
+        self,
+        n_channels: int = 1,
+        n_classes: int = 1,
+        n_levels: int = 6,
+        filter_base: int = 32,
+    ):
+        super().__init__(
+            n_channels=n_channels,
+            n_classes=n_classes,
+            n_levels=n_levels,
+            filter_base=filter_base,
+            convolution_layer=nn.Conv3d,
+            downsampling_layer=nn.MaxPool3d,
+            upsampling_layer=nn.Upsample,
+            norm_layer=nn.InstanceNorm3d,
+            skip_connections=True,
+            convolution_kwargs=None,
+            downsampling_kwargs=None,
+            upsampling_kwargs=None,
+        )
+
+    def forward(self, *inputs, **kwargs):
+        prediction, _ = super().forward(*inputs, **kwargs)
+
+        return prediction
 
 
 class AutoEncoder(FlexUNet):
@@ -519,6 +547,8 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
 
     def run_registration(self, fixed_image, mask, moving_image, original_image_spacing):
         if self.restrict_to_mask and mask is not None:
+            original_shape = fixed_image.shape
+            original_moving_image = moving_image
             bbox = get_bounding_box(mask, padding=5)
             self.logger.debug(f"Restricting registration to bounding box {bbox}")
             fixed_image = fixed_image[bbox]
@@ -653,8 +683,21 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
             "runtimes": runtimes,
         }
 
+        if self.restrict_to_mask:
+            # undo restriction to mask
+            _warped_moving_image = original_moving_image
+            _warped_moving_image[bbox] = warped_moving_image
+            warped_moving_image = _warped_moving_image
+
+            _vector_field = torch.zeros(
+                vector_field.shape[:-3] + warped_moving_image.shape[-3:]
+            )
+            _vector_field[(...,) + bbox[2:]] = vector_field
+            vector_field = _vector_field
+
         return warped_moving_image, vector_field, misc
 
+    @timing()
     def forward(self, fixed_image, mask, moving_image, original_image_spacing):
         return self.run_registration(
             fixed_image=fixed_image,
