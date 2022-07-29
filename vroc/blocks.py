@@ -437,7 +437,7 @@ class NCCForces3d(nn.Module):
     ):
         # normalizer = sum(i * i for i in original_image_spacing) / len(original_image_spacing)
 
-        filter = torch.ones((1, 1) + radius).to("cpu")
+        filter = torch.ones((1, 1) + radius).to("cuda")
         npixel_filter = torch.prod(torch.tensor(radius))
         stride = (1, 1, 1)
 
