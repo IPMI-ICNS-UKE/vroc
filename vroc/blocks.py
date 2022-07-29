@@ -422,6 +422,92 @@ class DemonForces3d(nn.Module):
         )
 
 
+class NCCForces3d(nn.Module):
+    @staticmethod
+    def _calculate_ncc_forces_3d(
+        image: torch.tensor,
+        mask: torch.tensor,
+        reference_image: torch.tensor,
+        reference_mask: torch.tensor,
+        gradient_type: str,
+        original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
+        epsilon: float = 1e-6,
+        radius: Tuple[int, ...] = (2, 2, 2),
+    ):
+        # normalizer = sum(i * i for i in original_image_spacing) / len(original_image_spacing)
+
+        filter = torch.ones((1, 1) + radius).to("cuda")
+        npixel_filter = np.prod(radius)
+        padding = np.floor([r / 2 for r in radius])
+        stride = (1, 1, 1)
+
+        ii = image * image
+        rr = reference_image * reference_image
+        ir = image * reference_image
+
+        sum_i = F.conv3d(image, filter, stride=stride, padding=padding)
+        sum_r = F.conv3d(reference_image, filter, stride=stride, padding=padding)
+        sum_ii = F.conv3d(ii, filter, stride=stride, padding=padding)
+        sum_rr = F.conv3d(rr, filter, stride=stride, padding=padding)
+        sum_ir = F.conv3d(ir, filter, stride=stride, padding=padding)
+
+        image_mean = sum_i / npixel_filter
+        reference_image_mean = sum_i / npixel_filter
+
+        var_r = (
+            sum_rr
+            - 2 * reference_image_mean * sum_r
+            + npixel_filter * reference_image_mean * reference_image_mean
+        )
+        var_i = (
+            sum_ii - 2 * image_mean * sum_i + npixel_filter * image_mean * image_mean
+        )
+        cross = (
+            sum_ir
+            - reference_image_mean * sum_i
+            - image_mean * sum_r
+            + npixel_filter * image_mean * reference_image_mean
+        )
+
+        cross_correlation = cross * cross / (var_i * var_r + epsilon)
+
+        if gradient_type == "active":
+            x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
+        elif gradient_type == "passive":
+            x_grad, y_grad, z_grad = torch.gradient(reference_image, dim=(2, 3, 4))
+        elif gradient_type == "symmetric":
+            x_grad, y_grad, z_grad = 0.5 * (
+                torch.stack(torch.gradient(image, dim=(2, 3, 4)))
+                + torch.stack(torch.gradient(reference_image, dim=(2, 3, 4)))
+            )
+        else:
+            raise Exception("Unknown gradient type")
+
+        factor = (2.0 * cross / (var_i * var_r + epsilon)) * (
+            image - cross / var_r * reference_image
+        )
+
+        return (-1) * factor * torch.cat((x_grad, y_grad, z_grad), dim=1)
+
+    def forward(
+        self,
+        image: torch.tensor,
+        mask: torch.tensor,
+        reference_image: torch.tensor,
+        reference_mask: torch.tensor,
+        gradient_type: str,
+        original_image_spacing: Tuple[float, ...],
+    ):
+        return NCCForces3d._calculate_ncc_forces_3d(
+            image=image,
+            mask=mask,
+            reference_image=reference_image,
+            reference_mask=reference_mask,
+            gradient_type=gradient_type,
+            original_image_spacing=original_image_spacing,
+        )
+
+
 if __name__ == "__main__":
     d1 = GaussianSmoothing3d(
         sigma=(1.0, 2.0, 3.0),
