@@ -1,7 +1,7 @@
 from abc import ABC
 from typing import Optional, Tuple, Type, Union
 
-import numpy as np
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,15 +11,15 @@ from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
 
 class EncoderBlock(nn.Module):
     def __init__(
-        self,
-        convolution_layer: Type[nn.Module],
-        downsampling_layer: Type[nn.Module],
-        norm_layer: Type[nn.Module],
-        in_channels,
-        out_channels,
-        n_convolutions: int = 1,
-        convolution_kwargs: Optional[dict] = None,
-        downsampling_kwargs: Optional[dict] = None,
+            self,
+            convolution_layer: Type[nn.Module],
+            downsampling_layer: Type[nn.Module],
+            norm_layer: Type[nn.Module],
+            in_channels,
+            out_channels,
+            n_convolutions: int = 1,
+            convolution_kwargs: Optional[dict] = None,
+            downsampling_kwargs: Optional[dict] = None,
     ):
         super().__init__()
 
@@ -49,15 +49,15 @@ class EncoderBlock(nn.Module):
 
 class DecoderBlock(nn.Module):
     def __init__(
-        self,
-        convolution_layer: Type[nn.Module],
-        upsampling_layer: Type[nn.Module],
-        norm_layer: Type[nn.Module],
-        in_channels,
-        out_channels,
-        n_convolutions: int = 1,
-        convolution_kwargs: Optional[dict] = None,
-        upsampling_kwargs: Optional[dict] = None,
+            self,
+            convolution_layer: Type[nn.Module],
+            upsampling_layer: Type[nn.Module],
+            norm_layer: Type[nn.Module],
+            in_channels,
+            out_channels,
+            n_convolutions: int = 1,
+            convolution_kwargs: Optional[dict] = None,
+            upsampling_kwargs: Optional[dict] = None,
     ):
         super().__init__()
 
@@ -92,12 +92,12 @@ class DecoderBlock(nn.Module):
 
 class ConvBlock(nn.Module):
     def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        mid_channels: int = None,
-        dimensions: int = 2,
-        norm_type: Optional[str] = "BatchNorm",
+            self,
+            in_channels: int,
+            out_channels: int,
+            mid_channels: int = None,
+            dimensions: int = 2,
+            norm_type: Optional[str] = "BatchNorm",
     ):
         super().__init__()
 
@@ -131,12 +131,12 @@ class ConvBlock(nn.Module):
 
 class DownBlock(nn.Module):
     def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        dimensions: int = 2,
-        pooling: Union[int, Tuple[int, ...]] = 2,
-        norm_type: Optional[str] = "BatchNorm",
+            self,
+            in_channels: int,
+            out_channels: int,
+            dimensions: int = 2,
+            pooling: Union[int, Tuple[int, ...]] = 2,
+            norm_type: Optional[str] = "BatchNorm",
     ):
         super().__init__()
 
@@ -200,10 +200,10 @@ class BaseGaussianSmoothing(ABC, nn.Module):
 
     @staticmethod
     def _make_gaussian_kernel_1d(
-        sigma: float, sigma_cutoff: float = None, radius: int = None
+            sigma: float, sigma_cutoff: float = None, radius: int = None
     ):
         if (sigma_cutoff is not None and radius is not None) or not (
-            sigma_cutoff or radius
+                sigma_cutoff or radius
         ):
             raise ValueError("Either pass sigma_cutoff or radius")
 
@@ -212,17 +212,17 @@ class BaseGaussianSmoothing(ABC, nn.Module):
 
         sigma2 = sigma * sigma
         x = torch.arange(-radius, radius + 1)
-        phi_x = torch.exp(-0.5 / sigma2 * x**2)
+        phi_x = torch.exp(-0.5 / sigma2 * x ** 2)
         phi_x = phi_x / phi_x.sum()
 
         return torch.as_tensor(phi_x, dtype=torch.float32)
 
     @staticmethod
     def make_gaussian_kernel(
-        sigma: FloatTuple,
-        sigma_cutoff: FloatTuple,
-        force_same_size: bool = False,
-        radius: Optional[IntTuple] = None,
+            sigma: FloatTuple,
+            sigma_cutoff: FloatTuple,
+            force_same_size: bool = False,
+            radius: Optional[IntTuple] = None,
     ):
         if sigma_cutoff and len(sigma) != len(sigma_cutoff):
             raise ValueError("sigma and sigma_cutoff has to be same length")
@@ -268,13 +268,13 @@ class BaseGaussianSmoothing(ABC, nn.Module):
 
 class GaussianSmoothing3d(BaseGaussianSmoothing):
     def __init__(
-        self,
-        sigma: FloatTuple3D = (1.0, 1.0, 1.0),
-        sigma_cutoff: Optional[FloatTuple3D] = (1.0, 1.0, 1.0),
-        radius: Optional[IntTuple3D] = None,
-        force_same_size: bool = False,
-        spacing: FloatTuple3D = (1.0, 1.0, 1.0),
-        use_image_spacing: bool = False,
+            self,
+            sigma: FloatTuple3D = (1.0, 1.0, 1.0),
+            sigma_cutoff: Optional[FloatTuple3D] = (1.0, 1.0, 1.0),
+            radius: Optional[IntTuple3D] = None,
+            force_same_size: bool = False,
+            spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+            use_image_spacing: bool = False,
     ):
         super().__init__()
 
@@ -376,11 +376,11 @@ class SpatialTransformer(nn.Module):
 class DemonForces3d(nn.Module):
     @staticmethod
     def _calculate_demon_forces_3d(
-        image: torch.tensor,
-        reference_image: torch.tensor,
-        method: str,
-        original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
-        epsilon: float = 1e-6,
+            image: torch.tensor,
+            reference_image: torch.tensor,
+            method: str,
+            original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
+            epsilon: float = 1e-6,
     ):
         if method == "active":
             x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
@@ -397,23 +397,23 @@ class DemonForces3d(nn.Module):
         else:
             raise Exception("Specified demon forces not implemented")
         gamma = 1 / (
-            (sum(i * i for i in original_image_spacing)) / len(original_image_spacing)
+                (sum(i * i for i in original_image_spacing)) / len(original_image_spacing)
         )
         l2_grad = (
-            x_grad**2 + y_grad**2 + z_grad**2
+                x_grad ** 2 + y_grad ** 2 + z_grad ** 2
         )  # TODO: Same as above, if method == passive
         norm = (reference_image - image) / (
-            epsilon + l2_grad + gamma * (reference_image - image) ** 2
+                epsilon + l2_grad + gamma * (reference_image - image) ** 2
         )
 
         return norm * torch.cat((x_grad, y_grad, z_grad), dim=1)
 
     def forward(
-        self,
-        image: torch.tensor,
-        reference_image: torch.tensor,
-        method: str,
-        original_image_spacing: Tuple[float, ...],
+            self,
+            image: torch.tensor,
+            reference_image: torch.tensor,
+            method: str,
+            original_image_spacing: Tuple[float, ...],
     ):
         return DemonForces3d._calculate_demon_forces_3d(
             image=image,
@@ -426,48 +426,47 @@ class DemonForces3d(nn.Module):
 class NCCForces3d(nn.Module):
     @staticmethod
     def _calculate_ncc_forces_3d(
-        image: torch.tensor,
-        mask: torch.tensor,
-        reference_image: torch.tensor,
-        reference_mask: torch.tensor,
-        gradient_type: str,
-        original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
-        epsilon: float = 1e-6,
-        radius: Tuple[int, ...] = (2, 2, 2),
+            image: torch.tensor,
+            mask: torch.tensor,
+            reference_image: torch.tensor,
+            reference_mask: torch.tensor,
+            gradient_type: str,
+            original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
+            epsilon: float = 1e-6,
+            radius: Tuple[int, ...] = (3, 3, 3),
     ):
         # normalizer = sum(i * i for i in original_image_spacing) / len(original_image_spacing)
 
-        filter = torch.ones((1, 1) + radius).to("cuda")
+        filter = torch.ones((1, 1) + radius).to("cpu")
         npixel_filter = torch.prod(torch.tensor(radius))
-        padding = np.floor([r / 1 for r in radius])
         stride = (1, 1, 1)
 
         ii = image * image
         rr = reference_image * reference_image
         ir = image * reference_image
 
-        sum_i = F.conv3d(image, filter, stride=stride, padding=padding)
-        sum_r = F.conv3d(reference_image, filter, stride=stride, padding=padding)
-        sum_ii = F.conv3d(ii, filter, stride=stride, padding=padding)
-        sum_rr = F.conv3d(rr, filter, stride=stride, padding=padding)
-        sum_ir = F.conv3d(ir, filter, stride=stride, padding=padding)
+        sum_i = F.conv3d(image, filter, stride=stride, padding='same')
+        sum_r = F.conv3d(reference_image, filter, stride=stride, padding='same')
+        sum_ii = F.conv3d(ii, filter, stride=stride, padding='same')
+        sum_rr = F.conv3d(rr, filter, stride=stride, padding='same')
+        sum_ir = F.conv3d(ir, filter, stride=stride, padding='same')
 
         image_mean = sum_i / npixel_filter
-        reference_image_mean = sum_i / npixel_filter
+        reference_image_mean = sum_r / npixel_filter
 
         var_r = (
-            sum_rr
-            - 2 * reference_image_mean * sum_r
-            + npixel_filter * reference_image_mean * reference_image_mean
+                sum_rr
+                - 2 * reference_image_mean * sum_r
+                + npixel_filter * reference_image_mean * reference_image_mean
         )
         var_i = (
-            sum_ii - 2 * image_mean * sum_i + npixel_filter * image_mean * image_mean
+                sum_ii - 2 * image_mean * sum_i + npixel_filter * image_mean * image_mean
         )
         cross = (
-            sum_ir
-            - reference_image_mean * sum_i
-            - image_mean * sum_r
-            + npixel_filter * image_mean * reference_image_mean
+                sum_ir
+                - reference_image_mean * sum_i
+                - image_mean * sum_r
+                + npixel_filter * image_mean * reference_image_mean
         )
 
         cross_correlation = cross * cross / (var_i * var_r + epsilon)
@@ -478,14 +477,17 @@ class NCCForces3d(nn.Module):
             x_grad, y_grad, z_grad = torch.gradient(reference_image, dim=(2, 3, 4))
         elif gradient_type == "symmetric":
             x_grad, y_grad, z_grad = 0.5 * (
-                torch.stack(torch.gradient(image, dim=(2, 3, 4)))
-                + torch.stack(torch.gradient(reference_image, dim=(2, 3, 4)))
+                    torch.stack(torch.gradient(image, dim=(2, 3, 4)))
+                    + torch.stack(torch.gradient(reference_image, dim=(2, 3, 4)))
             )
         else:
             raise Exception("Unknown gradient type")
 
+        mean_centered_image = image - image_mean
+        mean_centered_reference_image = reference_image - reference_image_mean
+
         factor = (2.0 * cross / (var_i * var_r + epsilon)) * (
-            image - cross / var_r * reference_image
+                mean_centered_image - cross / (var_r * mean_centered_reference_image + epsilon)
         )
 
         metric = 1 - torch.mean(cross_correlation)
@@ -493,13 +495,13 @@ class NCCForces3d(nn.Module):
         return (-1) * factor * torch.cat((x_grad, y_grad, z_grad), dim=1)
 
     def forward(
-        self,
-        image: torch.tensor,
-        mask: torch.tensor,
-        reference_image: torch.tensor,
-        reference_mask: torch.tensor,
-        gradient_type: str,
-        original_image_spacing: Tuple[float, ...],
+            self,
+            image: torch.tensor,
+            mask: torch.tensor,
+            reference_image: torch.tensor,
+            reference_mask: torch.tensor,
+            gradient_type: str,
+            original_image_spacing: Tuple[float, ...],
     ):
         return NCCForces3d._calculate_ncc_forces_3d(
             image=image,
