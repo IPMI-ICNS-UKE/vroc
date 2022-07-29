@@ -1,6 +1,7 @@
 from abc import ABC
 from typing import Optional, Tuple, Type, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -437,8 +438,8 @@ class NCCForces3d(nn.Module):
         # normalizer = sum(i * i for i in original_image_spacing) / len(original_image_spacing)
 
         filter = torch.ones((1, 1) + radius).to("cuda")
-        npixel_filter = np.prod(radius)
-        padding = np.floor([r / 2 for r in radius])
+        npixel_filter = torch.prod(torch.tensor(radius))
+        padding = np.floor([r / 1 for r in radius])
         stride = (1, 1, 1)
 
         ii = image * image
@@ -486,6 +487,8 @@ class NCCForces3d(nn.Module):
         factor = (2.0 * cross / (var_i * var_r + epsilon)) * (
             image - cross / var_r * reference_image
         )
+
+        metric = 1 - torch.mean(cross_correlation)
 
         return (-1) * factor * torch.cat((x_grad, y_grad, z_grad), dim=1)
 
