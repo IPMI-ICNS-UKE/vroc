@@ -5,13 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import umap
 from tqdm import tqdm
 
 from vroc.common_types import FloatTuple3D
-from vroc.helper import rescale_range
 from vroc.interpolation import resize_spacing
-from vroc.models import AutoEncoder, TrainableVarRegBlock
 from vroc.oriented_histogram import OrientedHistogram
 
 
@@ -180,7 +177,6 @@ if __name__ == "__main__":
         features[(case, os.path.splitext(os.path.basename(filepath))[0])] = (
             feature_vector.detach().cpu().numpy()
         )
-from pathlib import Path
 
 # def extract_histogram_features(image: np.ndarray):
 #     lower_percentile = np.percentile(image, 1)
