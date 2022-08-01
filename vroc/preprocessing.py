@@ -8,13 +8,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
+from vroc.metrics import root_mean_squared_error
 
 
 def resample_image_spacing(
-    image: sitk.Image,
-    new_spacing: Tuple[float, float, float],
-    resampler=sitk.sitkLinear,
-    default_voxel_value=0.0,
+        image: sitk.Image,
+        new_spacing: Tuple[float, float, float],
+        resampler=sitk.sitkLinear,
+        default_voxel_value=0.0,
 ):
     original_spacing = image.GetSpacing()
     original_size = image.GetSize()
@@ -38,10 +39,10 @@ def resample_image_spacing(
 
 
 def resample_image_size(
-    image: sitk.Image,
-    new_size: Tuple[int, int, int],
-    resampler=sitk.sitkLinear,
-    default_voxel_value=0.0,
+        image: sitk.Image,
+        new_size: Tuple[int, int, int],
+        resampler=sitk.sitkLinear,
+        default_voxel_value=0.0,
 ):
     original_spacing = image.GetSpacing()
     original_size = image.GetSize()
@@ -65,7 +66,7 @@ def resample_image_size(
 
 
 def robust_bounding_box_3d(
-    image: np.ndarray, bbox_range: Tuple[float, float] = (0.01, 0.99), padding: int = 0
+        image: np.ndarray, bbox_range: Tuple[float, float] = (0.01, 0.99), padding: int = 0
 ) -> Tuple[slice, slice, slice]:
     """
     image : mask
@@ -88,7 +89,7 @@ def robust_bounding_box_3d(
     y_min, y_max = max(y_min - padding, 0), min(y_max + padding, image.shape[1])
     z_min, z_max = max(z_min - padding, 0), min(z_max + padding, image.shape[2])
 
-    return np.index_exp[x_min : x_max + 1, y_min : y_max + 1, z_min : z_max + 1]
+    return np.index_exp[x_min: x_max + 1, y_min: y_max + 1, z_min: z_max + 1]
 
 
 def crop_background(img: sitk.Image, print_summary=False) -> sitk.Image:
@@ -125,16 +126,14 @@ def crop_background_wrapper(input_dir: os.path, output_dir: os.path):
 
 
 def affine_registration(
-    moving_image: sitk.Image,
-    fixed_image: sitk.Image,
-    moving_mask: sitk.Image | None = None,
-    fixed_mask: sitk.Image | None = None,
+        moving_image: sitk.Image,
+        fixed_image: sitk.Image,
+        moving_mask: sitk.Image | None = None,
+        fixed_mask: sitk.Image | None = None,
 ) -> (sitk.Image, sitk.Transform):
     min_filter = sitk.MinimumMaximumImageFilter()
     min_filter.Execute(fixed_image)
     min_intensity = min_filter.GetMinimum()
-
-    registration_method = sitk.ImageRegistrationMethod()
 
     initial_transform = sitk.CenteredTransformInitializer(
         fixed_image,
@@ -143,22 +142,32 @@ def affine_registration(
         sitk.CenteredTransformInitializerFilter.GEOMETRY,
     )
 
+    registration_method = sitk.ImageRegistrationMethod()
+
+    # TODO: Choose metric according to registration problem, i.e. uni- vs. multi-modal
     # Similarity metric settings.
     # registration_method.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     registration_method.SetMetricAsMeanSquares()
     registration_method.SetMetricSamplingStrategy(registration_method.RANDOM)
-    registration_method.SetMetricSamplingPercentage(0.05, seed=1337)
-
-    registration_method.SetInterpolator(sitk.sitkLinear)
+    registration_method.SetMetricSamplingPercentage(0.05, seed=1337)  # 0.05
 
     # Optimizer settings.
-    registration_method.SetOptimizerAsGradientDescent(
-        learningRate=1.0,
-        numberOfIterations=100,
-        convergenceMinimumValue=1e-6,
-        convergenceWindowSize=10,
+    registration_method.SetOptimizerAsGradientDescentLineSearch(
+        learningRate=1.0,  # 1.0
+        numberOfIterations=300,  # 300
+        convergenceMinimumValue=1e-6,  # 1e-6
+        convergenceWindowSize=10,  # 10
     )
     registration_method.SetOptimizerScalesFromPhysicalShift()
+    # Setup for the multi-resolution framework.
+    registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4])  # 4
+    registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2])  # 2
+    registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+    registration_method.SetInterpolator(sitk.sitkLinear)
+
+    transform = sitk.CompositeTransform([initial_transform, sitk.AffineTransform(fixed_image.GetDimension())])
+    registration_method.SetInitialTransform(transform, inPlace=False)
+
     if moving_mask is not None:
         moving_mask = sitk.Cast(moving_mask, sitk.sitkUInt8)
         registration_method.SetMetricMovingMask(moving_mask)
@@ -166,40 +175,15 @@ def affine_registration(
         fixed_mask = sitk.Cast(fixed_mask, sitk.sitkUInt8)
         registration_method.SetMetricFixedMask(fixed_mask)
 
-    # Setup for the multi-resolution framework.
-    registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4])
-    registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2])
-    registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
-
-    # Set the initial moving and optimized transforms.
-    optimized_transform = sitk.AffineTransform(fixed_image.GetDimension())
-    registration_method.SetMovingInitialTransform(initial_transform)
-    registration_method.SetInitialTransform(optimized_transform)
-
-    # # Need to compose the transformations after registration.
-    registration_method.Execute(fixed_image, moving_image)
-    final_transform = sitk.CompositeTransform([initial_transform, optimized_transform])
+    optimized_transform = registration_method.Execute(fixed_image, moving_image)
 
     warped_moving = sitk.Resample(
         moving_image,
         fixed_image,
-        final_transform,
+        optimized_transform,
         sitk.sitkLinear,
         min_intensity,
         moving_image.GetPixelID(),
     )
-    return warped_moving, final_transform
 
-
-if __name__ == "__main__":
-    fixed_path = "/home/tsentker/data/rider_lung_ct/RIDER Lung CT/RIDER-1129164940/1.3.6.1.4.1.9328.50.1.216116555221814778114703363464001196508/1.3.6.1.4.1.9328.50.1.48441840081578419409180519840073808100/image.mha"
-    moving_path = "/home/tsentker/data/rider_lung_ct/RIDER Lung CT/RIDER-1129164940/1.3.6.1.4.1.9328.50.1.216116555221814778114703363464001196508/1.3.6.1.4.1.9328.50.1.83304264089411327530730818890072724533/image.mha"
-
-    fixed = sitk.ReadImage(fixed_path, sitk.sitkFloat32)
-    moving = sitk.ReadImage(moving_path, sitk.sitkFloat32)
-
-    start = time.time()
-    warped, transform = affine_registration(fixed, moving)
-    print(time.time() - start)
-
-    sitk.WriteImage(warped, "/home/tsentker/data/warped_case1_rider.nii.gz")
+    return warped_moving, optimized_transform
