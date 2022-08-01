@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from abc import ABC
-from typing import Optional, Tuple, Type, Union
+from typing import Literal, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -339,10 +341,10 @@ class SpatialTransformer(nn.Module):
         self.mode = mode
 
         # create sampling grid
-        grid = self._create_grid(shape)
-        self.register_buffer("grid", grid, persistent=False)
+        identity_grid = self._create_identity_grid(shape)
+        self.register_buffer("identity_grid", identity_grid, persistent=False)
 
-    def _create_grid(self, shape):
+    def _create_identity_grid(self, shape):
         vectors = [torch.arange(0, s) for s in shape]
         grids = torch.meshgrid(vectors, indexing="ij")
         grid = torch.stack(grids)
@@ -353,7 +355,7 @@ class SpatialTransformer(nn.Module):
 
     def forward(self, src, flow):
         # new locations
-        new_locs = self.grid + flow
+        new_locs = self.identity_grid + flow
         shape = flow.shape[2:]
 
         # need to normalize grid values to [-1, 1] for resampler
@@ -373,51 +375,119 @@ class SpatialTransformer(nn.Module):
 
 
 class DemonForces3d(nn.Module):
+    def __init__(self, method: Literal["active", "passive", "dual"] = "dual"):
+        super().__init__()
+        self.method = method
+        self._fixed_image_gradient: torch.Tensor | None = None
+
+    def clear_cache(self):
+        self._fixed_image_gradient = None
+
     @staticmethod
+    def _calc_image_gradient_3d(image: torch.Tensor) -> torch.Tensor:
+        if image.ndim != 5:
+            raise ValueError(f"Expected 5D tensor, got tensor with shape {image.shape}")
+        if image.shape[1] != 1:
+            raise NotImplementedError(
+                "Currently, only single channel images are supported"
+            )
+        # this is list of x, y, z grad
+        grad = torch.gradient(image, dim=(2, 3, 4))
+        # stack x, y, z grad back to one single tensor of
+        # shape (batch_size, 3, x_size, y_size, z_size)
+        return torch.cat(grad, dim=1)
+
+    def _get_fixed_image_gradient(self, fixed_image: torch.Tensor) -> torch.Tensor:
+        recalculate = False
+        if self._fixed_image_gradient is None:
+            # no cached gradient, do calculation
+            recalculate = True
+        elif self._fixed_image_gradient.shape[-3:] != fixed_image.shape[-3:]:
+            # spatial size mismatch, most likely due to multi level registration
+            recalculate = True
+
+        if recalculate:
+            grad_fixed = DemonForces3d._calc_image_gradient_3d(fixed_image)
+            self._fixed_image_gradient = grad_fixed
+
+        return self._fixed_image_gradient
+
     def _calculate_demon_forces_3d(
-        image: torch.tensor,
-        reference_image: torch.tensor,
-        method: str,
-        original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
-        epsilon: float = 1e-6,
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor | None = None,
+        fixed_mask: torch.Tensor | None = None,
+        method: Literal["active", "passive", "dual"] = "dual",
+        fixed_image_gradient: torch.Tensor | None = None,
+        original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
     ):
-        if method == "active":
-            x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
-        elif method == "passive":
-            x_grad, y_grad, z_grad = torch.gradient(reference_image, dim=(2, 3, 4))
-            # TODO: Has to be only calculated once per level,
-            #  as reference image does not change -> To be implemented
-        elif method == "symmetric":
-            x_grad, y_grad, z_grad = torch.stack(
-                torch.gradient(image, dim=(2, 3, 4))
-            ) + torch.stack(torch.gradient(reference_image, dim=(2, 3, 4)))
-            # TODO: Has to be only calculated once per level,
-            #  as reference image does not change -> To be implemented
+        # grad tensors have the shape of (batch_size, 3, x_size, y_size, z_size)
+
+        # first if we need fixed image gradient; if yes calculate or get from cache
+        if method in ("passive", "dual"):
+            grad_fixed = self._get_fixed_image_gradient(fixed_image)
         else:
-            raise Exception("Specified demon forces not implemented")
+            grad_fixed = None
+
+        if method == "active":
+            grad_moving = DemonForces3d._calc_image_gradient_3d(moving_image)
+            # gradient is defined in moving image domain -> use moving mask if given
+            if moving_mask is not None:
+                grad_moving = grad_moving * moving_mask
+            total_grad = grad_moving
+
+        elif method == "passive":
+            # gradient is defined in fixed image domain -> use fixed mask if given
+            if fixed_mask is not None:
+                grad_fixed = grad_fixed * fixed_mask
+            total_grad = grad_fixed
+
+        elif method == "dual":
+            # we need both gradient of moving and fixed image
+            grad_moving = DemonForces3d._calc_image_gradient_3d(moving_image)
+
+            # mask both gradients as above; also check that we have both masks
+            masks_available = (m is not None for m in (moving_mask, fixed_mask))
+            if not all(masks_available) and any(masks_available):
+                # we only have one mask
+                raise RuntimeError("Dual forces need both moving and fixed mask")
+
+            if moving_mask is not None:
+                grad_moving = grad_moving * moving_mask
+            if fixed_mask is not None:
+                grad_fixed = grad_fixed * fixed_mask
+            total_grad = grad_moving + grad_fixed
+
+        else:
+            raise NotImplementedError(f"Demon forces {method} are not implemented")
+
         gamma = 1 / (
-            (sum(i * i for i in original_image_spacing)) / len(original_image_spacing)
+            (sum(i**2 for i in original_image_spacing)) / len(original_image_spacing)
         )
-        l2_grad = (
-            x_grad**2 + y_grad**2 + z_grad**2
-        )  # TODO: Same as above, if method == passive
-        norm = (reference_image - image) / (
-            epsilon + l2_grad + gamma * (reference_image - image) ** 2
+        # calculcate squared L2 of grad, i.e., || grad ||^2
+        l2_grad = total_grad.pow(2).sum(dim=1, keepdim=True)
+        epsilon = 1e-6  # to prevent division by zero
+        norm = (fixed_image - moving_image) / (
+            epsilon + l2_grad + gamma * (fixed_image - moving_image) ** 2
         )
 
-        return norm * torch.cat((x_grad, y_grad, z_grad), dim=1)
+        return norm * total_grad
 
     def forward(
         self,
-        image: torch.tensor,
-        reference_image: torch.tensor,
-        method: str,
-        original_image_spacing: Tuple[float, ...],
+        moving_image: torch.Tensor,
+        fixed_image: torch.tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        original_image_spacing: FloatTuple3D,
     ):
-        return DemonForces3d._calculate_demon_forces_3d(
-            image=image,
-            reference_image=reference_image,
-            method=method,
+        return self._calculate_demon_forces_3d(
+            moving_image=moving_image,
+            fixed_image=fixed_image,
+            moving_mask=moving_mask,
+            fixed_mask=fixed_mask,
+            method=self.method,
             original_image_spacing=original_image_spacing,
         )
 

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import time
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -293,25 +295,29 @@ class ParamNet(nn.Module):
         return out_dict
 
 
-class TrainableVarRegBlock(nn.Module, LoggerMixin):
+class VarReg3d(nn.Module, LoggerMixin):
+    _INTERPOLATION_MODES = {
+        3: "linear",
+        4: "bilinear",
+        5: "trilinear",
+    }
+
     def __init__(
         self,
-        scale_factors: Union[FloatTuple, float] = (1.0,),
-        iterations: Union[IntTuple, int] = 100,
-        tau: Union[FloatTuple, float] = 1.0,
-        demon_forces: str = "active",
-        regularization_sigma: Union[FloatTuple3D, Tuple[FloatTuple3D, ...]] = (
+        scale_factors: FloatTuple | float = (1.0,),
+        iterations: IntTuple | int = 100,
+        tau: FloatTuple | float = 1.0,
+        demon_forces: Literal["active", "passive", "dual"] = "dual",
+        regularization_sigma: FloatTuple3D
+        | Tuple[FloatTuple3D, ...] = (
             1.0,
             1.0,
             1.0,
         ),
-        regularization_radius: Union[IntTuple3D, Tuple[IntTuple3D, ...]] = None,
+        regularization_radius: IntTuple3D | Tuple[IntTuple3D, ...] | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         use_image_spacing: bool = False,
-        early_stopping_method: Optional[Tuple[str, ...]] = None,
-        early_stopping_delta: Optional[Tuple[float, ...]] = None,
-        early_stopping_window: Optional[Tuple[int, ...]] = None,
-        restrict_to_mask: bool = False,
+        restrict_to_mask_bbox: bool = False,
     ):
         super().__init__()
 
@@ -320,20 +326,18 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
         self.scale_factors = scale_factors
 
         self.scale_factors = scale_factors  # this also defines "n_levels"
-        self.iterations = TrainableVarRegBlock._expand_to_level_tuple(
+        self.iterations = VarReg3d._expand_to_level_tuple(
             iterations, n_levels=self.n_levels
         )
 
-        self.tau = TrainableVarRegBlock._expand_to_level_tuple(
-            tau, n_levels=self.n_levels
-        )
-        self.regularization_sigma = TrainableVarRegBlock._expand_to_level_tuple(
+        self.tau = VarReg3d._expand_to_level_tuple(tau, n_levels=self.n_levels)
+        self.regularization_sigma = VarReg3d._expand_to_level_tuple(
             regularization_sigma, n_levels=self.n_levels, is_tuple=True
         )
-        self.regularization_sigma = TrainableVarRegBlock._expand_to_level_tuple(
+        self.regularization_sigma = VarReg3d._expand_to_level_tuple(
             regularization_sigma, n_levels=self.n_levels, is_tuple=True
         )
-        self.regularization_radius = TrainableVarRegBlock._expand_to_level_tuple(
+        self.regularization_radius = VarReg3d._expand_to_level_tuple(
             regularization_radius, n_levels=self.n_levels, is_tuple=True
         )
         self.original_image_spacing = original_image_spacing
@@ -341,12 +345,7 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
 
         self.demon_forces = demon_forces
 
-        self.early_stopping_fn = early_stopping_method
-        self.early_stopping_delta = early_stopping_delta
-        self.early_stopping_window = early_stopping_window
-
-        # TODO: Implement restriction of reg to mask bbox
-        self.restrict_to_mask = restrict_to_mask
+        self.restrict_to_mask_bbox = restrict_to_mask_bbox
 
         # check if params are passed with/converted to consistent length
         # (== self.n_levels)
@@ -364,7 +363,7 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
         self._image_shape = None
         self._full_size_spatial_transformer = None
 
-        self._demon_forces_layer = DemonForces3d()
+        self._demon_forces_layer = DemonForces3d(method=self.demon_forces)
 
         for i_level, sigma in enumerate(self.regularization_sigma):
             if self.regularization_radius:
@@ -436,57 +435,49 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
                     module=SpatialTransformer(shape=scaled_image_shape).to(device),
                 )
 
-    # TODO: rename
-    def _check_early_stopping_condition(self, metrics: List[float], i_level):
-        if (
-            self.early_stopping_delta[i_level] == 0
-            or len(metrics) < self.early_stopping_window[i_level] + 1
-        ):
-            return False
+    def _perform_scaling(
+        self, *images, scale_factor: float = 1.0
+    ) -> List[torch.Tensor]:
 
-    def _perform_scaling(self, image, mask, moving, scale_factor: float = 1.0):
-        if len(image.shape) == 3:
-            mode = "linear"
-        elif len(image.shape) == 4:
-            mode = "bilinear"
-        elif len(image.shape) == 5:
-            mode = "trilinear"
-        else:
-            mode = "nearest"
-        image = F.interpolate(
-            image, scale_factor=scale_factor, mode=mode, align_corners=False
-        )
-        # interpolation is not implemented for dtype bool
-        mask = torch.as_tensor(mask, dtype=torch.uint8)
-        mask = F.interpolate(mask, scale_factor=scale_factor, mode="nearest")
-        mask = torch.as_tensor(mask, dtype=torch.bool)
-        moving = F.interpolate(
-            moving,
-            scale_factor=scale_factor,
-            mode=mode,
-            align_corners=False,
-        )
+        scaled = []
+        for image in images:
+            if image is not None:
+                if image.dtype == torch.bool:
+                    # image is mask
+                    # interpolation is not implemented for dtype bool
+                    # also use NN interpolation
+                    image = torch.as_tensor(image, dtype=torch.uint8)
+                    image = F.interpolate(
+                        image, scale_factor=scale_factor, mode="nearest"
+                    )
+                    image = torch.as_tensor(image, dtype=torch.bool)
+                else:
+                    # normal image (moving or fixed)
+                    mode = VarReg3d._INTERPOLATION_MODES[image.ndim]
+                    image = F.interpolate(
+                        image, scale_factor=scale_factor, mode=mode, align_corners=True
+                    )
 
-        return image, mask, moving
+            scaled.append(image)
 
-    def _match_vector_field(self, vector_field, image):
+        return scaled
+
+    def _match_vector_field(
+        self, vector_field: torch.Tensor, image: torch.Tensor
+    ) -> torch.Tensor:
         vector_field_shape = vector_field.shape
         image_shape = image.shape
 
-        if len(image_shape) == 4:
-            mode = "bilinear"
-        elif len(image_shape) == 5:
-            mode = "trilinear"
-        else:
-            raise ValueError(f"Dimension {image_shape} not supported")
-
         if vector_field_shape[2:] == image_shape[2:]:
+            # vector field and image are already the same size
             return vector_field
 
+        mode = VarReg3d._INTERPOLATION_MODES[image.ndim]
         vector_field = F.interpolate(
-            vector_field, size=image_shape[2:], mode=mode, align_corners=False
+            vector_field, size=image_shape[2:], mode=mode, align_corners=True
         )
 
+        # scale factor to scale the vector field values
         scale_factor = torch.tensor(
             [s1 / s2 for (s1, s2) in zip(image_shape[2:], vector_field_shape[2:])]
         )
@@ -497,162 +488,156 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
 
         return vector_field * scale_factor.to(vector_field)
 
-    def _calculate_features(self, fixed_image, mask, moving_image, bins=128) -> dict:
-        mask = torch.as_tensor(mask, dtype=torch.bool)
-        l2_diff = F.mse_loss(fixed_image, moving_image, reduction="none")
+    def _calculate_metric(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        fixed_mask: torch.Tensor | None = None,
+    ) -> float:
+        if fixed_mask is not None:
+            fixed_image = fixed_image[fixed_mask]
+            moving_image = moving_image[fixed_mask]
 
-        masked_fixed_image = fixed_image[mask]
-        masked_moving_image = moving_image[mask]
-        masked_l2_diff = l2_diff[mask]
+        return float(F.mse_loss(fixed_image, moving_image))
 
-        def to_numpy(tensor: torch.Tensor) -> np.ndarray:
-            t = tensor.detach().cpu().numpy()
-            if t.ndim == 0:
-                t = float(t)
+    def run_registration(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor | None = None,
+        fixed_mask: torch.Tensor | None = None,
+        original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+        initial_vector_field: torch.Tensor | None = None,
+    ):
+        if moving_image.ndim != fixed_image.ndim:
+            raise RuntimeError("Dimension mismatch betwen moving and fixed image")
+        # define dimensionalities
+        n_image_dimensions = moving_image.ndim
+        n_vector_field_components = n_image_dimensions - 2  # -1 batch dim, -1 color dim
 
-            return t
+        if self.restrict_to_mask_bbox and (
+            moving_mask is not None or fixed_mask is not None
+        ):
+            masks = [m for m in (moving_mask, fixed_mask) if m is not None]
+            if len(masks) == 2:
+                # we compute the union of both masks to get the overall bounding box
+                union_mask = torch.logical_or(*masks)
+            else:
+                union_mask = masks[0]
 
-        def calculate_image_features(image) -> dict:
-            lower_percentile = torch.quantile(image, 0.05, interpolation="linear")
-            upper_percentile = torch.quantile(image, 0.95, interpolation="linear")
-            image_histogram = torch.histc(image, bins=bins)
-
-            return {
-                "histogram": to_numpy(image_histogram),
-                "normalized_histogram": to_numpy(
-                    image_histogram / image_histogram.sum()
-                ),
-                "percentile_5": to_numpy(lower_percentile),
-                "percentile_95": to_numpy(upper_percentile),
-                "min": to_numpy(image.min()),
-                "max": to_numpy(image.max()),
-                "mean": to_numpy(image.mean()),
-                "median": to_numpy(image.median()),
-                "std": to_numpy(image.std()),
-            }
-
-        return {
-            "fixed_image": calculate_image_features(masked_fixed_image),
-            "moving_image": calculate_image_features(masked_moving_image),
-            "l2_difference": calculate_image_features(masked_l2_diff),
-        }
-
-    def _calculate_metric(self, fixed_image, mask, moving_image) -> float:
-        return float(
-            F.mse_loss(
-                fixed_image[mask],
-                moving_image[mask],
-            )
-        )
-
-    def run_registration(self, fixed_image, mask, moving_image, original_image_spacing):
-        if self.restrict_to_mask and mask is not None:
-            original_shape = fixed_image.shape
             original_moving_image = moving_image
-            bbox = get_bounding_box(mask, padding=5)
+            bbox = get_bounding_box(union_mask, padding=5)
             self.logger.debug(f"Restricting registration to bounding box {bbox}")
-            fixed_image = fixed_image[bbox]
-            mask = mask[bbox]
+
             moving_image = moving_image[bbox]
+            fixed_image = fixed_image[bbox]
+            if moving_mask is not None:
+                moving_mask = moving_mask[bbox]
+            if fixed_mask is not None:
+                fixed_mask = fixed_mask[bbox]
+            if initial_vector_field is not None:
+                original_initial_vector_field = initial_vector_field
+                initial_vector_field = initial_vector_field[(..., *bbox[-3:])]
+
+        if moving_mask is not None:
+            moving_mask = torch.as_tensor(moving_mask, dtype=torch.bool)
+        if fixed_mask is not None:
+            fixed_mask = torch.as_tensor(fixed_mask, dtype=torch.bool)
 
         # create new spatial transformers if needed (skip batch and color dimension)
         self._create_spatial_transformers(
             fixed_image.shape[2:], device=fixed_image.device
         )
 
-        # register moving image onto fixed image
-        if len(fixed_image.shape) == 4:
-            dim_vf = 2
-        elif len(fixed_image.shape) == 5:
-            dim_vf = 3
         full_size_moving = moving_image
-        features = []
+
         metrics = []
-        vector_field = None
-        mask = torch.as_tensor(mask, dtype=torch.bool)
+        # set initial vector field (if given)
+        vector_field = None  # if initial_vector_field is None else initial_vector_field
 
         runtimes = []
 
-        metric_before = self._calculate_metric(fixed_image, mask, moving_image)
+        metric_before = self._calculate_metric(
+            moving_image=moving_image, fixed_image=fixed_image, fixed_mask=fixed_mask
+        )
 
         for i_level, (scale_factor, iterations) in enumerate(
             zip(self.scale_factors, self.iterations)
         ):
-
             self._counter = 0
 
             (
-                scaled_fixed_image,
-                scaled_mask,
                 scaled_moving_image,
+                scaled_fixed_image,
+                scaled_moving_mask,
+                scaled_fixed_mask,
             ) = self._perform_scaling(
-                fixed_image, mask, moving_image, scale_factor=scale_factor
+                moving_image,
+                fixed_image,
+                moving_mask,
+                fixed_mask,
+                scale_factor=scale_factor,
             )
 
             if vector_field is None:
+                # create an empty (all zero) vector field
                 vector_field = torch.zeros(
                     scaled_fixed_image.shape[:1]
-                    + (dim_vf,)
+                    + (n_vector_field_components,)
                     + scaled_fixed_image.shape[2:],
                     device=moving_image.device,
                 )
-            elif vector_field.shape[2:] != scaled_fixed_image.shape[2:]:
+            else:
+                # this will also scale the initial (full scale) vector field in the
+                # first iteration
                 vector_field = self._match_vector_field(
                     vector_field, scaled_fixed_image
+                )
+
+            if initial_vector_field is not None:
+                scaled_initial_vector_field = self._match_vector_field(
+                    initial_vector_field, scaled_fixed_image
                 )
 
             spatial_transformer = self.get_submodule(
                 f"spatial_transformer_level_{i_level}",
             )
 
-            warped_scaled_moving_image = spatial_transformer(
-                scaled_moving_image, vector_field
-            )
-
-            # calculate features of fixed/moving image at current level
-            level_features = self._calculate_features(
-                scaled_fixed_image, scaled_mask, warped_scaled_moving_image
-            )
-            level_features["current_level"] = i_level
-            level_features["scale_factors"] = self.scale_factors
             level_metrics = []
 
             t_start = time.time()
             for i in range(iterations):
                 t_step_start = time.time()
-                warped_moving = spatial_transformer(scaled_moving_image, vector_field)
+                if initial_vector_field is not None:
+                    # if we have an initial vector field: compose both vector fields.
+                    # Here: resolution defined by given registration level
+                    composed_vector_field = vector_field + spatial_transformer(
+                        scaled_initial_vector_field, vector_field
+                    )
+                else:
+                    composed_vector_field = vector_field
+
+                warped_moving = spatial_transformer(
+                    scaled_moving_image, composed_vector_field
+                )
 
                 level_metrics.append(
                     self._calculate_metric(
-                        scaled_fixed_image, scaled_mask, warped_moving
+                        moving_image=warped_moving,
+                        fixed_image=scaled_fixed_image,
+                        fixed_mask=scaled_fixed_mask,
                     )
                 )
                 log = {"level": i_level, "iteration": i, "metric": level_metrics[-1]}
 
-                # if self.early_stopping_fn[i_level] == "lstsq":
-                #     if self._check_early_stopping_lstsq(metrics, i_level):
-                #         break
-                # elif self.early_stopping_fn[i_level] == "no_impr":
-                #     if self._check_early_stopping_increase_count(metrics, i_level):
-                #         break
-                # elif self.early_stopping_fn[i_level] == "no_average_impr":
-                #     if self._check_early_stopping_average_improvement(metrics, i_level):
-                #         break
-                # elif self.early_stopping_fn[i_level] == "none":
-                #     pass
-                # else:
-                #     raise Exception(
-                #         f"Early stopping method {self.early_stopping_fn[i_level]} "
-                #         f"is not implemented"
-                #     )
-
                 forces = self._demon_forces_layer(
                     warped_moving,
                     scaled_fixed_image,
-                    self.demon_forces,
+                    scaled_moving_mask,
+                    scaled_fixed_mask,
                     original_image_spacing,
                 )
-                vector_field += self.tau[i_level] * (forces * scaled_mask)
+                vector_field += self.tau[i_level] * forces
 
                 _regularization_layer = self.get_submodule(
                     f"regularization_layer_level_{i_level}",
@@ -666,53 +651,78 @@ class TrainableVarRegBlock(nn.Module, LoggerMixin):
             t_end = time.time()
             runtimes.append(t_end - t_start)
             metrics.append(level_metrics)
-            features.append(level_features)
 
         vector_field = self._match_vector_field(vector_field, full_size_moving)
-        warped_moving_image = self._full_size_spatial_transformer(
-            full_size_moving, vector_field
+
+        if self.restrict_to_mask_bbox:
+            # undo restriction to mask
+            _vector_field = torch.zeros(
+                vector_field.shape[:-3] + original_moving_image.shape[-3:],
+                device=vector_field.device,
+            )
+            _vector_field[(...,) + bbox[2:]] = vector_field
+            vector_field = _vector_field
+
+        spatial_transformer = SpatialTransformer(
+            shape=original_moving_image.shape[2:]
+        ).to(original_moving_image.device)
+
+        if initial_vector_field is not None:
+            # if we have an initial vector field: compose both vector fields.
+            # Here: at full resolution without cropping/bbox
+            composed_vector_field = vector_field + spatial_transformer(
+                original_initial_vector_field, vector_field
+            )
+        else:
+            composed_vector_field = vector_field
+
+        warped_moving_image = spatial_transformer(
+            original_moving_image, composed_vector_field
         )
 
-        metric_after = self._calculate_metric(fixed_image, mask, warped_moving_image)
+        metric_after = self._calculate_metric(
+            moving_image=warped_moving_image[bbox],
+            fixed_image=fixed_image,
+            fixed_mask=fixed_mask,
+        )
 
         misc = {
-            "features": features,
             "metric_before": metric_before,
             "metric_after": metric_after,
             "level_metrics": metrics,
             "runtimes": runtimes,
         }
 
-        if self.restrict_to_mask:
-            # undo restriction to mask
-            _warped_moving_image = original_moving_image
-            _warped_moving_image[bbox] = warped_moving_image
-            warped_moving_image = _warped_moving_image
-
-            _vector_field = torch.zeros(
-                vector_field.shape[:-3] + warped_moving_image.shape[-3:]
-            )
-            _vector_field[(...,) + bbox[2:]] = vector_field
-            vector_field = _vector_field
-
-        return warped_moving_image, vector_field, misc
+        return warped_moving_image, composed_vector_field, misc
 
     @timing()
-    def forward(self, fixed_image, mask, moving_image, original_image_spacing):
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        original_image_spacing: FloatTuple3D,
+    ):
         return self.run_registration(
-            fixed_image=fixed_image,
-            mask=mask,
             moving_image=moving_image,
+            fixed_image=fixed_image,
+            moving_mask=moving_mask,
+            fixed_mask=fixed_mask,
             original_image_spacing=original_image_spacing,
         )
 
 
+class VectorFieldBoosting(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+
 if __name__ == "__main__":
-    model = TrainableVarRegBlock(
+    model = VarReg3d(
         scale_factors=1.0,
         iterations=200,
         demon_forces="symmetric",
         tau=2.0,
         regularization_sigma=(4.0, 2.0, 2.0),
-        early_stopping_method=None,
     )

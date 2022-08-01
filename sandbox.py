@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import SimpleITK as sitk
+import torch
 from scipy.ndimage.morphology import binary_dilation
 
 from vroc.common_types import PathLike
@@ -12,6 +13,7 @@ from vroc.feature_extractor import OrientedHistogramFeatureExtrator
 from vroc.guesser import ParameterGuesser
 from vroc.helper import compute_tre, compute_tre_sitk, read_landmarks
 from vroc.logger import LogFormatter
+from vroc.loss import TRELoss
 from vroc.registration import VrocRegistration
 
 handler = logging.StreamHandler()
@@ -21,7 +23,7 @@ logging.basicConfig(handlers=[handler])
 
 logging.getLogger(__name__).setLevel(logging.DEBUG)
 logging.getLogger("vroc").setLevel(logging.DEBUG)
-logging.getLogger("vroc.models.TrainableVarRegBlock").setLevel(logging.INFO)
+logging.getLogger("vroc.models.VarReg3d").setLevel(logging.INFO)
 
 OUTPUT_FOLDER = Path("/datalake/learn2reg/NLST_Validation/predictions")
 
@@ -75,18 +77,20 @@ def load(
     )
 
 
-feature_extractor = OrientedHistogramFeatureExtrator(device="cuda:1")
-parameter_guesser = ParameterGuesser(
-    database_filepath="/datalake/learn2reg/best_parameters.sqlite"
-)
-parameter_guesser.fit()
+# feature_extractor = OrientedHistogramFeatureExtrator(device="cuda:0")
+# parameter_guesser = ParameterGuesser(
+#     database_filepath="/datalake/learn2reg/best_parameters.sqlite",
+#     parameters_to_guess=('sigma_x', 'sigma_y', 'sigma_z')
+# )
+# parameter_guesser.fit()
 
 registration = VrocRegistration(
     roi_segmenter=None,
-    feature_extractor=feature_extractor,
-    parameter_guesser=parameter_guesser,
+    feature_extractor=None,
+    parameter_guesser=None,
+    registration_parameters=VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS,
     debug=True,
-    device="cuda:1",
+    device="cuda:0",
 )
 
 
@@ -124,6 +128,12 @@ for case in range(101, 111):
 
     moving_mask = union_mask
     fixed_mask = union_mask
+    # moving_mask = binary_dilation(moving_mask.astype(np.uint8), iterations=1).astype(
+    #     np.uint8
+    # )
+    # fixed_mask = binary_dilation(fixed_mask.astype(np.uint8), iterations=1).astype(
+    #     np.uint8
+    # )
 
     warped_image, transforms = registration.register(
         moving_image=moving_image,
@@ -140,6 +150,9 @@ for case in range(101, 111):
     ax[0, 0].imshow(fixed_image[:, mid_slice, :], clim=clim)
     ax[0, 1].imshow(moving_image[:, mid_slice, :], clim=clim)
     ax[0, 2].imshow(warped_image[:, mid_slice, :], clim=clim)
+
+    ax[1, 0].imshow(transforms[-1][2, :, mid_slice, :], clim=(-10, 10), cmap="seismic")
+    ax[1, 0].set_title("VF")
 
     ax[1, 1].imshow(
         moving_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
@@ -191,6 +204,17 @@ for case in range(101, 111):
     #     spacing_mov=(1.5,) * 3,
     # )
 
+    vf = sitk.GetArrayFromImage(final_transform_vf)
+    vf = np.swapaxes(vf, 0, 2)
+
+    vf = torch.as_tensor(vf[np.newaxis], device="cuda:0")
+    ml = torch.as_tensor(moving_landmarks[np.newaxis], device="cuda:0")
+    fl = torch.as_tensor(fixed_landmarks[np.newaxis], device="cuda:0")
+
+    tre_loss = TRELoss(image_spacing=(1.5, 1.5, 1.5), apply_sqrt=True).to("cuda:0")
+    loss_before = float(tre_loss(vf * 0.0, ml, fl))
+    loss_after = float(tre_loss(vf, ml, fl))
+
     tre_before = compute_tre_sitk(
         fix_lms=fixed_landmarks,
         mov_lms=moving_landmarks,
@@ -204,7 +228,11 @@ for case in range(101, 111):
         spacing_mov=(1.5,) * 3,
     )
     print(
-        f"NLST_0{case}: tre_before={np.mean(tre_before):.2f}, tre_after={np.mean(tre_after):.2f}"
+        f"NLST_0{case}: "
+        f"tre_before={np.mean(tre_before):.2f}, "
+        f"tre_after={np.mean(tre_after):.2f}, "
+        f"tre_loss_before={loss_before:.2f}, "
+        f"tre_loss_after={loss_after:.2f}"
     )
     tres_before.append(np.mean(tre_before))
     tres_after.append(np.mean(tre_after))
