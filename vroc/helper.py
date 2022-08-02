@@ -14,7 +14,7 @@ import torch
 from scipy.ndimage import map_coordinates
 from torch.utils.data import default_collate
 
-from vroc.common_types import Function
+from vroc.common_types import FloatTuple3D, Function
 
 
 class BackgroundGenerator(threading.Thread):
@@ -102,26 +102,30 @@ def read_landmarks(filepath, sep=","):
     return np.array(lines)
 
 
-def compute_tre(fix_lms, mov_lms, disp=None, spacing_mov=None, snap_to_voxel=False):
-
-    if not spacing_mov:
-        spacing_mov = np.repeat(1, disp.shape[-1])
-
-    if disp is not None:
-        fix_lms_disp_x = map_coordinates(disp[:, :, :, 0], fix_lms.transpose())
-        fix_lms_disp_y = map_coordinates(disp[:, :, :, 1], fix_lms.transpose())
-        fix_lms_disp_z = map_coordinates(disp[:, :, :, 2], fix_lms.transpose())
-        fix_lms_disp = np.array(
-            (fix_lms_disp_x, fix_lms_disp_y, fix_lms_disp_z)
+def compute_tre_numpy(
+    moving_landmarks: np.ndarray,
+    fixed_landmarks: np.ndarray,
+    vector_field: np.ndarray | None = None,
+    image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+    snap_to_voxel: bool = False,
+) -> float:
+    if vector_field is not None:
+        displacement_x = map_coordinates(vector_field[0], fixed_landmarks.transpose())
+        displacement_y = map_coordinates(vector_field[1], fixed_landmarks.transpose())
+        displacement_z = map_coordinates(vector_field[2], fixed_landmarks.transpose())
+        displacement = np.array(
+            (displacement_x, displacement_y, displacement_z)
         ).transpose()
-        fix_lms_warped = fix_lms + fix_lms_disp
+        fixed_landmarks_warped = fixed_landmarks + displacement
     else:
-        fix_lms_warped = fix_lms
+        fixed_landmarks_warped = fixed_landmarks
 
     if snap_to_voxel:
-        fix_lms_warped = np.round(fix_lms_warped)
+        fixed_landmarks_warped = np.round(fixed_landmarks_warped)
 
-    return np.linalg.norm((fix_lms_warped - mov_lms) * spacing_mov, axis=1)
+    return np.linalg.norm(
+        (fixed_landmarks_warped - moving_landmarks) * image_spacing, axis=1
+    )
 
 
 def compute_tre_sitk(
@@ -169,7 +173,7 @@ def rescale_range(
 
 def torch_prepare(image: np.ndarray) -> torch.tensor:
     image = torch.as_tensor(image.copy(), dtype=torch.float32)
-    return image[None, :]
+    return image[None]
 
 
 def batch_array(array: np.ndarray, batch_size: int = 32):
