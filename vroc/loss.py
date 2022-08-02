@@ -27,7 +27,7 @@ class TRELoss(nn.Module):
         moving_landmarks: torch.Tensor,
         fixed_landmarks: torch.Tensor,
     ):
-        # vector_field: shape of (1, x_dim, y_dim, z_dim, 3), values are in voxel
+        # vector_field: shape of (1, 3, x_dim, y_dim, z_dim), values are in voxel
         # displacement (i.e. not torch grid_sample convention [-1, 1])
         # {moving,fixed}_landmarks: shape of (1, n_landmarks, 3)
 
@@ -45,7 +45,8 @@ class TRELoss(nn.Module):
         x_coordinates = fixed_landmarks[..., 0]
         y_coordinates = fixed_landmarks[..., 1]
         z_coordinates = fixed_landmarks[..., 2]
-        displacements = vector_field[x_coordinates, y_coordinates, z_coordinates]
+        # displacements is of shape (3, n_landmarks) after transposing
+        displacements = vector_field[:, x_coordinates, y_coordinates, z_coordinates].T
 
         # warp fixed_landmarks and compare to moving_landmarks (euclidean distance)
         # distances will be float32 as displacements is float32
