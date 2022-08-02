@@ -7,7 +7,7 @@ import torch
 
 from vroc.dataset import BaseDataset
 from vroc.helper import (
-    compute_tre,
+    compute_tre_numpy,
     compute_tre_sitk,
     detach_and_squeeze,
     read_landmarks,
@@ -92,11 +92,11 @@ def run_DIRLAB_registration(dirlab_case, p_fixed=0, p_moving=5):
     vf = vf.cpu().detach().numpy()
     vf = np.squeeze(vf)
 
-    tre_numpy = compute_tre(
-        fix_lms=np.array(fixed_LM),
-        mov_lms=np.array(moving_LM),
-        disp=vf,
-        spacing_mov=orig_ref.GetSpacing(),
+    tre_numpy = compute_tre_numpy(
+        fixed_landmarks=np.array(fixed_LM),
+        moving_landmarks=np.array(moving_LM),
+        vector_field=vf,
+        image_spacing=orig_ref.GetSpacing(),
         snap_to_voxel=True,
     )
     tre_sitk = compute_tre_sitk(
@@ -128,11 +128,11 @@ def compute_TRE(reference_img_path, vf_path, lm_fixed_path, lm_moving_path):
     fixed_LM = read_landmarks(lm_fixed_path)
     moving_LM = read_landmarks(lm_moving_path)
 
-    tre_np = compute_tre(
-        fix_lms=fixed_LM,
-        mov_lms=moving_LM,
-        disp=vf_arr,
-        spacing_mov=ref_img.GetSpacing(),
+    tre_np = compute_tre_numpy(
+        fixed_landmarks=fixed_LM,
+        moving_landmarks=moving_LM,
+        vector_field=vf_arr,
+        image_spacing=ref_img.GetSpacing(),
         snap_to_voxel=False,
     )
 
