@@ -14,7 +14,8 @@ from vroc.dataset import NLSTDataset
 from vroc.decorators import convert
 from vroc.hyperopt_database.client import DatabaseClient
 from vroc.metrics import mse_improvement
-from vroc.models import TrainableVarRegBlock
+from vroc.models import VarReg3d
+from vroc.registration import VrocRegistration
 
 param_config = ng.p.Instrumentation(
     iterations=ng.p.Scalar(lower=100, upper=1000).set_integer_casting(),
@@ -54,6 +55,7 @@ def sample_parameter_space(
     iterations: int = -1,
     iterations_per_image: int = 10,
     optimizer_name: str = "TwoPointsDE",
+    loss: str = "MSE",
     device: str = "cuda:0",
     i_worker: Optional[int] = None,
     n_worker: Optional[int] = None,
@@ -73,9 +75,9 @@ def sample_parameter_space(
     while True:
         for data in dataloader:
             image_id = data["id"][0]
-            fixed_image = data["fixed_image"].to(device)
-            fixed_mask = data["fixed_mask"].to(device)
-            moving_image = data["moving_image"].to(device)
+            fixed_image = data["fixed_image"]
+            fixed_mask = data["fixed_mask"]
+            moving_image = data["moving_image"]
             spacing = data["spacing"][0]
 
             optimizer = setup_optimizer(
@@ -84,27 +86,14 @@ def sample_parameter_space(
             for _ in range(iterations_per_image):
                 params = optimizer.ask()
 
-                scale_factors = tuple(
-                    1 / 2**i_level
-                    for i_level in reversed(range(params.kwargs["n_levels"]))
+                registration = VrocRegistration(
+                    roi_segmenter=None,
+                    feature_extractor=None,
+                    parameter_guesser=None,
+                    registration_parameters=params.kwargs,
+                    debug=True,
+                    device="cuda:0",
                 )
-                varreg = TrainableVarRegBlock(
-                    iterations=params.kwargs["iterations"],
-                    scale_factors=scale_factors,
-                    demon_forces="symmetric",
-                    tau=params.kwargs["tau"],
-                    regularization_sigma=(
-                        params.kwargs["sigma_x"],
-                        params.kwargs["sigma_y"],
-                        params.kwargs["sigma_z"],
-                    ),
-                    restrict_to_mask=True,
-                ).to(device)
-
-                with torch.no_grad():
-                    warped_moving_image, vector_field, misc = varreg.forward(
-                        fixed_image, fixed_mask, moving_image, spacing
-                    )
 
                 database.insert_run(
                     image_id=image_id,

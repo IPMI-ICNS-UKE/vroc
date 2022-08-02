@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from vroc.common_types import FloatTuple3D
 from vroc.interpolation import resize_spacing
+from vroc.models import AutoEncoder, VarReg3d
 from vroc.oriented_histogram import OrientedHistogram
 
 
@@ -70,13 +71,13 @@ class OrientedHistogramFeatureExtrator(FeatureExtractor):
         _union_mask = torch.as_tensor(union_mask, device=device)[None, None]
         _mask = torch.ones_like(_fixed_image)
 
-        varreg = TrainableVarRegBlock(
+        varreg = VarReg3d(
             iterations=200,
             scale_factors=1.0,
             demon_forces="symmetric",
             tau=1.0,
             regularization_sigma=(1, 1, 1),
-            restrict_to_mask=False,
+            restrict_to_mask_bbox=False,
         ).to(device)
 
         with torch.no_grad():

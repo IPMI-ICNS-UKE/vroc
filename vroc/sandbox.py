@@ -13,7 +13,7 @@ from vroc.helper import (
     read_landmarks,
     scale_vf,
 )
-from vroc.models import TrainableVarRegBlock
+from vroc.models import VarReg3d
 
 matplotlib.use("module://backend_interagg")
 
@@ -58,7 +58,7 @@ def run_DIRLAB_registration(dirlab_case, p_fixed=0, p_moving=5):
     mask_ = torch.from_numpy(mask.copy())
     mask_ = mask_[None, None, :].float().to(device)
 
-    model = TrainableVarRegBlock(
+    model = VarReg3d(
         iterations=(100,) * n_level,
         demon_forces="symmetric",
         tau=(2,) * n_level,

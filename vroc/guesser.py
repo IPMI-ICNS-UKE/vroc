@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Sequence
+
 import numpy as np
 import umap
 from sklearn.decomposition import PCA
@@ -9,13 +13,19 @@ from vroc.logger import LoggerMixin
 
 
 class ParameterGuesser(LoggerMixin):
-    def __init__(self, database_filepath: PathLike, n_dimensions: int = 2):
+    def __init__(
+        self,
+        database_filepath: PathLike,
+        n_dimensions: int = 2,
+        parameters_to_guess: Sequence[str] | None = None,
+    ):
         self._client = DatabaseClient(database_filepath)
         self.n_dimensions = n_dimensions
         self._mapper = None
         self._nearest_neighbors = None
         self._embedded = None
         self._image_pairs = None
+        self._parameters_to_guess = parameters_to_guess
 
     def fit(self):
         self._image_pairs = self._client.fetch_image_pair_features()
@@ -51,16 +61,16 @@ class ParameterGuesser(LoggerMixin):
         index = int(indices.squeeze())
         nearest_image_pair = self._image_pairs[index]
 
-        return {
-            "iterations": 1000,
-            "tau": 2.0,
-            "sigma_x": 1.25,
-            "sigma_y": 1.25,
-            "sigma_z": 1.25,
-            "n_levels": 3,
-        }
-
-        return self._client.fetch_best_parameters(
+        parameters = self._client.fetch_best_parameters(
             moving_image=nearest_image_pair["moving_image"],
             fixed_image=nearest_image_pair["fixed_image"],
         )
+
+        if self._parameters_to_guess is not None:
+            parameters = {
+                param_name: param_value
+                for (param_name, param_value) in parameters.items()
+                if param_name in self._parameters_to_guess
+            }
+
+        return parameters

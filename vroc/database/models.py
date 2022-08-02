@@ -1,8 +1,11 @@
 import uuid
+from datetime import datetime
 
 from peewee import (
     BlobField,
+    BooleanField,
     CharField,
+    DateTimeField,
     FloatField,
     ForeignKeyField,
     Model,
@@ -32,27 +35,62 @@ class Dataset(BaseModel):
     name = CharField(primary_key=True)
 
 
+class Metric(BaseModel):
+    name = CharField(primary_key=True)
+    lower_is_better = BooleanField()
+
+
 class Image(BaseModel):
     uuid = UUIDField(primary_key=True, default=uuid.uuid4)
     name = CharField(max_length=255)
-    modality = ForeignKeyField(Modality, backref="modalities", on_delete="CASCADE")
-    anatomy = ForeignKeyField(Anatomy, backref="anatomies", on_delete="CASCADE")
-    dataset = ForeignKeyField(Dataset, backref="datasets", on_delete="CASCADE")
+    modality = ForeignKeyField(Modality, backref="images", on_delete="CASCADE")
+    anatomy = ForeignKeyField(Anatomy, backref="images", on_delete="CASCADE")
+    dataset = ForeignKeyField(Dataset, backref="images", on_delete="CASCADE")
+
+    class Meta:
+        indexes = (
+            # unique index
+            (("name", "dataset"), True),
+        )
 
 
-class BestParameters(BaseModel):
+class ImagePairFeature(BaseModel):
     uuid = UUIDField(primary_key=True, default=uuid.uuid4)
-    moving_image = ForeignKeyField(Image, backref="moving_images", on_delete="CASCADE")
-    fixed_image = ForeignKeyField(Image, backref="fixed_images", on_delete="CASCADE")
+    moving_image = ForeignKeyField(
+        Image, backref="image_pair_features", on_delete="CASCADE"
+    )
+    fixed_image = ForeignKeyField(
+        Image, backref="image_pair_features", on_delete="CASCADE"
+    )
+    feature_name = CharField(max_length=255)
+    feature = BlobField()
+
+    class Meta:
+        indexes = (
+            # unique index
+            (("moving_image", "fixed_image", "feature_name"), True),
+        )
+
+
+class Run(BaseModel):
+    uuid = UUIDField(primary_key=True, default=uuid.uuid4)
+    moving_image = ForeignKeyField(Image, backref="runs", on_delete="CASCADE")
+    fixed_image = ForeignKeyField(Image, backref="runs", on_delete="CASCADE")
     parameters = JSONField()
 
-    # performance
-    metric_before = FloatField()
-    metric_after = FloatField()
+    created = DateTimeField(default=datetime.now)
 
 
-class ImagePairFeatures(BaseModel):
+class RunMetrics(BaseModel):
     uuid = UUIDField(primary_key=True, default=uuid.uuid4)
-    moving_image = ForeignKeyField(Image, backref="moving_images", on_delete="CASCADE")
-    fixed_image = ForeignKeyField(Image, backref="fixed_images", on_delete="CASCADE")
-    features = BlobField()
+    run = ForeignKeyField(Run, backref="run_metrics", on_delete="CASCADE")
+
+    metric = ForeignKeyField(Metric, backref="run_metrics", on_delete="CASCADE")
+    value_before = FloatField()
+    value_after = FloatField()
+
+    class Meta:
+        indexes = (
+            # unique index
+            (("run", "metric"), True),
+        )

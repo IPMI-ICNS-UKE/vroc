@@ -327,11 +327,14 @@ class NLSTDataset(DatasetMixin, Dataset):
         i_worker: Optional[int] = None,
         n_worker: Optional[int] = None,
         dilate_masks: int = 0,
+        as_sitk: bool = False,
     ):
-        self.filepaths = self.fetch_filepaths(root_dir)
+        self.root_dir = root_dir
+        self.filepaths = self.fetch_filepaths(self.root_dir)
         self.i_worker = i_worker
         self.n_worker = n_worker
         self.dilate_masks = dilate_masks
+        self.as_sitk = as_sitk
 
         if i_worker is not None and n_worker is not None:
             self.filepaths = self.filepaths[self.i_worker :: self.n_worker]
@@ -398,31 +401,37 @@ class NLSTDataset(DatasetMixin, Dataset):
         moving_mask = NLSTDataset.load_and_preprocess(
             self.filepaths[item]["moving_mask"], is_mask=True
         )
+        spacing = fixed_image.GetSpacing()
+        patch_shape = fixed_image.GetSize()
+        if not self.as_sitk:
+            spacing = torch.tensor(spacing)
+            fixed_image = sitk.GetArrayFromImage(fixed_image)
+            moving_image = sitk.GetArrayFromImage(moving_image)
+            fixed_mask = sitk.GetArrayFromImage(fixed_mask)
+            moving_mask = sitk.GetArrayFromImage(moving_mask)
 
-        spacing = torch.tensor(fixed_image.GetSpacing())
+            patch_shape = torch.tensor(patch_shape)
 
-        fixed_image = sitk.GetArrayFromImage(fixed_image)
-        moving_image = sitk.GetArrayFromImage(moving_image)
-        fixed_mask = sitk.GetArrayFromImage(fixed_mask)
-        moving_mask = sitk.GetArrayFromImage(moving_mask)
+            fixed_image = torch_prepare(fixed_image)
+            moving_image = torch_prepare(moving_image)
+            fixed_mask = torch_prepare(fixed_mask)
+            moving_mask = torch_prepare(moving_mask)
 
-        if self.dilate_masks:
-            moving_mask = binary_dilation(
-                moving_mask.astype(np.uint8), iterations=1
-            ).astype(np.uint8)
-            fixed_mask = binary_dilation(
-                fixed_mask.astype(np.uint8), iterations=1
-            ).astype(np.uint8)
-
-        patch_shape = torch.tensor(fixed_image.shape)
-
-        fixed_image = torch_prepare(fixed_image)
-        moving_image = torch_prepare(moving_image)
-        fixed_mask = torch_prepare(fixed_mask)
-        moving_mask = torch_prepare(moving_mask)
+            if self.dilate_masks:
+                moving_mask = binary_dilation(
+                    moving_mask.astype(np.uint8), iterations=1
+                ).astype(np.uint8)
+                fixed_mask = binary_dilation(
+                    fixed_mask.astype(np.uint8), iterations=1
+                ).astype(np.uint8)
 
         return {
-            "id": self.filepaths[item]["fixed_image"].name[:9],
+            "fixed_image_name": str(
+                self.filepaths[item]["fixed_image"].relative_to(self.root_dir)
+            ),
+            "moving_image_name": str(
+                self.filepaths[item]["moving_image"].relative_to(self.root_dir)
+            ),
             "fixed_image": fixed_image,
             "moving_image": moving_image,
             "fixed_mask": fixed_mask,
@@ -473,3 +482,8 @@ class AutoencoderDataset(DatasetMixin, Dataset):
 
         image = torch_prepare(image)
         return image, str(image_path)
+
+
+if __name__ == "__main__":
+    dataset = NLSTDataset(root_dir=Path("/datalake/learn2reg/NLST"), as_sitk=True)
+    data = next(iter(dataset))

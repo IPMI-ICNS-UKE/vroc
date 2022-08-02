@@ -1,11 +1,11 @@
 from typing import List, Optional, Union
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
-import peewee
+from peewee import prefetch
 
-import vroc.hyperopt_database.models as orm
+import vroc.database.models as orm
 from vroc.common_types import PathLike
 from vroc.logger import LoggerMixin
 
@@ -19,39 +19,81 @@ class DatabaseClient(LoggerMixin):
     def _create_tables(self):
         orm.database.create_tables(
             (
+                orm.Modality,
+                orm.Anatomy,
+                orm.Dataset,
+                orm.Metric,
                 orm.Image,
+                orm.ImagePairFeature,
                 orm.Run,
+                orm.RunMetrics,
             )
         )
 
+    def insert_metric(self, name: str, lower_is_better: bool = True) -> orm.Metric:
+        return orm.Metric.create(name=name, lower_is_better=lower_is_better)
+
+    def fetch_metric(self, name: str) -> orm.Metric:
+        return orm.Metric.get(name=name)
+
+    def get_or_create_image(
+        self, image_name: str, modality: str, anatomy: str, dataset: str
+    ) -> orm.Image:
+        modality, _ = orm.Modality.get_or_create(name=modality.upper())
+        anatomy, _ = orm.Anatomy.get_or_create(name=anatomy.upper())
+        dataset, _ = orm.Dataset.get_or_create(name=dataset.upper())
+
+        return orm.Image.get_or_create(
+            name=image_name, modality=modality, anatomy=anatomy, dataset=dataset
+        )[0]
+
+    def fetch_image(self, uuid: UUID) -> orm.Image:
+        return orm.Image.get(uuid=uuid)
+
     def insert_run(
-        self,
-        image_id: str,
-        parameters: dict,
-        metric_before: float,
-        metric_after: float,
-        level_metrics: List[List],
+        self, moving_image: orm.Image, fixed_image: orm.Image, parameters: dict
+    ) -> orm.Run:
+        return orm.Run.create(
+            moving_image=moving_image, fixed_image=fixed_image, parameters=parameters
+        )
+
+    def insert_run_metric(
+        self, run: orm.Run, metric: orm.Metric, value_before: float, value_after: float
     ):
-        image, _ = orm.Image.get_or_create(id=image_id)
-        orm.Run.create(
-            image=image,
-            parameters=parameters,
-            metric_before=metric_before,
-            metric_after=metric_after,
-            level_metrics=level_metrics,
+        return orm.RunMetrics.create(
+            run=run, metric=metric, value_before=value_before, value_after=value_after
         )
 
     def fetch_runs(
-        self, image_id: Optional[str] = None, as_dataframe: bool = False
+        self,
+        moving_image: orm.Image,
+        fixed_image: orm.Image,
+        as_dataframe: bool = False,
     ) -> Union[List[dict], pd.DataFrame]:
-        query = orm.Run.select()
-        if image_id is not None:
-            query = query.where(orm.Run.image == image_id)
+        runs = orm.Run.select().where(
+            (orm.Run.moving_image == moving_image)
+            & (orm.Run.fixed_image == fixed_image)
+        )
 
-        runs = list(query.dicts())
+        runs = prefetch(runs, orm.RunMetrics)
+
+        def to_dict(run: orm.Run):
+            data = run.__data__.copy()
+            data["run_metrics"] = [
+                {
+                    "metric": run_metric.metric.name,
+                    "value_before": run_metric.value_before,
+                    "value_after": run_metric.value_after,
+                }
+                for run_metric in run.run_metrics
+            ]
+
+            return data
+
+        runs = [to_dict(run) for run in runs]
 
         if as_dataframe:
-            runs = DatabaseClient._to_dataframe(runs)
+            runs = DatabaseClient._runs_to_dataframe(runs)
 
         return runs
 
@@ -115,18 +157,56 @@ class DatabaseClient(LoggerMixin):
         return best_runs
 
     @staticmethod
-    def _expand_param_dict(run: dict):
+    def _expand_dict(run: dict, key: str, prefix: str = ""):
         run = run.copy()
-        params = run.pop("parameters")
+        params = run.pop(key)
         for param_name, param_value in params.items():
-            run[param_name] = param_value
+            run[prefix + param_name] = param_value
 
         return run
 
     @staticmethod
-    def _to_dataframe(runs: List[dict]) -> pd.DataFrame:
+    def _runs_to_dataframe(runs: List[dict]) -> pd.DataFrame:
         if isinstance(runs, dict):
             runs = [runs]
-        runs = [DatabaseClient._expand_param_dict(r) for r in runs]
+        for i in range(len(runs)):
+            run = runs[i]
+
+            # include parameters nested dict in top level
+            parameters = run.pop("parameters")
+            for param_name, param_value in parameters.items():
+                run[param_name] = param_value
+
+            # include run_metrics nested list of dicts in top level
+            run_metrics = run.pop("run_metrics")
+            for run_metric in run_metrics:
+                metric_name = run_metric["metric"].lower()
+                run[f"{metric_name}_before"] = run_metric["value_before"]
+                run[f"{metric_name}_after"] = run_metric["value_after"]
+
+            # put modified run dict back into list
+            runs[i] = run
 
         return pd.DataFrame.from_records(runs, index="uuid")
+
+
+if __name__ == "__main__":
+
+    client = DatabaseClient("/home/fmadesta/research/varreg_on_crack/test_db.sqlite")
+
+    tre_metric = client.fetch_metric(name="TRE")
+    moving_image = client.get_or_create_image(
+        image_name="moving_image", modality="CT", anatomy="lung", dataset="NLST"
+    )
+    fixed_image = client.get_or_create_image(
+        image_name="fixed_image", modality="CT", anatomy="lung", dataset="NLST"
+    )
+
+    # run = client.insert_run(
+    #     moving_image=moving_image,
+    #     fixed_image=fixed_image,
+    #     parameters={'some': 'params'},
+    #
+    # )
+    # run_metric = client.insert_run_metric(run=run, metric=tre_metric, value_before=1337, value_after=42)
+    runs = client.fetch_runs(moving_image, fixed_image, as_dataframe=True)
