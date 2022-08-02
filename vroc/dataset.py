@@ -12,6 +12,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 import SimpleITK as sitk
 import torch
+from scipy.ndimage.morphology import binary_dilation
 from torch.utils.data import Dataset, IterableDataset
 from tqdm import tqdm
 
@@ -325,10 +326,12 @@ class NLSTDataset(DatasetMixin, Dataset):
         root_dir: PathLike,
         i_worker: Optional[int] = None,
         n_worker: Optional[int] = None,
+        dilate_masks: int = 0,
     ):
         self.filepaths = self.fetch_filepaths(root_dir)
         self.i_worker = i_worker
         self.n_worker = n_worker
+        self.dilate_masks = dilate_masks
 
         if i_worker is not None and n_worker is not None:
             self.filepaths = self.filepaths[self.i_worker :: self.n_worker]
@@ -398,17 +401,18 @@ class NLSTDataset(DatasetMixin, Dataset):
 
         spacing = torch.tensor(fixed_image.GetSpacing())
 
-        # moving_image = sitk.HistogramMatching(
-        #     moving_image,
-        #     fixed_image,
-        #     numberOfHistogramLevels=1024,
-        #     numberOfMatchPoints=7,
-        # )
-
         fixed_image = sitk.GetArrayFromImage(fixed_image)
         moving_image = sitk.GetArrayFromImage(moving_image)
         fixed_mask = sitk.GetArrayFromImage(fixed_mask)
         moving_mask = sitk.GetArrayFromImage(moving_mask)
+
+        if self.dilate_masks:
+            moving_mask = binary_dilation(
+                moving_mask.astype(np.uint8), iterations=1
+            ).astype(np.uint8)
+            fixed_mask = binary_dilation(
+                fixed_mask.astype(np.uint8), iterations=1
+            ).astype(np.uint8)
 
         patch_shape = torch.tensor(fixed_image.shape)
 
