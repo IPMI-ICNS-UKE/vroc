@@ -77,7 +77,7 @@ class VrocRegistration(LoggerMixin):
         roi_segmenter,
         feature_extractor: FeatureExtractor | None = None,
         parameter_guesser: ParameterGuesser | None = None,
-        registration_parameters: dict | None = None,
+        default_parameters: dict | None = None,
         debug: bool = False,
         device: str = "cuda",
     ):
@@ -88,8 +88,8 @@ class VrocRegistration(LoggerMixin):
 
         # these are default registration parameters used if no parameter guesser is
         # passed or the given parameter guesser returns only a subset of parameters
-        self.registration_parameters = (
-            registration_parameters or VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS
+        self.default_parameters = (
+            default_parameters or VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS
         )
 
         # if parameter_guesser is set we need a feature_extractor
@@ -119,10 +119,7 @@ class VrocRegistration(LoggerMixin):
         :rtype:
         """
 
-        return (
-            parameters.get(parameter_name)
-            or self.registration_parameters[parameter_name]
-        )
+        return parameters.get(parameter_name) or self.default_parameters[parameter_name]
 
     def _convert_sitk_to_numpy(self, image: sitk.Image) -> Tuple[np.ndarray, dict]:
         meta = {
@@ -186,8 +183,6 @@ class VrocRegistration(LoggerMixin):
         segment_roi: bool = True,
         valid_value_range: Tuple[Number, Number] | None = None,
     ):
-        transforms = []
-
         moving_image = ImageWrapper(moving_image)
         fixed_image = ImageWrapper(fixed_image)
 
@@ -221,8 +216,6 @@ class VrocRegistration(LoggerMixin):
                 fixed_mask=fixed_mask.as_sitk(),
             )
 
-            # affine_transform = affine_transform.GetInverse()
-
             f = sitk.TransformToDisplacementFieldFilter()
             f.SetSize(fixed_image.shape)
             f.SetOutputSpacing((1.0, 1.0, 1.0))
@@ -245,7 +238,6 @@ class VrocRegistration(LoggerMixin):
                 affine_transform_vector_field, -1, 0
             )
 
-            # transforms.append(affine_transform)
             # set warped image as new moving image
             warped_image = ImageWrapper(warped_image)
             if moving_mask is not None:
@@ -273,11 +265,6 @@ class VrocRegistration(LoggerMixin):
                 self.logger.debug(
                     f"Affine registration: RMSE before: {before}, RMSE after {after}"
                 )
-
-            # set transformed image/mask as new moving image/mask
-            # moving_image = warped_image
-            # if moving_mask is not None:
-            #     moving_mask = warped_mask
 
         # handle ROI
         if moving_mask is None and fixed_mask is None:
@@ -352,9 +339,12 @@ class VrocRegistration(LoggerMixin):
         )
         fixed_mask = torch.as_tensor(fixed_mask[np.newaxis, np.newaxis]).to(self.device)
 
-        affine_transform_vector_field = torch.as_tensor(
-            affine_transform_vector_field[np.newaxis]
-        ).to(self.device)
+        if register_affine:
+            affine_transform_vector_field = torch.as_tensor(
+                affine_transform_vector_field[np.newaxis]
+            ).to(self.device)
+        else:
+            affine_transform_vector_field = None
 
         with torch.inference_mode():
             warped_image, vector_field, misc = varreg.run_registration(
@@ -366,8 +356,8 @@ class VrocRegistration(LoggerMixin):
                 initial_vector_field=affine_transform_vector_field,
             )
 
+        # squeeze batch (and channel) dimension(s)
         warped_image = warped_image.cpu().numpy().squeeze(axis=(0, 1))
         vector_field = vector_field.cpu().numpy().squeeze(axis=0)
-        transforms.append(vector_field)
 
-        return warped_image, transforms
+        return warped_image, vector_field
