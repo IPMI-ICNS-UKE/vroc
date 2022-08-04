@@ -6,6 +6,7 @@ from typing import Optional
 
 import nevergrad as ng
 import numpy as np
+import typer
 from scipy.ndimage import binary_dilation
 
 import vroc.database.models as orm
@@ -266,16 +267,16 @@ if __name__ == "__main__":
     logging.getLogger(__name__).setLevel(logging.INFO)
     logging.getLogger("vroc").setLevel(logging.INFO)
 
-    # typer.run(sample_parameter_space)
+    typer.run(sample_parameter_space)
 
-    I_WORKER = 1
-
-    sample_parameter_space(
-        nlst_dir=Path("/datalake/learn2reg/NLST"),
-        database_filepath=Path("/datalake/learn2reg/param_sampling.sqlite"),
-        optimizer_name="TwoPointsDE",
-        iterations_per_image=10,
-        n_worker=2,
-        i_worker=I_WORKER,
-        device=f"cuda:{I_WORKER}",
-    )
+    # I_WORKER = 1
+    #
+    # sample_parameter_space(
+    #     nlst_dir=Path("/datalake/learn2reg/NLST"),
+    #     database_filepath=Path("/datalake/learn2reg/param_sampling.sqlite"),
+    #     optimizer_name="TwoPointsDE",
+    #     iterations_per_image=10,
+    #     n_worker=2,
+    #     i_worker=I_WORKER,
+    #     device=f"cuda:{I_WORKER}",
+    # )
