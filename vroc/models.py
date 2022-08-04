@@ -620,6 +620,9 @@ class VarReg3d(nn.Module, LoggerMixin):
                 warped_moving = spatial_transformer(
                     scaled_moving_image, composed_vector_field
                 )
+                warped_scaled_moving_mask = spatial_transformer(
+                    scaled_moving_mask, composed_vector_field
+                )
 
                 level_metrics.append(
                     self._calculate_metric(
@@ -633,7 +636,7 @@ class VarReg3d(nn.Module, LoggerMixin):
                 forces = self._demon_forces_layer(
                     warped_moving,
                     scaled_fixed_image,
-                    scaled_moving_mask,
+                    warped_scaled_moving_mask,
                     scaled_fixed_mask,
                     original_image_spacing,
                 )

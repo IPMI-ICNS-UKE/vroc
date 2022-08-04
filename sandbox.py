@@ -120,16 +120,19 @@ registration = VrocRegistration(
 )
 
 
+# FOLDER = 'NLST_Validation'
+FOLDER = "NLST"
+
 tres_before = []
 tres_after = []
-for case in range(101, 111):
+for case in range(1, 2):
     fixed_landmarks = read_landmarks(
-        f"/datalake/learn2reg/NLST_Validation/keypointsTr/NLST_0{case}_0000.csv",
-        sep=" ",
+        f"/datalake/learn2reg/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
+        sep=",",
     )
     moving_landmarks = read_landmarks(
-        f"/datalake/learn2reg/NLST_Validation/keypointsTr/NLST_0{case}_0001.csv",
-        sep=" ",
+        f"/datalake/learn2reg/{FOLDER}/keypointsTr/NLST_{case:04d}_0001.csv",
+        sep=",",
     )
 
     (
@@ -140,10 +143,10 @@ for case in range(101, 111):
         image_spacing,
         reference_image,
     ) = load(
-        moving_image_filepath=f"/datalake/learn2reg/NLST_Validation/imagesTr/NLST_0{case}_0001.nii.gz",
-        fixed_image_filepath=f"/datalake/learn2reg/NLST_Validation/imagesTr/NLST_0{case}_0000.nii.gz",
-        moving_mask_filepath=f"/datalake/learn2reg/NLST_Validation/masksTr/NLST_0{case}_0001.nii.gz",
-        fixed_mask_filepath=f"/datalake/learn2reg/NLST_Validation/masksTr/NLST_0{case}_0000.nii.gz",
+        moving_image_filepath=f"/datalake/learn2reg/{FOLDER}/imagesTr/NLST_{case:04d}_0001.nii.gz",
+        fixed_image_filepath=f"/datalake/learn2reg//{FOLDER}/imagesTr/NLST_{case:04d}_0000.nii.gz",
+        moving_mask_filepath=f"/datalake/learn2reg//{FOLDER}/masksTr/NLST_{case:04d}_0001.nii.gz",
+        fixed_mask_filepath=f"/datalake/learn2reg//{FOLDER}/masksTr/NLST_{case:04d}_0000.nii.gz",
     )
 
     moving_mask = binary_dilation(moving_mask.astype(np.uint8), iterations=1).astype(
@@ -164,32 +167,32 @@ for case in range(101, 111):
         valid_value_range=(-1024, 3071),
     )
 
-    # fig, ax = plt.subplots(2, 3, sharex=True, sharey=True)
-    # mid_slice = fixed_image.shape[1] // 2
-    # clim = (-1000, 200)
-    # ax[0, 0].imshow(fixed_image[:, mid_slice, :], clim=clim)
-    # ax[0, 1].imshow(moving_image[:, mid_slice, :], clim=clim)
-    # ax[0, 2].imshow(warped_image[:, mid_slice, :], clim=clim)
-    #
-    # ax[1, 0].imshow(vector_field[2, :, mid_slice, :], clim=(-10, 10), cmap="seismic")
-    # ax[1, 0].set_title("VF")
-    #
-    # ax[1, 1].imshow(
-    #     moving_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
-    #     clim=(-500, 500),
-    #     cmap="seismic",
-    # )
-    # ax[1, 2].imshow(
-    #     warped_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
-    #     clim=(-500, 500),
-    #     cmap="seismic",
-    # )
-    # fig.suptitle(f"NLST_0{case}")
+    fig, ax = plt.subplots(2, 3, sharex=True, sharey=True)
+    mid_slice = fixed_image.shape[1] // 2
+    clim = (-1000, 200)
+    ax[0, 0].imshow(fixed_image[:, mid_slice, :], clim=clim)
+    ax[0, 1].imshow(moving_image[:, mid_slice, :], clim=clim)
+    ax[0, 2].imshow(warped_image[:, mid_slice, :], clim=clim)
+
+    ax[1, 0].imshow(vector_field[2, :, mid_slice, :], clim=(-10, 10), cmap="seismic")
+    ax[1, 0].set_title("VF")
+
+    ax[1, 1].imshow(
+        moving_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
+        clim=(-500, 500),
+        cmap="seismic",
+    )
+    ax[1, 2].imshow(
+        warped_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
+        clim=(-500, 500),
+        cmap="seismic",
+    )
+    fig.suptitle(f"NLST_{case:04d}")
 
     # output_filepath = write_nlst_vector_field(
     #     vector_field,
     #     reference_image=reference_image,
-    #     case=f"0{case}_test",
+    #     case=f"{case:04d}_test",
     #     output_folder=OUTPUT_FOLDER,
     # )
 

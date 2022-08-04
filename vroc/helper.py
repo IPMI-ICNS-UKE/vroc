@@ -14,7 +14,7 @@ import torch
 from scipy.ndimage import map_coordinates
 from torch.utils.data import default_collate
 
-from vroc.common_types import FloatTuple3D, Function
+from vroc.common_types import FloatTuple3D, Function, PathLike
 
 
 class BackgroundGenerator(threading.Thread):
@@ -96,10 +96,10 @@ class LazyLoadableList(MutableSequence):
         return repr(self.items)
 
 
-def read_landmarks(filepath, sep=","):
+def read_landmarks(filepath: PathLike, sep: str = ",") -> np.ndarray:
     with open(filepath, "rt") as f:
-        lines = [tuple(map(float, line.rstrip().split(sep))) for line in f]
-    return np.array(lines)
+        lines = [tuple(map(float, line.strip().split(sep))) for line in f]
+    return np.array(lines, dtype=np.float32)
 
 
 def compute_tre_numpy(
@@ -108,7 +108,7 @@ def compute_tre_numpy(
     vector_field: np.ndarray | None = None,
     image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
     snap_to_voxel: bool = False,
-) -> float:
+) -> np.ndarray:
     if vector_field is not None:
         displacement_x = map_coordinates(vector_field[0], fixed_landmarks.transpose())
         displacement_y = map_coordinates(vector_field[1], fixed_landmarks.transpose())

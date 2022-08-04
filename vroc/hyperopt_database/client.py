@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import List, Optional, Union
 from uuid import UUID, uuid4
 
@@ -36,6 +38,13 @@ class DatabaseClient(LoggerMixin):
     def fetch_metric(self, name: str) -> orm.Metric:
         return orm.Metric.get(name=name)
 
+    def get_or_create_metric(
+        self, name: str, lower_is_better: bool = True
+    ) -> orm.Metric:
+        metric, _ = orm.Metric.get_or_create(name=name, lower_is_better=lower_is_better)
+
+        return metric
+
     def get_or_create_image(
         self, image_name: str, modality: str, anatomy: str, dataset: str
     ) -> orm.Image:
@@ -47,8 +56,8 @@ class DatabaseClient(LoggerMixin):
             name=image_name, modality=modality, anatomy=anatomy, dataset=dataset
         )[0]
 
-    def fetch_image(self, uuid: UUID) -> orm.Image:
-        return orm.Image.get(uuid=uuid)
+    def fetch_image(self, **kwargs) -> orm.Image:
+        return orm.Image.get(**kwargs)
 
     def insert_run(
         self, moving_image: orm.Image, fixed_image: orm.Image, parameters: dict
@@ -68,6 +77,7 @@ class DatabaseClient(LoggerMixin):
         self,
         moving_image: orm.Image,
         fixed_image: orm.Image,
+        metric: orm.Metric | None = None,
         as_dataframe: bool = False,
     ) -> Union[List[dict], pd.DataFrame]:
         runs = orm.Run.select().where(
@@ -76,16 +86,22 @@ class DatabaseClient(LoggerMixin):
         )
 
         runs = prefetch(runs, orm.RunMetrics)
+        if not metric:
+            selected_metrics = list(orm.Metric.select())
+        else:
+            selected_metrics = [metric]
 
         def to_dict(run: orm.Run):
             data = run.__data__.copy()
+
             data["run_metrics"] = [
                 {
-                    "metric": run_metric.metric.name,
+                    "name": run_metric.metric.name,
                     "value_before": run_metric.value_before,
                     "value_after": run_metric.value_after,
                 }
                 for run_metric in run.run_metrics
+                if run_metric.metric in selected_metrics
             ]
 
             return data
@@ -97,36 +113,37 @@ class DatabaseClient(LoggerMixin):
 
         return runs
 
-    def fetch_best_run(
-        self,
-        image_id: str,
-        k_best: int = 1,
-        reduce: bool = True,
-        as_dataframe: bool = False,
-    ) -> Union[dict, List[dict], pd.DataFrame]:
-        query = (
-            orm.Run.select()
-            .where(orm.Run.image == image_id)
-            .order_by(orm.Run.metric_after.asc())
-            .limit(k_best)
-            .dicts()
-            .first(n=k_best)
-        )
-        if k_best > 1 and reduce:
-            query = {
-                "uuid": uuid4(),
-                "image": query[0]["image"],
-                "parameters": self._reduce_parameters([q["parameters"] for q in query]),
-                "metric_before": float(np.mean([q["metric_before"] for q in query])),
-                "metric_after": float(np.mean([q["metric_after"] for q in query])),
-                "level_metrics": None,
-                "created": None,
-            }
-
-        if as_dataframe:
-            query = DatabaseClient._to_dataframe(query)
-
-        return query
+    # TODO: outdated models, fix this
+    # def fetch_best_run(
+    #     self,
+    #     image_id: str,
+    #     k_best: int = 1,
+    #     reduce: bool = True,
+    #     as_dataframe: bool = False,
+    # ) -> Union[dict, List[dict], pd.DataFrame]:
+    #     query = (
+    #         orm.Run.select()
+    #         .where(orm.Run.image == image_id)
+    #         .order_by(orm.Run.metric_after.asc())
+    #         .limit(k_best)
+    #         .dicts()
+    #         .first(n=k_best)
+    #     )
+    #     if k_best > 1 and reduce:
+    #         query = {
+    #             "uuid": uuid4(),
+    #             "image": query[0]["image"],
+    #             "parameters": self._reduce_parameters([q["parameters"] for q in query]),
+    #             "metric_before": float(np.mean([q["metric_before"] for q in query])),
+    #             "metric_after": float(np.mean([q["metric_after"] for q in query])),
+    #             "level_metrics": None,
+    #             "created": None,
+    #         }
+    #
+    #     if as_dataframe:
+    #         query = DatabaseClient._to_dataframe(query)
+    #
+    #     return query
 
     def _reduce_parameters(self, parameters: List[dict]):
         reduced = {}
@@ -180,7 +197,7 @@ class DatabaseClient(LoggerMixin):
             # include run_metrics nested list of dicts in top level
             run_metrics = run.pop("run_metrics")
             for run_metric in run_metrics:
-                metric_name = run_metric["metric"].lower()
+                metric_name = run_metric["name"].lower()
                 run[f"{metric_name}_before"] = run_metric["value_before"]
                 run[f"{metric_name}_after"] = run_metric["value_after"]
 
@@ -192,21 +209,20 @@ class DatabaseClient(LoggerMixin):
 
 if __name__ == "__main__":
 
-    client = DatabaseClient("/home/fmadesta/research/varreg_on_crack/test_db.sqlite")
+    client = DatabaseClient("/datalake/learn2reg/param_sampling.sqlite")
 
-    tre_metric = client.fetch_metric(name="TRE")
-    moving_image = client.get_or_create_image(
-        image_name="moving_image", modality="CT", anatomy="lung", dataset="NLST"
+    tre_mean = client.fetch_metric(name="TRE_MEAN")
+    moving_image = client.fetch_image(
+        name="imagesTr/NLST_0001_0001.nii.gz",
+        modality="CT",
+        anatomy="LUNG",
+        dataset="NLST",
     )
-    fixed_image = client.get_or_create_image(
-        image_name="fixed_image", modality="CT", anatomy="lung", dataset="NLST"
+    fixed_image = client.fetch_image(
+        name="imagesTr/NLST_0001_0000.nii.gz",
+        modality="CT",
+        anatomy="LUNG",
+        dataset="NLST",
     )
 
-    # run = client.insert_run(
-    #     moving_image=moving_image,
-    #     fixed_image=fixed_image,
-    #     parameters={'some': 'params'},
-    #
-    # )
-    # run_metric = client.insert_run_metric(run=run, metric=tre_metric, value_before=1337, value_after=42)
     runs = client.fetch_runs(moving_image, fixed_image, as_dataframe=True)

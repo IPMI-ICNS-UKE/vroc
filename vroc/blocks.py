@@ -372,7 +372,15 @@ class SpatialTransformer(nn.Module):
             new_locs = new_locs.permute(0, 2, 3, 4, 1)
             new_locs = new_locs[..., [2, 1, 0]]
 
-        return F.grid_sample(src, new_locs, align_corners=True, mode=self.mode)
+        if is_mask := src.dtype == torch.bool:
+            src = torch.as_tensor(src, dtype=torch.float32)
+
+        warped = F.grid_sample(src, new_locs, align_corners=True, mode=self.mode)
+
+        if is_mask:
+            warped = warped > 0.5
+
+        return warped
 
 
 class DemonForces3d(nn.Module):

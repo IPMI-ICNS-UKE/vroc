@@ -22,6 +22,7 @@ from vroc.hashing import hash_path
 from vroc.helper import (
     LazyLoadableList,
     nearest_factor_pow_2,
+    read_landmarks,
     rescale_range,
     torch_prepare,
 )
@@ -401,21 +402,29 @@ class NLSTDataset(DatasetMixin, Dataset):
         moving_mask = NLSTDataset.load_and_preprocess(
             self.filepaths[item]["moving_mask"], is_mask=True
         )
-        spacing = fixed_image.GetSpacing()
-        patch_shape = fixed_image.GetSize()
+
+        moving_keypoints = read_landmarks(
+            self.filepaths[item]["moving_keypoints"], sep=","
+        )
+        fixed_keypoints = read_landmarks(
+            self.filepaths[item]["fixed_keypoints"], sep=","
+        )
+
+        image_spacing = fixed_image.GetSpacing()
+        image_shape = fixed_image.GetSize()
         if not self.as_sitk:
-            spacing = torch.tensor(spacing)
-            fixed_image = sitk.GetArrayFromImage(fixed_image)
+            image_spacing = np.array(image_spacing)
+
             moving_image = sitk.GetArrayFromImage(moving_image)
-            fixed_mask = sitk.GetArrayFromImage(fixed_mask)
+            fixed_image = sitk.GetArrayFromImage(fixed_image)
             moving_mask = sitk.GetArrayFromImage(moving_mask)
+            fixed_mask = sitk.GetArrayFromImage(fixed_mask)
 
-            patch_shape = torch.tensor(patch_shape)
-
-            fixed_image = torch_prepare(fixed_image)
-            moving_image = torch_prepare(moving_image)
-            fixed_mask = torch_prepare(fixed_mask)
-            moving_mask = torch_prepare(moving_mask)
+            # flip axes
+            moving_image = np.swapaxes(moving_image, 0, 2)
+            fixed_image = np.swapaxes(fixed_image, 0, 2)
+            moving_mask = np.swapaxes(moving_mask, 0, 2)
+            fixed_mask = np.swapaxes(fixed_mask, 0, 2)
 
             if self.dilate_masks:
                 moving_mask = binary_dilation(
@@ -425,19 +434,28 @@ class NLSTDataset(DatasetMixin, Dataset):
                     fixed_mask.astype(np.uint8), iterations=1
                 ).astype(np.uint8)
 
+            image_shape = np.array(image_shape)
+
+            fixed_image = np.asarray(fixed_image[np.newaxis], dtype=np.float32)
+            moving_image = np.asarray(moving_image[np.newaxis], dtype=np.float32)
+            fixed_mask = np.asarray(fixed_mask[np.newaxis], dtype=np.float32)
+            moving_mask = np.asarray(moving_mask[np.newaxis], dtype=np.float32)
+
         return {
-            "fixed_image_name": str(
-                self.filepaths[item]["fixed_image"].relative_to(self.root_dir)
-            ),
             "moving_image_name": str(
                 self.filepaths[item]["moving_image"].relative_to(self.root_dir)
             ),
-            "fixed_image": fixed_image,
+            "fixed_image_name": str(
+                self.filepaths[item]["fixed_image"].relative_to(self.root_dir)
+            ),
             "moving_image": moving_image,
-            "fixed_mask": fixed_mask,
+            "fixed_image": fixed_image,
             "moving_mask": moving_mask,
-            "patch_shape": patch_shape,
-            "spacing": spacing,
+            "fixed_mask": fixed_mask,
+            "moving_keypoints": moving_keypoints,
+            "fixed_keypoints": fixed_keypoints,
+            "image_shape": image_shape,
+            "image_spacing": image_spacing,
         }
 
 
