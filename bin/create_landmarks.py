@@ -31,10 +31,12 @@ for moving_image_filepath, fixed_image_filepath, fixed_mask_filepath in zip(
     np.savetxt(
         keypoints_folder / (fixed_image_filepath.name.split(".")[0] + ".csv"),
         [l["fixed_image"] for l in landmarks["landmarks"]],
+        delimiter=",",
         fmt="%.3f",
     )
     np.savetxt(
         keypoints_folder / (moving_image_filepath.name.split(".")[0] + ".csv"),
         [l["moving_image"] for l in landmarks["landmarks"]],
+        delimiter=",",
         fmt="%.3f",
     )

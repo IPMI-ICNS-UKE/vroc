@@ -318,6 +318,8 @@ class VarReg3d(nn.Module, LoggerMixin):
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         use_image_spacing: bool = False,
         restrict_to_mask_bbox: bool = False,
+        early_stopping_delta: float = 0.0,
+        early_stopping_window: int = 20,
     ):
         super().__init__()
 
@@ -346,6 +348,12 @@ class VarReg3d(nn.Module, LoggerMixin):
         self.demon_forces = demon_forces
 
         self.restrict_to_mask_bbox = restrict_to_mask_bbox
+        self.early_stopping_delta = VarReg3d._expand_to_level_tuple(
+            early_stopping_delta, n_levels=self.n_levels
+        )
+        self.early_stopping_window = VarReg3d._expand_to_level_tuple(
+            early_stopping_window, n_levels=self.n_levels
+        )
 
         # check if params are passed with/converted to consistent length
         # (== self.n_levels)
@@ -500,6 +508,33 @@ class VarReg3d(nn.Module, LoggerMixin):
 
         return float(F.mse_loss(fixed_image, moving_image))
 
+    def _check_early_stopping(self, metrics: List[float], i_level: int) -> bool:
+        early_stop = False
+        if (
+            self.early_stopping_delta[i_level]
+            and self.early_stopping_window[i_level]
+            and len(metrics) >= self.early_stopping_window[i_level]
+        ):
+            window = np.array(metrics[-self.early_stopping_window[i_level] :])
+            window_rel_changes = 1 - window[1:] / window[:-1]
+
+            mean_rel_change = window_rel_changes.mean()
+
+            self.logger.debug(
+                f"Mean relative metric change over window of "
+                f"{self.early_stopping_window[i_level]} steps is {mean_rel_change:.6f}"
+            )
+
+            if mean_rel_change < self.early_stopping_delta[i_level]:
+                early_stop = True
+                self.logger.debug(
+                    f"Early stopping triggered for level {i_level} after iteration "
+                    f"{len(metrics)}: {mean_rel_change:.6f} < "
+                    f"{self.early_stopping_delta[i_level]:.6f}"
+                )
+
+        return early_stop
+
     def run_registration(
         self,
         moving_image: torch.Tensor,
@@ -551,11 +586,9 @@ class VarReg3d(nn.Module, LoggerMixin):
 
         full_size_moving = moving_image
 
+        # for tracking level-wise metrics (used for early stopping, if enabled)
         metrics = []
-        # set initial vector field (if given)
-        vector_field = None  # if initial_vector_field is None else initial_vector_field
-
-        runtimes = []
+        vector_field = None
 
         metric_before = self._calculate_metric(
             moving_image=moving_image, fixed_image=fixed_image, fixed_mask=fixed_mask
@@ -605,7 +638,6 @@ class VarReg3d(nn.Module, LoggerMixin):
 
             level_metrics = []
 
-            t_start = time.time()
             for i in range(iterations):
                 t_step_start = time.time()
                 if initial_vector_field is not None:
@@ -647,12 +679,14 @@ class VarReg3d(nn.Module, LoggerMixin):
                 )
                 vector_field = _regularization_layer(vector_field)
 
+                # check early stopping
+                if self._check_early_stopping(metrics=level_metrics, i_level=i_level):
+                    break
+
                 t_step_end = time.time()
                 log["step_runtime"] = t_step_end - t_step_start
                 self.logger.debug(log)
 
-            t_end = time.time()
-            runtimes.append(t_end - t_start)
             metrics.append(level_metrics)
 
         vector_field = self._match_vector_field(vector_field, full_size_moving)
@@ -693,7 +727,6 @@ class VarReg3d(nn.Module, LoggerMixin):
             "metric_before": metric_before,
             "metric_after": metric_after,
             "level_metrics": metrics,
-            "runtimes": runtimes,
         }
 
         return warped_moving_image, composed_vector_field, misc

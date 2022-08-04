@@ -166,6 +166,8 @@ def sample_parameter_space(
                     fixed_mask=fixed_mask,
                     register_affine=True,
                     valid_value_range=(-1024, 3071),
+                    early_stopping_delta=0.001,
+                    early_stopping_window=100,
                 )
 
                 # calculate TRE after registration
@@ -272,7 +274,7 @@ if __name__ == "__main__":
         nlst_dir=Path("/datalake/learn2reg/NLST"),
         database_filepath=Path("/datalake/learn2reg/param_sampling.sqlite"),
         optimizer_name="TwoPointsDE",
-        iterations_per_image=3,
+        iterations_per_image=10,
         n_worker=2,
         i_worker=I_WORKER,
         device=f"cuda:{I_WORKER}",

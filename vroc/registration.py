@@ -182,6 +182,8 @@ class VrocRegistration(LoggerMixin):
         register_affine: bool = True,
         segment_roi: bool = True,
         valid_value_range: Tuple[Number, Number] | None = None,
+        early_stopping_delta: float = 0.0,
+        early_stopping_window: int = 20,
     ):
         moving_image = ImageWrapper(moving_image)
         fixed_image = ImageWrapper(fixed_image)
@@ -325,6 +327,8 @@ class VrocRegistration(LoggerMixin):
                 parameters["sigma_z"],
             ),
             restrict_to_mask_bbox=True,
+            early_stopping_delta=early_stopping_delta,
+            early_stopping_window=early_stopping_window,
         ).to(self.device)
 
         # add batch and color dimension and move to specified device

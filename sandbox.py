@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -120,19 +121,20 @@ registration = VrocRegistration(
 )
 
 
-# FOLDER = 'NLST_Validation'
-FOLDER = "NLST"
+FOLDER = "NLST_Validation"
+# FOLDER = "NLST"
 
 tres_before = []
 tres_after = []
-for case in range(1, 2):
+t_start = time.time()
+for case in range(101, 111):
     fixed_landmarks = read_landmarks(
         f"/datalake/learn2reg/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
-        sep=",",
+        sep=" ",
     )
     moving_landmarks = read_landmarks(
         f"/datalake/learn2reg/{FOLDER}/keypointsTr/NLST_{case:04d}_0001.csv",
-        sep=",",
+        sep=" ",
     )
 
     (
@@ -165,29 +167,31 @@ for case in range(1, 2):
         fixed_mask=union_mask,
         register_affine=True,
         valid_value_range=(-1024, 3071),
+        early_stopping_delta=0.001,
+        early_stopping_window=100,
     )
 
-    fig, ax = plt.subplots(2, 3, sharex=True, sharey=True)
-    mid_slice = fixed_image.shape[1] // 2
-    clim = (-1000, 200)
-    ax[0, 0].imshow(fixed_image[:, mid_slice, :], clim=clim)
-    ax[0, 1].imshow(moving_image[:, mid_slice, :], clim=clim)
-    ax[0, 2].imshow(warped_image[:, mid_slice, :], clim=clim)
-
-    ax[1, 0].imshow(vector_field[2, :, mid_slice, :], clim=(-10, 10), cmap="seismic")
-    ax[1, 0].set_title("VF")
-
-    ax[1, 1].imshow(
-        moving_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
-        clim=(-500, 500),
-        cmap="seismic",
-    )
-    ax[1, 2].imshow(
-        warped_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
-        clim=(-500, 500),
-        cmap="seismic",
-    )
-    fig.suptitle(f"NLST_{case:04d}")
+    # fig, ax = plt.subplots(2, 3, sharex=True, sharey=True)
+    # mid_slice = fixed_image.shape[1] // 2
+    # clim = (-1000, 200)
+    # ax[0, 0].imshow(fixed_image[:, mid_slice, :], clim=clim)
+    # ax[0, 1].imshow(moving_image[:, mid_slice, :], clim=clim)
+    # ax[0, 2].imshow(warped_image[:, mid_slice, :], clim=clim)
+    #
+    # ax[1, 0].imshow(vector_field[2, :, mid_slice, :], clim=(-10, 10), cmap="seismic")
+    # ax[1, 0].set_title("VF")
+    #
+    # ax[1, 1].imshow(
+    #     moving_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
+    #     clim=(-500, 500),
+    #     cmap="seismic",
+    # )
+    # ax[1, 2].imshow(
+    #     warped_image[:, mid_slice, :] - fixed_image[:, mid_slice, :],
+    #     clim=(-500, 500),
+    #     cmap="seismic",
+    # )
+    # fig.suptitle(f"NLST_{case:04d}")
 
     # output_filepath = write_nlst_vector_field(
     #     vector_field,
@@ -229,3 +233,5 @@ for case in range(1, 2):
 
 print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")
 print(f"after: mean TRE={np.mean(tres_after)}, std TRE={np.std(tres_after)}")
+
+print(f"run took {time.time() - t_start}")
