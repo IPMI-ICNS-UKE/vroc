@@ -534,35 +534,36 @@ class NCCForces3d(BaseForces3d):
         npixel_filter = torch.prod(torch.tensor(radius))
         stride = (1, 1, 1)
 
-        ii = moving_image * moving_image
-        rr = fixed_image * fixed_image
-        ir = moving_image * fixed_image
+        mm = moving_image * moving_image
+        ff = fixed_image * fixed_image
+        mf = moving_image * fixed_image
 
-        sum_i = F.conv3d(moving_image, filter, stride=stride, padding="same")
-        sum_r = F.conv3d(fixed_image, filter, stride=stride, padding="same")
-        sum_ii = F.conv3d(ii, filter, stride=stride, padding="same")
-        sum_rr = F.conv3d(rr, filter, stride=stride, padding="same")
-        sum_ir = F.conv3d(ir, filter, stride=stride, padding="same")
+        sum_m = F.conv3d(moving_image, filter, stride=stride, padding="same")
+        sum_f = F.conv3d(fixed_image, filter, stride=stride, padding="same")
+        sum_mm = F.conv3d(mm, filter, stride=stride, padding="same")
+        sum_ff = F.conv3d(ff, filter, stride=stride, padding="same")
+        sum_mf = F.conv3d(mf, filter, stride=stride, padding="same")
 
-        image_mean = sum_i / npixel_filter
-        reference_image_mean = sum_r / npixel_filter
+        moving_mean = sum_m / npixel_filter
+        fixed_mean = sum_f / npixel_filter
 
-        var_r = (
-            sum_rr
-            - 2 * reference_image_mean * sum_r
-            + npixel_filter * reference_image_mean * reference_image_mean
+        var_m = (
+            sum_mm - 2 * moving_mean * sum_m + npixel_filter * moving_mean * moving_mean
         )
-        var_i = (
-            sum_ii - 2 * image_mean * sum_i + npixel_filter * image_mean * image_mean
+        var_f = (
+            sum_ff - 2 * fixed_mean * sum_f + npixel_filter * fixed_mean * fixed_mean
         )
+        var_mf = var_m * var_f
+        var_mf[var_mf < 1e-5] = 1.0
+
         cross = (
-            sum_ir
-            - reference_image_mean * sum_i
-            - image_mean * sum_r
-            + npixel_filter * image_mean * reference_image_mean
+            sum_mf
+            - fixed_mean * sum_m
+            - moving_mean * sum_f
+            + npixel_filter * moving_mean * fixed_mean
         )
 
-        cross_correlation = cross * cross / (var_i * var_r + epsilon)
+        cross_correlation = cross * cross / (var_mf + epsilon)
 
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
@@ -570,16 +571,15 @@ class NCCForces3d(BaseForces3d):
         if self.method == "dual":
             total_grad = total_grad * 0.5
 
-        mean_centered_image = moving_image - image_mean
-        mean_centered_reference_image = fixed_image - reference_image_mean
+        moving_mean_centered = moving_image - moving_mean
+        fixed_mean_centered = fixed_image - fixed_mean
 
-        factor = (2.0 * cross / (var_i * var_r + epsilon)) * (
-            mean_centered_image
-            - cross / (var_r * mean_centered_reference_image + epsilon)
+        factor = (2.0 * cross / (var_mf + epsilon)) * (
+            moving_mean_centered - cross / (var_f * fixed_mean_centered + epsilon)
         )
 
         metric = 1 - torch.mean(cross_correlation[fixed_mask])
-
+        print(metric)
         return (-1) * factor * total_grad
 
     def forward(
