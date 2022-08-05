@@ -15,6 +15,7 @@ from vroc.blocks import (
     DownBlock,
     EncoderBlock,
     GaussianSmoothing3d,
+    NCCForces3d,
     SpatialTransformer,
     UpBlock,
 )
@@ -307,7 +308,8 @@ class VarReg3d(nn.Module, LoggerMixin):
         scale_factors: FloatTuple | float = (1.0,),
         iterations: IntTuple | int = 100,
         tau: FloatTuple | float = 1.0,
-        demon_forces: Literal["active", "passive", "dual"] = "dual",
+        variant: Literal["demons", "ncc"] = "demons",
+        forces: Literal["active", "passive", "dual"] = "dual",
         regularization_sigma: FloatTuple3D
         | Tuple[FloatTuple3D, ...] = (
             1.0,
@@ -345,7 +347,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         self.original_image_spacing = original_image_spacing
         self.use_image_spacing = use_image_spacing
 
-        self.demon_forces = demon_forces
+        self.forces = forces
 
         self.restrict_to_mask_bbox = restrict_to_mask_bbox
         self.early_stopping_delta = VarReg3d._expand_to_level_tuple(
@@ -371,7 +373,14 @@ class VarReg3d(nn.Module, LoggerMixin):
         self._image_shape = None
         self._full_size_spatial_transformer = None
 
-        self._demon_forces_layer = DemonForces3d(method=self.demon_forces)
+        if variant == "demons":
+            self._forces_layer = DemonForces3d(method="dual")
+        elif variant == "ncc":
+            self._forces_layer = NCCForces3d(method="dual")
+        else:
+            raise NotImplementedError(
+                f"Registration variant {variant} is not implemented"
+            )
 
         for i_level, sigma in enumerate(self.regularization_sigma):
             if self.regularization_radius:
@@ -665,7 +674,7 @@ class VarReg3d(nn.Module, LoggerMixin):
                 )
                 log = {"level": i_level, "iteration": i, "metric": level_metrics[-1]}
 
-                forces = self._demon_forces_layer(
+                forces = self._forces_layer(
                     warped_moving,
                     scaled_fixed_image,
                     warped_scaled_moving_mask,
@@ -754,11 +763,12 @@ class VectorFieldBoosting(nn.Module):
         super().__init__()
 
 
-if __name__ == "__main__":
-    model = VarReg3d(
-        scale_factors=1.0,
-        iterations=200,
-        demon_forces="symmetric",
-        tau=2.0,
-        regularization_sigma=(4.0, 2.0, 2.0),
-    )
+# if __name__ == "__main__":
+#     model = VarReg3d(
+#         scale_factors=1.0,
+#         iterations=200,
+#         variant="ncc",
+#         forces="dual",
+#         tau=2.0,
+#         regularization_sigma=(4.0, 2.0, 2.0),
+#     )

@@ -319,7 +319,8 @@ class VrocRegistration(LoggerMixin):
         varreg = VarReg3d(
             iterations=parameters["iterations"],
             scale_factors=scale_factors,
-            demon_forces="dual",
+            variant="demons",
+            forces="dual",
             tau=parameters["tau"],
             regularization_sigma=(
                 parameters["sigma_x"],

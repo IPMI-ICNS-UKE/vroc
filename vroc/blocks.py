@@ -579,7 +579,6 @@ class NCCForces3d(BaseForces3d):
         )
 
         metric = 1 - torch.mean(cross_correlation[fixed_mask])
-        print(metric)
 
         return (-1) * factor * total_grad
 
