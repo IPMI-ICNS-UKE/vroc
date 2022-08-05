@@ -383,7 +383,7 @@ class SpatialTransformer(nn.Module):
         return warped
 
 
-class DemonForces3d(nn.Module):
+class BaseForces3d(nn.Module):
     def __init__(self, method: Literal["active", "passive", "dual"] = "dual"):
         super().__init__()
         self.method = method
@@ -406,6 +406,7 @@ class DemonForces3d(nn.Module):
         # shape (batch_size, 3, x_size, y_size, z_size)
         return torch.cat(grad, dim=1)
 
+    # first if we need fixed image gradient; if yes calculate or get from cache
     def _get_fixed_image_gradient(self, fixed_image: torch.Tensor) -> torch.Tensor:
         recalculate = False
         if self._fixed_image_gradient is None:
@@ -416,45 +417,39 @@ class DemonForces3d(nn.Module):
             recalculate = True
 
         if recalculate:
-            grad_fixed = DemonForces3d._calc_image_gradient_3d(fixed_image)
+            grad_fixed = BaseForces3d._calc_image_gradient_3d(fixed_image)
             self._fixed_image_gradient = grad_fixed
 
         return self._fixed_image_gradient
 
-    def _calculate_demon_forces_3d(
+    def _compute_total_grad(
         self,
         moving_image: torch.Tensor,
         fixed_image: torch.Tensor,
-        moving_mask: torch.Tensor | None = None,
-        fixed_mask: torch.Tensor | None = None,
-        method: Literal["active", "passive", "dual"] = "dual",
-        fixed_image_gradient: torch.Tensor | None = None,
-        original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
     ):
-        # grad tensors have the shape of (batch_size, 3, x_size, y_size, z_size)
-
-        # first if we need fixed image gradient; if yes calculate or get from cache
-        if method in ("passive", "dual"):
+        if self.method in ("passive", "dual"):
             grad_fixed = self._get_fixed_image_gradient(fixed_image)
         else:
             grad_fixed = None
 
-        if method == "active":
-            grad_moving = DemonForces3d._calc_image_gradient_3d(moving_image)
+        if self.method == "active":
+            grad_moving = self._calc_image_gradient_3d(moving_image)
             # gradient is defined in moving image domain -> use moving mask if given
             if moving_mask is not None:
                 grad_moving = grad_moving * moving_mask
             total_grad = grad_moving
 
-        elif method == "passive":
+        elif self.method == "passive":
             # gradient is defined in fixed image domain -> use fixed mask if given
             if fixed_mask is not None:
                 grad_fixed = grad_fixed * fixed_mask
             total_grad = grad_fixed
 
-        elif method == "dual":
+        elif self.method == "dual":
             # we need both gradient of moving and fixed image
-            grad_moving = DemonForces3d._calc_image_gradient_3d(moving_image)
+            grad_moving = self._calc_image_gradient_3d(moving_image)
 
             # mask both gradients as above; also check that we have both masks
             masks_available = (m is not None for m in (moving_mask, fixed_mask))
@@ -469,8 +464,27 @@ class DemonForces3d(nn.Module):
             total_grad = grad_moving + grad_fixed
 
         else:
-            raise NotImplementedError(f"Demon forces {method} are not implemented")
+            raise NotImplementedError(f"Demon forces {self.method} are not implemented")
 
+        return total_grad
+
+
+class DemonForces3d(BaseForces3d):
+    def _calculate_demon_forces_3d(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor | None = None,
+        fixed_mask: torch.Tensor | None = None,
+        method: Literal["active", "passive", "dual"] = "dual",
+        fixed_image_gradient: torch.Tensor | None = None,
+        original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+    ):
+        # grad tensors have the shape of (batch_size, 3, x_size, y_size, z_size)
+
+        total_grad = self._compute_total_grad(
+            moving_image, fixed_image, moving_mask, fixed_mask
+        )
         gamma = 1 / (
             (sum(i**2 for i in original_image_spacing)) / len(original_image_spacing)
         )
@@ -501,15 +515,16 @@ class DemonForces3d(nn.Module):
         )
 
 
-class NCCForces3d(nn.Module):
-    @staticmethod
+class NCCForces3d(BaseForces3d):
     def _calculate_ncc_forces_3d(
-        image: torch.tensor,
-        mask: torch.tensor,
-        reference_image: torch.tensor,
-        reference_mask: torch.tensor,
-        gradient_type: str,
-        original_image_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor | None = None,
+        fixed_mask: torch.Tensor | None = None,
+        method: Literal["active", "passive", "dual"] = "dual",
+        fixed_image_gradient: torch.Tensor | None = None,
+        original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         epsilon: float = 1e-6,
         radius: Tuple[int, ...] = (3, 3, 3),
     ):
@@ -519,12 +534,12 @@ class NCCForces3d(nn.Module):
         npixel_filter = torch.prod(torch.tensor(radius))
         stride = (1, 1, 1)
 
-        ii = image * image
-        rr = reference_image * reference_image
-        ir = image * reference_image
+        ii = moving_image * moving_image
+        rr = fixed_image * fixed_image
+        ir = moving_image * fixed_image
 
-        sum_i = F.conv3d(image, filter, stride=stride, padding="same")
-        sum_r = F.conv3d(reference_image, filter, stride=stride, padding="same")
+        sum_i = F.conv3d(moving_image, filter, stride=stride, padding="same")
+        sum_r = F.conv3d(fixed_image, filter, stride=stride, padding="same")
         sum_ii = F.conv3d(ii, filter, stride=stride, padding="same")
         sum_rr = F.conv3d(rr, filter, stride=stride, padding="same")
         sum_ir = F.conv3d(ir, filter, stride=stride, padding="same")
@@ -549,45 +564,37 @@ class NCCForces3d(nn.Module):
 
         cross_correlation = cross * cross / (var_i * var_r + epsilon)
 
-        if gradient_type == "active":
-            x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
-        elif gradient_type == "passive":
-            x_grad, y_grad, z_grad = torch.gradient(reference_image, dim=(2, 3, 4))
-        elif gradient_type == "symmetric":
-            x_grad, y_grad, z_grad = 0.5 * (
-                torch.stack(torch.gradient(image, dim=(2, 3, 4)))
-                + torch.stack(torch.gradient(reference_image, dim=(2, 3, 4)))
-            )
-        else:
-            raise Exception("Unknown gradient type")
+        total_grad = self._compute_total_grad(
+            moving_image, fixed_image, moving_mask, fixed_mask
+        )
 
-        mean_centered_image = image - image_mean
-        mean_centered_reference_image = reference_image - reference_image_mean
+        mean_centered_image = moving_image - image_mean
+        mean_centered_reference_image = fixed_image - reference_image_mean
 
         factor = (2.0 * cross / (var_i * var_r + epsilon)) * (
             mean_centered_image
             - cross / (var_r * mean_centered_reference_image + epsilon)
         )
 
-        metric = 1 - torch.mean(cross_correlation)
+        metric = 1 - torch.mean(cross_correlation[fixed_mask])
+        print(metric)
 
-        return (-1) * factor * torch.cat((x_grad, y_grad, z_grad), dim=1)
+        return (-1) * factor * total_grad
 
     def forward(
         self,
-        image: torch.tensor,
-        mask: torch.tensor,
-        reference_image: torch.tensor,
-        reference_mask: torch.tensor,
-        gradient_type: str,
-        original_image_spacing: Tuple[float, ...],
+        moving_image: torch.Tensor,
+        fixed_image: torch.tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        original_image_spacing: FloatTuple3D,
     ):
-        return NCCForces3d._calculate_ncc_forces_3d(
-            image=image,
-            mask=mask,
-            reference_image=reference_image,
-            reference_mask=reference_mask,
-            gradient_type=gradient_type,
+        return self._calculate_ncc_forces_3d(
+            moving_image=moving_image,
+            fixed_image=fixed_image,
+            moving_mask=moving_mask,
+            fixed_mask=fixed_mask,
+            method=self.method,
             original_image_spacing=original_image_spacing,
         )
 
