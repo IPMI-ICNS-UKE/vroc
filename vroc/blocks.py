@@ -417,7 +417,7 @@ class BaseForces3d(nn.Module):
             recalculate = True
 
         if recalculate:
-            grad_fixed = BaseForces3d._calc_image_gradient_3d(fixed_image)
+            grad_fixed = self._calc_image_gradient_3d(fixed_image)
             self._fixed_image_gradient = grad_fixed
 
         return self._fixed_image_gradient
@@ -567,6 +567,8 @@ class NCCForces3d(BaseForces3d):
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
         )
+        if self.method == "dual":
+            total_grad = total_grad * 0.5
 
         mean_centered_image = moving_image - image_mean
         mean_centered_reference_image = fixed_image - reference_image_mean
