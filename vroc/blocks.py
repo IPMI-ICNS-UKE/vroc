@@ -4,6 +4,7 @@ import math
 from abc import ABC
 from typing import Literal, Optional, Tuple, Type, Union
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -562,8 +563,10 @@ class NCCForces3d(BaseForces3d):
             + npixel_filter * moving_mean * fixed_mean
         )
 
-        cross_correlation = cross * cross / (var_mf + 1e-5)
-        cross_correlation[var_mf < epsilon] = 1.0
+        cross_correlation = torch.ones_like(cross)
+        cross_correlation[var_mf > epsilon] = (
+            cross[var_mf > epsilon] * cross[var_mf > epsilon] / var_mf[var_mf > epsilon]
+        )
 
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
@@ -574,14 +577,15 @@ class NCCForces3d(BaseForces3d):
         moving_mean_centered = moving_image - moving_mean
         fixed_mean_centered = fixed_image - fixed_mean
 
-        factor = (2.0 * cross / (var_mf + epsilon)) * (
-            moving_mean_centered - cross / (var_f * fixed_mean_centered + epsilon)
+        mask = (var_mf > epsilon) & (var_f > epsilon) & (fixed_mean_centered != 0.0)
+
+        factor = torch.zeros_like(cross)
+        factor[mask] = (2.0 * cross[mask] / var_mf[mask]) * (
+            moving_mean_centered[mask]
+            - cross[mask] / (var_f[mask] * fixed_mean_centered[mask])
         )
         metric = 1 - torch.mean(cross_correlation[fixed_mask])
-
-        field = factor * total_grad
-        field[torch.repeat_interleave(var_mf, 3, dim=1) < epsilon] = 0.0
-        return (-1) * field
+        return (-1) * factor * total_grad
 
     def forward(
         self,
