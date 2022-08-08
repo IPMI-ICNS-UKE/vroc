@@ -3,11 +3,13 @@ from __future__ import annotations
 import time
 from typing import Any, List, Literal, Optional, Tuple, Union
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from vroc.animation import Camera
 from vroc.blocks import (
     ConvBlock,
     DecoderBlock,
@@ -23,6 +25,7 @@ from vroc.checks import are_of_same_length, is_tuple, is_tuple_of_tuples
 from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
 from vroc.decorators import timing
 from vroc.helper import get_bounding_box
+from vroc.interpolation import resize
 from vroc.logger import LoggerMixin
 
 
@@ -322,6 +325,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         restrict_to_mask_bbox: bool = False,
         early_stopping_delta: float = 0.0,
         early_stopping_window: int = 20,
+        debug: bool = False,
     ):
         super().__init__()
 
@@ -356,6 +360,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         self.early_stopping_window = VarReg3d._expand_to_level_tuple(
             early_stopping_window, n_levels=self.n_levels
         )
+        self.debug = debug
 
         # check if params are passed with/converted to consistent length
         # (== self.n_levels)
@@ -555,9 +560,10 @@ class VarReg3d(nn.Module, LoggerMixin):
     ):
         if moving_image.ndim != fixed_image.ndim:
             raise RuntimeError("Dimension mismatch betwen moving and fixed image")
-        # define dimensionalities
+        # define dimensionalities and shapes
         n_image_dimensions = moving_image.ndim
         n_vector_field_components = n_image_dimensions - 2  # -1 batch dim, -1 color dim
+        full_uncropped_shape = tuple(fixed_image.shape)
 
         if self.restrict_to_mask_bbox and (
             moving_mask is not None or fixed_mask is not None
@@ -594,6 +600,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         )
 
         full_size_moving = moving_image
+        full_cropped_shape = tuple(fixed_image.shape)
 
         # for tracking level-wise metrics (used for early stopping, if enabled)
         metrics = []
@@ -602,6 +609,12 @@ class VarReg3d(nn.Module, LoggerMixin):
         metric_before = self._calculate_metric(
             moving_image=moving_image, fixed_image=fixed_image, fixed_mask=fixed_mask
         )
+
+        if self.debug:
+            # disable interactive plotting
+            plt.ioff()
+            fig, ax = plt.subplots(3, 3, sharex=True, sharey=True, squeeze=False)
+            camera = Camera(fig)
 
         for i_level, (scale_factor, iterations) in enumerate(
             zip(self.scale_factors, self.iterations)
@@ -696,6 +709,116 @@ class VarReg3d(nn.Module, LoggerMixin):
                 log["step_runtime"] = t_step_end - t_step_start
                 self.logger.debug(log)
 
+                # here we do the debug stuff
+                if self.debug:
+                    image_clim = (-800, 200)
+                    image_cmap = "gray"
+                    forces_clim = (-1, 1)
+                    forces_cmap = "seismic"
+                    vector_field_clim = (-20, 20)
+                    vector_field_cmap = "seismic"
+
+                    mid_slice = scaled_fixed_image.shape[-2] // 2
+                    _moving_image = (
+                        scaled_moving_image[0, 0, :, mid_slice, :]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+                    _fixed_image = (
+                        scaled_fixed_image[0, 0, :, mid_slice, :].detach().cpu().numpy()
+                    )
+                    _warped_image = (
+                        warped_moving[0, 0, :, mid_slice, :].detach().cpu().numpy()
+                    )
+                    _forces = forces[0, ..., mid_slice, :].detach().cpu().numpy()
+                    _vector_field = (
+                        vector_field[0, ..., mid_slice, :].detach().cpu().numpy()
+                    )
+
+                    _moving_image = resize(
+                        image=_moving_image,
+                        output_shape=full_cropped_shape[2::2],
+                        order=0,
+                    )
+
+                    _fixed_image = resize(
+                        image=_fixed_image,
+                        output_shape=full_cropped_shape[2::2],
+                        order=0,
+                    )
+
+                    _warped_image = resize(
+                        image=_warped_image,
+                        output_shape=full_cropped_shape[2::2],
+                        order=0,
+                    )
+
+                    _forces = resize(
+                        image=_forces * self.tau[i_level],
+                        output_shape=(3,) + full_cropped_shape[2::2],
+                        order=0,
+                    )
+
+                    _vector_field = (
+                        resize(
+                            image=_vector_field,
+                            output_shape=(3,) + full_cropped_shape[2::2],
+                            order=0,
+                        )
+                        / scale_factor
+                    )
+
+                    if forces.max() > 1000:
+                        forces = self._forces_layer(
+                            warped_moving,
+                            scaled_fixed_image,
+                            warped_scaled_moving_mask,
+                            scaled_fixed_mask,
+                            original_image_spacing,
+                        )
+
+                    # images
+                    ax[0, 0].imshow(_moving_image, cmap=image_cmap, clim=image_clim)
+                    ax[0, 0].set_title("moving image")
+                    ax[0, 1].imshow(_fixed_image, cmap=image_cmap, clim=image_clim)
+                    ax[0, 1].set_title("fixed image")
+                    ax[0, 2].imshow(_warped_image, cmap=image_cmap, clim=image_clim)
+                    ax[0, 2].set_title("warped image")
+
+                    # forces
+                    ax[1, 0].imshow(_forces[0], cmap=forces_cmap, clim=forces_clim)
+                    ax[1, 0].set_title("forces (x)")
+                    ax[1, 1].imshow(_forces[1], cmap=forces_cmap, clim=forces_clim)
+                    ax[1, 1].set_title("forces (y)")
+                    ax[1, 2].imshow(_forces[2], cmap=forces_cmap, clim=forces_clim)
+                    ax[1, 2].set_title("forces(z)")
+
+                    # vector field
+                    ax[2, 0].imshow(
+                        _vector_field[0], cmap=vector_field_cmap, clim=vector_field_clim
+                    )
+                    ax[2, 0].set_title("vector field (x)")
+                    ax[2, 1].imshow(
+                        _vector_field[1], cmap=vector_field_cmap, clim=vector_field_clim
+                    )
+                    ax[2, 1].set_title("vector field (y)")
+                    ax[2, 2].imshow(
+                        _vector_field[2], cmap=vector_field_cmap, clim=vector_field_clim
+                    )
+                    ax[2, 2].set_title("vector field (z)")
+
+                    ax[0, 1].text(
+                        0.5,
+                        1.3,
+                        f"level={i_level}, iteration={i}",
+                        size=plt.rcParams["axes.titlesize"],
+                        ha="center",
+                        transform=ax[0, 1].transAxes,
+                    )
+
+                    camera.snap()
+
             metrics.append(level_metrics)
 
         vector_field = self._match_vector_field(vector_field, full_size_moving)
@@ -732,13 +855,17 @@ class VarReg3d(nn.Module, LoggerMixin):
             fixed_mask=fixed_mask,
         )
 
-        misc = {
-            "metric_before": metric_before,
-            "metric_after": metric_after,
-            "level_metrics": metrics,
-        }
+        if self.debug:
+            debug_info = {
+                "metric_before": metric_before,
+                "metric_after": metric_after,
+                "level_metrics": metrics,
+                "animation": camera.animate(),
+            }
 
-        return warped_moving_image, composed_vector_field, misc
+            return warped_moving_image, composed_vector_field, debug_info
+        else:
+            return warped_moving_image, composed_vector_field
 
     @timing()
     def forward(

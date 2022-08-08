@@ -7,6 +7,7 @@ import nibabel as nib
 import numpy as np
 import SimpleITK as sitk
 import torch
+from matplotlib.animation import FFMpegWriter
 from scipy.ndimage.morphology import binary_dilation
 
 from vroc.common_types import PathLike
@@ -111,11 +112,20 @@ def load(
 # )
 # parameter_guesser.fit()
 
+params = {
+    "iterations": 1000,
+    "tau": 20.0,
+    "sigma_x": 1.25,
+    "sigma_y": 1.25,
+    "sigma_z": 1.25,
+    "n_levels": 3,
+}
+
 registration = VrocRegistration(
     roi_segmenter=None,
     feature_extractor=None,
     parameter_guesser=None,
-    default_parameters=VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS,
+    default_parameters=params,
     debug=True,
     device="cuda:0",
 )
@@ -127,7 +137,7 @@ FOLDER = "NLST_Validation"
 tres_before = []
 tres_after = []
 t_start = time.time()
-for case in range(101, 111):
+for case in range(101, 102):
     fixed_landmarks = read_landmarks(
         f"/datalake/learn2reg/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
         sep=" ",
@@ -160,7 +170,7 @@ for case in range(101, 111):
 
     union_mask = moving_mask | fixed_mask
 
-    warped_image, vector_field = registration.register(
+    warped_image, vector_field, debug_info = registration.register(
         moving_image=moving_image,
         fixed_image=fixed_image,
         moving_mask=union_mask,
@@ -170,6 +180,10 @@ for case in range(101, 111):
         early_stopping_delta=0.001,
         early_stopping_window=100,
     )
+
+    animation = debug_info["animation"]
+    writer = FFMpegWriter(fps=1)
+    animation.save("registration.mp4", writer=writer)
 
     # fig, ax = plt.subplots(2, 3, sharex=True, sharey=True)
     # mid_slice = fixed_image.shape[1] // 2
