@@ -525,7 +525,7 @@ class NCCForces3d(BaseForces3d):
         method: Literal["active", "passive", "dual"] = "dual",
         fixed_image_gradient: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
-        epsilon: float = 1e-6,
+        epsilon: float = 1e-5,
         radius: Tuple[int, ...] = (3, 3, 3),
     ):
         # normalizer = sum(i * i for i in original_image_spacing) / len(original_image_spacing)
@@ -554,7 +554,6 @@ class NCCForces3d(BaseForces3d):
             sum_ff - 2 * fixed_mean * sum_f + npixel_filter * fixed_mean * fixed_mean
         )
         var_mf = var_m * var_f
-        var_mf[var_mf < 1e-5] = 1.0
 
         cross = (
             sum_mf
@@ -563,7 +562,8 @@ class NCCForces3d(BaseForces3d):
             + npixel_filter * moving_mean * fixed_mean
         )
 
-        cross_correlation = cross * cross / (var_mf + epsilon)
+        cross_correlation = cross * cross / (var_mf + 1e-5)
+        cross_correlation[var_mf < epsilon] = 1.0
 
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
@@ -577,10 +577,11 @@ class NCCForces3d(BaseForces3d):
         factor = (2.0 * cross / (var_mf + epsilon)) * (
             moving_mean_centered - cross / (var_f * fixed_mean_centered + epsilon)
         )
-
         metric = 1 - torch.mean(cross_correlation[fixed_mask])
-        print(metric)
-        return (-1) * factor * total_grad
+
+        field = factor * total_grad
+        field[torch.repeat_interleave(var_mf, 3, dim=1) < epsilon] = 0.0
+        return (-1) * field
 
     def forward(
         self,
