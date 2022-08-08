@@ -319,7 +319,7 @@ class VrocRegistration(LoggerMixin):
         varreg = VarReg3d(
             iterations=parameters["iterations"],
             scale_factors=scale_factors,
-            variant="demons",
+            variant="ncc",
             forces="dual",
             tau=parameters["tau"],
             regularization_sigma=(
@@ -330,6 +330,7 @@ class VrocRegistration(LoggerMixin):
             restrict_to_mask_bbox=True,
             early_stopping_delta=early_stopping_delta,
             early_stopping_window=early_stopping_window,
+            debug=self.debug,
         ).to(self.device)
 
         # add batch and color dimension and move to specified device
@@ -352,7 +353,7 @@ class VrocRegistration(LoggerMixin):
             affine_transform_vector_field = None
 
         with torch.inference_mode():
-            warped_image, vector_field, misc = varreg.run_registration(
+            registration_result = varreg.run_registration(
                 moving_image=moving_image,
                 fixed_image=fixed_image,
                 moving_mask=moving_mask,
@@ -360,9 +361,16 @@ class VrocRegistration(LoggerMixin):
                 original_image_spacing=image_spacing,
                 initial_vector_field=affine_transform_vector_field,
             )
+            if self.debug:
+                warped_image, vector_field, debug_info = registration_result
+            else:
+                warped_image, vector_field = registration_result
 
         # squeeze batch (and channel) dimension(s)
         warped_image = warped_image.cpu().numpy().squeeze(axis=(0, 1))
         vector_field = vector_field.cpu().numpy().squeeze(axis=0)
 
-        return warped_image, vector_field
+        if self.debug:
+            return warped_image, vector_field, debug_info
+        else:
+            return warped_image, vector_field
