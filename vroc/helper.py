@@ -153,13 +153,6 @@ def compute_tre_sitk(
     return np.linalg.norm((fix_lms_warped - mov_lms) * spacing_mov, axis=1)
 
 
-def landmark_distance(point_list, reference_point_list):
-    return [
-        np.linalg.norm(np.array(p) - np.array(p_ref))
-        for p, p_ref in zip(point_list, reference_point_list)
-    ]
-
-
 def rescale_range(
     values: np.ndarray, input_range: Tuple, output_range: Tuple, clip: bool = True
 ):

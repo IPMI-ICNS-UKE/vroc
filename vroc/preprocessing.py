@@ -160,7 +160,7 @@ def affine_registration(
     registration_method.SetOptimizerScalesFromPhysicalShift()
     # registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4])
     # registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2])
-    registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+    # registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
     registration_method.SetInterpolator(sitk.sitkLinear)
 
     if moving_mask is not None:
@@ -172,7 +172,8 @@ def affine_registration(
 
     registration_method.SetMovingInitialTransform(initial_transform)
     registration_method.SetInitialTransform(
-        sitk.AffineTransform(fixed_image.GetDimension())
+        # sitk.AffineTransform(fixed_image.GetDimension())
+        sitk.ComposeScaleSkewVersor3DTransform()
     )
     optimized_transform = sitk.CompositeTransform(
         [registration_method.Execute(fixed_image, moving_image), initial_transform]
