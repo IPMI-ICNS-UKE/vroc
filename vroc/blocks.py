@@ -4,6 +4,7 @@ import math
 from abc import ABC
 from typing import Literal, Optional, Tuple, Type, Union
 
+import matplotlib
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -621,7 +622,7 @@ class NGFForces3d(BaseForces3d):
         moving_mask: torch.Tensor | None = None,
         fixed_mask: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
-        epsilon: float = 1e-5,
+        epsilon: float = None,
     ):
         # # reshape
         # b, c = moving_image.shape[:2]
@@ -677,26 +678,19 @@ class NGFForces3d(BaseForces3d):
         )
 
         # nominator
-        product = 0.5 * (
-            moving_grad_u * fixed_grad_u
-            + moving_grad_v * fixed_grad_v
-            + moving_grad_w * fixed_grad_w
-        )
+        moving_grad = torch.concat([moving_grad_u, moving_grad_v, moving_grad_w], dim=1)
+        fixed_grad = torch.concat([fixed_grad_u, fixed_grad_v, fixed_grad_w], dim=1)
+        grad_product = moving_grad * fixed_grad
 
         # denominator
-        denom = moving_grad_norm * fixed_grad_norm
+        norm_product = moving_grad_norm * fixed_grad_norm
 
         # integrator
-        # ngf = -0.5 * (product ** 2 / denom)
-        ngf = 1.0 - (product / denom) ** 2
-        # ngf = product**2 / denom
-
-        # reshape back
-        # ngf = ngf.view(b, c, *spatial_shape)
+        ngf = (grad_product**2 / norm_product) * fixed_mask
 
         metric = torch.mean(ngf)
 
-        return (-1) * ngf * fixed_mask
+        return (-1) * ngf
 
     def forward(
         self,
