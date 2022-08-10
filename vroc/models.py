@@ -18,6 +18,7 @@ from vroc.blocks import (
     EncoderBlock,
     GaussianSmoothing3d,
     NCCForces3d,
+    NGFForces3d,
     SpatialTransformer,
     UpBlock,
 )
@@ -311,7 +312,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         scale_factors: FloatTuple | float = (1.0,),
         iterations: IntTuple | int = 100,
         tau: FloatTuple | float = 1.0,
-        variant: Literal["demons", "ncc"] = "demons",
+        variant: Literal["demons", "ncc", "ngf"] = "demons",
         forces: Literal["active", "passive", "dual"] = "dual",
         regularization_sigma: FloatTuple3D
         | Tuple[FloatTuple3D, ...] = (
@@ -379,9 +380,11 @@ class VarReg3d(nn.Module, LoggerMixin):
         self._full_size_spatial_transformer = None
 
         if variant == "demons":
-            self._forces_layer = DemonForces3d(method="dual")
+            self._forces_layer = DemonForces3d(method=self.forces)
         elif variant == "ncc":
-            self._forces_layer = NCCForces3d(method="dual")
+            self._forces_layer = NCCForces3d(method=self.forces)
+        elif variant == "ngf":
+            self._forces_layer = NGFForces3d()
         else:
             raise NotImplementedError(
                 f"Registration variant {variant} is not implemented"
