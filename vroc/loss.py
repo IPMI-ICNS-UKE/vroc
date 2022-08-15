@@ -4,14 +4,15 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from vroc.common_types import FloatTuple3D
+from vroc.blocks import SpatialTransformer
+from vroc.common_types import FloatTuple3D, IntTuple3D
 
 
 class TRELoss(nn.Module):
     def __init__(
         self,
-        image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         apply_sqrt: bool = False,
         reduction: Literal["mean", "sum", "none"] | None = "mean",
     ):
@@ -19,13 +20,13 @@ class TRELoss(nn.Module):
         self.apply_sqrt = apply_sqrt
         # convert PyTorch's unpythonic string "none"
         self.reduction = reduction if reduction != "none" else None
-        self.register_buffer("image_spacing", torch.as_tensor(image_spacing))
 
     def forward(
         self,
         vector_field: torch.Tensor,
         moving_landmarks: torch.Tensor,
         fixed_landmarks: torch.Tensor,
+        image_spacing: torch.Tensor,
     ):
         # vector_field: shape of (1, 3, x_dim, y_dim, z_dim), values are in voxel
         # displacement (i.e. not torch grid_sample convention [-1, 1])
@@ -52,7 +53,7 @@ class TRELoss(nn.Module):
         # distances will be float32 as displacements is float32
         distances = (fixed_landmarks + displacements) - moving_landmarks
         # scale x, x, z distance component with image spacing
-        distances = distances * self.image_spacing
+        distances = distances * image_spacing
         distances = distances.pow(2).sum(dim=-1)
 
         if self.apply_sqrt:
@@ -69,3 +70,20 @@ class TRELoss(nn.Module):
             raise RuntimeError(f"Unsupported reduction {self._reduction}")
 
         return distances
+
+
+class WarpedMSELoss(nn.Module):
+    def __init__(self, shape: IntTuple3D):
+        super().__init__()
+        self.spatial_transformer = SpatialTransformer(shape=shape)
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        vector_field: torch.Tensor,
+        fixed_image: torch.Tensor,
+        fixed_image_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        warped_image = self.spatial_transformer(moving_image, vector_field)
+
+        return F.mse_loss(warped_image[fixed_image_mask], fixed_image[fixed_image_mask])

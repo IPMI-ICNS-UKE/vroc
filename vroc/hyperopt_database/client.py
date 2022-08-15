@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import List, Optional, Union
+import pickle
+from typing import Dict, List, Optional, Tuple, Union
 from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
-from peewee import prefetch
+from peewee import JOIN, prefetch
 
 import vroc.database.models as orm
 from vroc.common_types import PathLike
@@ -113,65 +114,49 @@ class DatabaseClient(LoggerMixin):
 
         return runs
 
-    # TODO: outdated models, fix this
-    # def fetch_best_run(
-    #     self,
-    #     image_id: str,
-    #     k_best: int = 1,
-    #     reduce: bool = True,
-    #     as_dataframe: bool = False,
-    # ) -> Union[dict, List[dict], pd.DataFrame]:
-    #     query = (
-    #         orm.Run.select()
-    #         .where(orm.Run.image == image_id)
-    #         .order_by(orm.Run.metric_after.asc())
-    #         .limit(k_best)
-    #         .dicts()
-    #         .first(n=k_best)
-    #     )
-    #     if k_best > 1 and reduce:
-    #         query = {
-    #             "uuid": uuid4(),
-    #             "image": query[0]["image"],
-    #             "parameters": self._reduce_parameters([q["parameters"] for q in query]),
-    #             "metric_before": float(np.mean([q["metric_before"] for q in query])),
-    #             "metric_after": float(np.mean([q["metric_after"] for q in query])),
-    #             "level_metrics": None,
-    #             "created": None,
-    #         }
-    #
-    #     if as_dataframe:
-    #         query = DatabaseClient._to_dataframe(query)
-    #
-    #     return query
+    def fetch_image_pairs(self) -> List[Dict[str, orm.Image]]:
+        image_pairs = orm.Run.select(
+            orm.Run.moving_image, orm.Run.fixed_image
+        ).distinct()
 
-    def _reduce_parameters(self, parameters: List[dict]):
-        reduced = {}
-        for params in parameters:
-            for param_name, param_value in params.items():
-                try:
-                    reduced[param_name].append(param_value)
-                except KeyError:
-                    reduced[param_name] = [param_value]
+        return [
+            {
+                "moving_image": image_pair.moving_image,
+                "fixed_image": image_pair.fixed_image,
+            }
+            for image_pair in image_pairs
+        ]
 
-        # reduce
-        for param_name, param_values in reduced.items():
-            reduced[param_name] = np.mean(param_values)
+    def insert_image_pair_feature(
+        self,
+        moving_image: orm.Image,
+        fixed_image: orm.Image,
+        feature_name: str,
+        feature: np.ndarray,
+    ):
+        orm.ImagePairFeature.create(
+            moving_image=moving_image,
+            fixed_image=fixed_image,
+            feature_name=feature_name,
+            feature=pickle.dumps(feature),
+        )
 
-        return reduced
+    def fetch_image_pair_feature(
+        self, moving_image: orm.Image, fixed_image: orm.Image, feature_name: str
+    ):
+        image_pair_feature = (
+            orm.ImagePairFeature.select()
+            .where(
+                (orm.ImagePairFeature.moving_image == moving_image)
+                & (orm.ImagePairFeature.fixed_image == fixed_image)
+                & (orm.ImagePairFeature.feature_name == feature_name)
+            )
+            .first()
+        )
 
-    def fetch_best_runs(
-        self, k_best: int = 1, as_dataframe: bool = False
-    ) -> Union[List[dict], pd.DataFrame]:
-        best_runs = []
+        feature = pickle.loads(image_pair_feature.feature)
 
-        for image in orm.Image.select():
-            best_runs.append(self.fetch_best_run(image, k_best=k_best))
-
-        if as_dataframe:
-            best_runs = DatabaseClient._to_dataframe(best_runs)
-
-        return best_runs
+        return feature
 
     @staticmethod
     def _expand_dict(run: dict, key: str, prefix: str = ""):
@@ -209,7 +194,7 @@ class DatabaseClient(LoggerMixin):
 
 if __name__ == "__main__":
 
-    client = DatabaseClient("/datalake/learn2reg/param_sampling.sqlite")
+    client = DatabaseClient("/datalake/learn2reg/param_sampling_copy.sqlite")
 
     tre_mean = client.fetch_metric(name="TRE_MEAN")
     moving_image = client.fetch_image(
@@ -226,3 +211,13 @@ if __name__ == "__main__":
     )
 
     runs = client.fetch_runs(moving_image, fixed_image, as_dataframe=True)
+    image_pairs = client.fetch_image_pairs()
+
+    for image_pair in image_pairs:
+        runs = client.fetch_runs(
+            moving_image=image_pair["moving_image"],
+            fixed_image=image_pair["fixed_image"],
+            as_dataframe=True,
+        )
+        runs = runs.sort_values(by="tre_mean_after")
+        break

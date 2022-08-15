@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import pickle
 import random
 from functools import cache, partial
 from glob import glob
@@ -28,6 +29,7 @@ from vroc.helper import (
 )
 from vroc.preprocessing import (
     crop_background,
+    crop_or_pad,
     resample_image_size,
     resample_image_spacing,
 )
@@ -160,54 +162,6 @@ class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
 
         return image, mask, spacing
 
-    @staticmethod
-    def crop_or_pad(
-        image: np.ndarray,
-        mask: np.ndarray | None,
-        target_shape: IntTuple3D,
-        image_pad_value=-1000,
-        mask_pad_value=0,
-        no_crop: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        for i_axis in range(image.ndim):
-            if target_shape[i_axis] is not None:
-                if image.shape[i_axis] < target_shape[i_axis]:
-                    # pad
-                    padding = target_shape[i_axis] - image.shape[i_axis]
-                    padding_left = padding // 2
-                    padding_right = padding - padding_left
-
-                    pad_width = [(0, 0)] * image.ndim
-                    pad_width[i_axis] = (padding_left, padding_right)
-                    image = np.pad(
-                        image,
-                        pad_width,
-                        mode="constant",
-                        constant_values=image_pad_value,
-                    )
-                    if mask is not None:
-                        mask = np.pad(
-                            mask,
-                            pad_width,
-                            mode="constant",
-                            constant_values=mask_pad_value,
-                        )
-
-                elif not no_crop and image.shape[i_axis] > target_shape[i_axis]:
-                    # crop
-                    cropping = image.shape[i_axis] - target_shape[i_axis]
-                    cropping_left = cropping // 2
-                    cropping_right = cropping - cropping_left
-
-                    cropping_slicing = [
-                        slice(None, None),
-                    ] * image.ndim
-                    cropping_slicing[i_axis] = slice(cropping_left, -cropping_right)
-                    image = image[tuple(cropping_slicing)]
-                    mask = mask[tuple(cropping_slicing)]
-
-        return image, mask
-
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info:
@@ -284,7 +238,7 @@ class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
 
             # pad if (rotated) image shape < patch shape
             # also performs center cropping if specified
-            image_arr, mask_arr = LungCTSegmentationDataset.crop_or_pad(
+            image_arr, mask_arr = crop_or_pad(
                 image=image_arr,
                 mask=mask_arr,
                 target_shape=self.patch_shape,
@@ -347,12 +301,14 @@ class NLSTDataset(DatasetMixin, Dataset):
         image_folder: str = "imagesTr",
         mask_folder: str = "masksTr",
         keypoints_folder: str = "keypointsTr",
+        vector_fields_folder: str = "detailed_boosting_data",
     ):
         root_dir: Path
 
         image_path = root_dir / image_folder
         mask_path = root_dir / mask_folder
         keypoints_path = root_dir / keypoints_folder
+        vector_fields_path = root_dir / vector_fields_folder
 
         fixed_images = sorted(image_path.glob("*0000.nii.gz"))
         moving_images = sorted(image_path.glob("*0001.nii.gz"))
@@ -360,6 +316,7 @@ class NLSTDataset(DatasetMixin, Dataset):
         moving_masks = sorted(mask_path.glob("*0001.nii.gz"))
         fixed_keypoints = sorted(keypoints_path.glob("*0000.csv"))
         moving_keypoints = sorted(keypoints_path.glob("*0001.csv"))
+        precomputed_vector_fields = sorted(vector_fields_path.glob("*pkl"))
 
         filepath_lists = (
             fixed_images,
@@ -374,6 +331,11 @@ class NLSTDataset(DatasetMixin, Dataset):
             raise RuntimeError("File mismatch")
         length = lengths.pop()
 
+        def get_matching_vector_fields(image_filepath: Path) -> List[Path]:
+            # this is NLST_0001, etc.
+            name = image_filepath.name[:9]
+            return [p for p in precomputed_vector_fields if p.name.startswith(name)]
+
         return [
             {
                 "fixed_image": fixed_images[i],
@@ -382,6 +344,9 @@ class NLSTDataset(DatasetMixin, Dataset):
                 "moving_mask": moving_masks[i],
                 "fixed_keypoints": fixed_keypoints[i],
                 "moving_keypoints": moving_keypoints[i],
+                "precomputed_vector_fields": get_matching_vector_fields(
+                    fixed_images[i]
+                ),
             }
             for i in range(length)
         ]
@@ -441,22 +406,27 @@ class NLSTDataset(DatasetMixin, Dataset):
             fixed_mask = np.asarray(fixed_mask[np.newaxis], dtype=np.float32)
             moving_mask = np.asarray(moving_mask[np.newaxis], dtype=np.float32)
 
-        return {
-            "moving_image_name": str(
-                self.filepaths[item]["moving_image"].relative_to(self.root_dir)
-            ),
-            "fixed_image_name": str(
-                self.filepaths[item]["fixed_image"].relative_to(self.root_dir)
-            ),
-            "moving_image": moving_image,
-            "fixed_image": fixed_image,
-            "moving_mask": moving_mask,
-            "fixed_mask": fixed_mask,
-            "moving_keypoints": moving_keypoints,
-            "fixed_keypoints": fixed_keypoints,
-            "image_shape": image_shape,
-            "image_spacing": image_spacing,
-        }
+            data = {
+                "moving_image_name": str(
+                    self.filepaths[item]["moving_image"].relative_to(self.root_dir)
+                ),
+                "fixed_image_name": str(
+                    self.filepaths[item]["fixed_image"].relative_to(self.root_dir)
+                ),
+                "moving_image": moving_image,
+                "fixed_image": fixed_image,
+                "moving_mask": moving_mask,
+                "fixed_mask": fixed_mask,
+                "moving_keypoints": moving_keypoints,
+                "fixed_keypoints": fixed_keypoints,
+                "image_shape": image_shape,
+                "image_spacing": image_spacing,
+                "precomputed_vector_fields": self.filepaths[item][
+                    "precomputed_vector_fields"
+                ],
+            }
+
+            return data
 
 
 class AutoencoderDataset(DatasetMixin, Dataset):

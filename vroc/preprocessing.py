@@ -8,14 +8,64 @@ import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
+
+from vroc.common_types import IntTuple3D
 from vroc.metrics import root_mean_squared_error
 
 
+def crop_or_pad(
+    image: np.ndarray,
+    mask: np.ndarray | None,
+    target_shape: IntTuple3D,
+    image_pad_value=-1000,
+    mask_pad_value=0,
+    no_crop: bool = False,
+) -> Tuple[np.ndarray, np.ndarray]:
+    for i_axis in range(image.ndim):
+        if target_shape[i_axis] is not None:
+            if image.shape[i_axis] < target_shape[i_axis]:
+                # pad
+                padding = target_shape[i_axis] - image.shape[i_axis]
+                padding_left = padding // 2
+                padding_right = padding - padding_left
+
+                pad_width = [(0, 0)] * image.ndim
+                pad_width[i_axis] = (padding_left, padding_right)
+                image = np.pad(
+                    image,
+                    pad_width,
+                    mode="constant",
+                    constant_values=image_pad_value,
+                )
+                if mask is not None:
+                    mask = np.pad(
+                        mask,
+                        pad_width,
+                        mode="constant",
+                        constant_values=mask_pad_value,
+                    )
+
+            elif not no_crop and image.shape[i_axis] > target_shape[i_axis]:
+                # crop
+                cropping = image.shape[i_axis] - target_shape[i_axis]
+                cropping_left = cropping // 2
+                cropping_right = cropping - cropping_left
+
+                cropping_slicing = [
+                    slice(None, None),
+                ] * image.ndim
+                cropping_slicing[i_axis] = slice(cropping_left, -cropping_right)
+                image = image[tuple(cropping_slicing)]
+                mask = mask[tuple(cropping_slicing)]
+
+    return image, mask
+
+
 def resample_image_spacing(
-        image: sitk.Image,
-        new_spacing: Tuple[float, float, float],
-        resampler=sitk.sitkLinear,
-        default_voxel_value=0.0,
+    image: sitk.Image,
+    new_spacing: Tuple[float, float, float],
+    resampler=sitk.sitkLinear,
+    default_voxel_value=0.0,
 ):
     original_spacing = image.GetSpacing()
     original_size = image.GetSize()
@@ -39,10 +89,10 @@ def resample_image_spacing(
 
 
 def resample_image_size(
-        image: sitk.Image,
-        new_size: Tuple[int, int, int],
-        resampler=sitk.sitkLinear,
-        default_voxel_value=0.0,
+    image: sitk.Image,
+    new_size: Tuple[int, int, int],
+    resampler=sitk.sitkLinear,
+    default_voxel_value=0.0,
 ):
     original_spacing = image.GetSpacing()
     original_size = image.GetSize()
@@ -66,7 +116,7 @@ def resample_image_size(
 
 
 def robust_bounding_box_3d(
-        image: np.ndarray, bbox_range: Tuple[float, float] = (0.01, 0.99), padding: int = 0
+    image: np.ndarray, bbox_range: Tuple[float, float] = (0.01, 0.99), padding: int = 0
 ) -> Tuple[slice, slice, slice]:
     """
     image : mask
@@ -89,7 +139,7 @@ def robust_bounding_box_3d(
     y_min, y_max = max(y_min - padding, 0), min(y_max + padding, image.shape[1])
     z_min, z_max = max(z_min - padding, 0), min(z_max + padding, image.shape[2])
 
-    return np.index_exp[x_min: x_max + 1, y_min: y_max + 1, z_min: z_max + 1]
+    return np.index_exp[x_min : x_max + 1, y_min : y_max + 1, z_min : z_max + 1]
 
 
 def crop_background(img: sitk.Image, print_summary=False) -> sitk.Image:
@@ -126,10 +176,10 @@ def crop_background_wrapper(input_dir: os.path, output_dir: os.path):
 
 
 def affine_registration(
-        moving_image: sitk.Image,
-        fixed_image: sitk.Image,
-        moving_mask: sitk.Image | None = None,
-        fixed_mask: sitk.Image | None = None,
+    moving_image: sitk.Image,
+    fixed_image: sitk.Image,
+    moving_mask: sitk.Image | None = None,
+    fixed_mask: sitk.Image | None = None,
 ) -> (sitk.Image, sitk.Transform):
     min_filter = sitk.MinimumMaximumImageFilter()
     min_filter.Execute(fixed_image)
@@ -165,7 +215,9 @@ def affine_registration(
     registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
     registration_method.SetInterpolator(sitk.sitkLinear)
 
-    transform = sitk.CompositeTransform([initial_transform, sitk.AffineTransform(fixed_image.GetDimension())])
+    transform = sitk.CompositeTransform(
+        [initial_transform, sitk.AffineTransform(fixed_image.GetDimension())]
+    )
     registration_method.SetInitialTransform(transform, inPlace=False)
 
     if moving_mask is not None:

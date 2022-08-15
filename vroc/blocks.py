@@ -41,7 +41,9 @@ class EncoderBlock(nn.Module):
                     **convolution_kwargs,
                 )
             )
-            layers.extend([norm_layer(out_channels), nn.LeakyReLU(inplace=True)])
+            if norm_layer:
+                layers.append(norm_layer(out_channels))
+            layers.append(nn.LeakyReLU(inplace=True))
         self.convs = nn.Sequential(*layers)
 
     def forward(self, *inputs):
@@ -79,7 +81,9 @@ class DecoderBlock(nn.Module):
                     **convolution_kwargs,
                 )
             )
-            layers.extend([norm_layer(out_channels), nn.LeakyReLU(inplace=True)])
+            if norm_layer:
+                layers.append(norm_layer(out_channels))
+            layers.append(nn.LeakyReLU(inplace=True))
         self.convs = nn.Sequential(*layers)
 
     def forward(self, x1, x2):
@@ -480,8 +484,12 @@ class DemonForces3d(BaseForces3d):
         fixed_image_gradient: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
     ):
-        # grad tensors have the shape of (batch_size, 3, x_size, y_size, z_size)
+        # if method == 'dual' use union of moving and fixed mask
+        if self.method == "dual":
+            union_mask = torch.logical_or(moving_mask, fixed_mask)
+            moving_mask, fixed_mask = union_mask, union_mask
 
+        # grad tensors have the shape of (batch_size, 3, x_size, y_size, z_size)
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
         )
@@ -554,7 +562,7 @@ class NCCForces3d(BaseForces3d):
             sum_ff - 2 * fixed_mean * sum_f + npixel_filter * fixed_mean * fixed_mean
         )
         var_mf = var_m * var_f
-        var_mf[var_mf < 1e-5] = 1.0
+        # var_mf[var_mf < 1e-5] = 1.0
 
         cross = (
             sum_mf
@@ -564,6 +572,7 @@ class NCCForces3d(BaseForces3d):
         )
 
         cross_correlation = cross * cross / (var_mf + epsilon)
+        cross_correlation[var_mf < 1e-5] = 1.0
 
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask

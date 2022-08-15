@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 from abc import ABC, abstractmethod
@@ -11,6 +13,7 @@ from vroc.common_types import FloatTuple3D
 from vroc.interpolation import resize_spacing
 from vroc.models import AutoEncoder, VarReg3d
 from vroc.oriented_histogram import OrientedHistogram
+from vroc.registration import ImageWrapper, VrocRegistration
 
 
 class FeatureExtractor(ABC):
@@ -31,6 +34,7 @@ class OrientedHistogramFeatureExtrator(FeatureExtractor):
         fixed_mask: np.ndarray,
         moving_mask: np.ndarray,
         image_spacing: FloatTuple3D,
+        initial_vector_field: torch.Tensor | None = None,
         target_image_spacing: FloatTuple3D = (4.0, 4.0, 4.0),
         n_bins: int = 16,
         device: str = "cuda",
@@ -63,35 +67,70 @@ class OrientedHistogramFeatureExtrator(FeatureExtractor):
 
         union_mask = fixed_mask | moving_mask
 
+        affine_transform_vector_field1 = VrocRegistration.register_affine(
+            moving_image=ImageWrapper(moving_image),
+            fixed_image=ImageWrapper(fixed_image),
+            moving_mask=ImageWrapper(moving_mask),
+            fixed_mask=ImageWrapper(fixed_mask),
+        )
+        affine_transform_vector_field1 = torch.as_tensor(
+            affine_transform_vector_field1, device=device
+        )[None]
+
+        affine_transform_vector_field2 = VrocRegistration.register_affine(
+            moving_image=ImageWrapper(fixed_image),
+            fixed_image=ImageWrapper(moving_image),
+            moving_mask=ImageWrapper(fixed_mask),
+            fixed_mask=ImageWrapper(moving_mask),
+        )
+        affine_transform_vector_field2 = torch.as_tensor(
+            affine_transform_vector_field2, device=device
+        )[None]
+
         _fixed_image = torch.as_tensor(fixed_image, device=device)[None, None]
         _moving_image = torch.as_tensor(moving_image, device=device)[None, None]
 
         _fixed_mask = torch.as_tensor(fixed_mask, device=device)[None, None]
         _moving_mask = torch.as_tensor(moving_mask, device=device)[None, None]
         _union_mask = torch.as_tensor(union_mask, device=device)[None, None]
-        _mask = torch.ones_like(_fixed_image)
 
         varreg = VarReg3d(
             iterations=200,
             scale_factors=1.0,
-            demon_forces="symmetric",
-            tau=1.0,
+            variant="demons",
+            forces="dual",
+            tau=2.0,
             regularization_sigma=(1, 1, 1),
             restrict_to_mask_bbox=False,
         ).to(device)
 
         with torch.no_grad():
-            warped_moving_image, vector_field, misc = varreg.forward(
-                _fixed_image, _mask, _moving_image, (1.0, 1.0, 1.0)
+            result = varreg.run_registration(
+                moving_image=_moving_image,
+                fixed_image=_fixed_image,
+                moving_mask=_union_mask,
+                fixed_mask=_union_mask,
+                original_image_spacing=(1.0, 1.0, 1.0),
+                initial_vector_field=affine_transform_vector_field1,
             )
-        vector_field1 = vector_field.detach().cpu().numpy().squeeze(axis=0)
+        # result['vector_fields'] is list [affine_vector_field, varreg_vector_field]
+        vector_field1 = (
+            result["vector_fields"][-1].detach().cpu().numpy().squeeze(axis=0)
+        )
         oh1 = OrientedHistogram(n_bins=n_bins).calculate(vector_field1, mask=union_mask)
 
         with torch.no_grad():
-            warped_moving_image, vector_field, misc = varreg.forward(
-                _moving_image, _mask, _fixed_image, (1.0, 1.0, 1.0)
+            result = varreg.run_registration(
+                moving_image=_fixed_image,
+                fixed_image=_moving_image,
+                moving_mask=_union_mask,
+                fixed_mask=_union_mask,
+                original_image_spacing=(1.0, 1.0, 1.0),
+                initial_vector_field=affine_transform_vector_field2,
             )
-        vector_field2 = vector_field.detach().cpu().numpy().squeeze(axis=0)
+        vector_field2 = (
+            result["vector_fields"][-1].detach().cpu().numpy().squeeze(axis=0)
+        )
 
         oh2 = OrientedHistogram(n_bins=n_bins).calculate(vector_field2, mask=union_mask)
 
@@ -124,6 +163,10 @@ class OrientedHistogramFeatureExtrator(FeatureExtractor):
         )
 
         return features
+
+    @property
+    def name(self):
+        return f"OH_{self.n_bins}"
 
 
 # class FeatureExtractor:

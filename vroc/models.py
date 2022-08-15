@@ -29,6 +29,7 @@ from vroc.interpolation import resize
 from vroc.logger import LoggerMixin
 
 
+# TODO: channel bug with skip_connections=False
 class FlexUNet(nn.Module):
     def __init__(
         self,
@@ -325,6 +326,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         restrict_to_mask_bbox: bool = False,
         early_stopping_delta: float = 0.0,
         early_stopping_window: int = 20,
+        boosting_model: nn.Module | None = None,
         debug: bool = False,
     ):
         super().__init__()
@@ -360,6 +362,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         self.early_stopping_window = VarReg3d._expand_to_level_tuple(
             early_stopping_window, n_levels=self.n_levels
         )
+        self.boosting_model = boosting_model
         self.debug = debug
 
         # check if params are passed with/converted to consistent length
@@ -379,9 +382,9 @@ class VarReg3d(nn.Module, LoggerMixin):
         self._full_size_spatial_transformer = None
 
         if variant == "demons":
-            self._forces_layer = DemonForces3d(method="dual")
+            self._forces_layer = DemonForces3d(method=forces)
         elif variant == "ncc":
-            self._forces_layer = NCCForces3d(method="dual")
+            self._forces_layer = NCCForces3d(method=forces)
         else:
             raise NotImplementedError(
                 f"Registration variant {variant} is not implemented"
@@ -564,6 +567,8 @@ class VarReg3d(nn.Module, LoggerMixin):
         n_image_dimensions = moving_image.ndim
         n_vector_field_components = n_image_dimensions - 2  # -1 batch dim, -1 color dim
         full_uncropped_shape = tuple(fixed_image.shape)
+        original_moving_image = moving_image
+        original_moving_mask = moving_mask
 
         if self.restrict_to_mask_bbox and (
             moving_mask is not None or fixed_mask is not None
@@ -575,7 +580,6 @@ class VarReg3d(nn.Module, LoggerMixin):
             else:
                 union_mask = masks[0]
 
-            original_moving_image = moving_image
             bbox = get_bounding_box(union_mask, padding=5)
             self.logger.debug(f"Restricting registration to bounding box {bbox}")
 
@@ -588,6 +592,8 @@ class VarReg3d(nn.Module, LoggerMixin):
             if initial_vector_field is not None:
                 original_initial_vector_field = initial_vector_field
                 initial_vector_field = initial_vector_field[(..., *bbox[-3:])]
+        else:
+            bbox = ...
 
         if moving_mask is not None:
             moving_mask = torch.as_tensor(moving_mask, dtype=torch.bool)
@@ -769,15 +775,6 @@ class VarReg3d(nn.Module, LoggerMixin):
                         / scale_factor
                     )
 
-                    if forces.max() > 1000:
-                        forces = self._forces_layer(
-                            warped_moving,
-                            scaled_fixed_image,
-                            warped_scaled_moving_mask,
-                            scaled_fixed_mask,
-                            original_image_spacing,
-                        )
-
                     # images
                     ax[0, 0].imshow(_moving_image, cmap=image_cmap, clim=image_clim)
                     ax[0, 0].set_title("moving image")
@@ -824,7 +821,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         vector_field = self._match_vector_field(vector_field, full_size_moving)
 
         if self.restrict_to_mask_bbox:
-            # undo restriction to mask
+            # undo restriction to mask, i.e. insert results into full size data
             _vector_field = torch.zeros(
                 vector_field.shape[:-3] + original_moving_image.shape[-3:],
                 device=vector_field.device,
@@ -832,9 +829,11 @@ class VarReg3d(nn.Module, LoggerMixin):
             _vector_field[(...,) + bbox[2:]] = vector_field
             vector_field = _vector_field
 
-        spatial_transformer = SpatialTransformer(
-            shape=original_moving_image.shape[2:]
-        ).to(original_moving_image.device)
+        spatial_transformer = SpatialTransformer(shape=full_uncropped_shape[2:]).to(
+            fixed_image.device
+        )
+
+        result = {}
 
         if initial_vector_field is not None:
             # if we have an initial vector field: compose both vector fields.
@@ -842,12 +841,21 @@ class VarReg3d(nn.Module, LoggerMixin):
             composed_vector_field = vector_field + spatial_transformer(
                 original_initial_vector_field, vector_field
             )
+            result["vector_fields"] = [original_initial_vector_field, vector_field]
         else:
             composed_vector_field = vector_field
+            result["vector_fields"] = [vector_field]
 
+        result["composed_vector_field"] = composed_vector_field
         warped_moving_image = spatial_transformer(
             original_moving_image, composed_vector_field
         )
+        if original_moving_mask is not None:
+            affine_warped_moving_mask = spatial_transformer(
+                original_moving_mask, original_initial_vector_field
+            )
+        else:
+            affine_warped_moving_mask = None
 
         metric_after = self._calculate_metric(
             moving_image=warped_moving_image[bbox],
@@ -863,9 +871,13 @@ class VarReg3d(nn.Module, LoggerMixin):
                 "animation": camera.animate(),
             }
 
-            return warped_moving_image, composed_vector_field, debug_info
         else:
-            return warped_moving_image, composed_vector_field
+            debug_info = None
+        result["debug_info"] = debug_info
+        result["warped_moving_image"] = warped_moving_image
+        result["affine_warped_moving_mask"] = affine_warped_moving_mask
+
+        return result
 
     @timing()
     def forward(
@@ -885,17 +897,210 @@ class VarReg3d(nn.Module, LoggerMixin):
         )
 
 
-class VectorFieldBoosting(nn.Module):
-    def __init__(self):
+class DemonsVectorFieldBooster(nn.Module):
+    def __init__(self, shape, n_iterations: int = 10):
+        super().__init__()
+        self.shape = shape
+        self.n_iterations = n_iterations
+        self.forces = DemonForces3d(method="dual")
+
+        regularization_1 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=False,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=False,
+            ),
+        ]
+        regularization_2 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=16,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=False,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=False,
+            ),
+        ]
+
+        fuse = [
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=32,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=False,
+            ),
+            nn.LeakyReLU(),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=3,
+                kernel_size=1,
+                dilation=1,
+                padding="same",
+                bias=False,
+            ),
+        ]
+
+        self.regularization_1 = nn.Sequential(*regularization_1)
+        self.regularization_2 = nn.Sequential(*regularization_2)
+        self.fuse = nn.Sequential(*fuse)
+        self.spatial_transformer = SpatialTransformer(shape=self.shape)
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        image_spacing: torch.Tensor,
+    ) -> torch.Tensor:
+        vector_field = torch.zeros((1, 3) + self.shape, device=moving_image.device)
+
+        for i in range(self.n_iterations):
+            if i > 0:
+                moving_image = self.spatial_transformer(moving_image, vector_field)
+
+            forces = self.forces(
+                moving_image,
+                fixed_image,
+                None,
+                None,
+                image_spacing,
+            )
+            vector_field += forces
+
+            vector_field_1 = self.regularization_1(vector_field)
+            vector_field_2 = self.regularization_2(vector_field)
+            vector_field = self.fuse(
+                torch.concat((vector_field_1, vector_field_2), dim=1)
+            )
+
+        return vector_field
+
+
+class VectorFieldBooster(nn.Module):
+    def __init__(self, max_correction: float = 10):
         super().__init__()
 
+        self.max_correction = max_correction
 
-# if __name__ == "__main__":
-#     model = VarReg3d(
-#         scale_factors=1.0,
-#         iterations=200,
-#         variant="ncc",
-#         forces="dual",
-#         tau=2.0,
-#         regularization_sigma=(4.0, 2.0, 2.0),
-#     )
+        layers_1 = [
+            nn.Conv3d(
+                in_channels=2,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        layers_2 = [
+            nn.Conv3d(
+                in_channels=2,
+                out_channels=16,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        layers_4 = [
+            nn.Conv3d(
+                in_channels=2,
+                out_channels=16,
+                kernel_size=3,
+                dilation=4,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        layers_fuse = [
+            nn.LeakyReLU(),
+            nn.Conv3d(
+                in_channels=96,
+                out_channels=64,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(),
+            nn.Conv3d(
+                in_channels=64,
+                out_channels=3,
+                kernel_size=1,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        self.layers_1 = nn.Sequential(*layers_1)
+        self.layers_2 = nn.Sequential(*layers_2)
+        self.layers_4 = nn.Sequential(*layers_4)
+        self.layers_fuse = nn.Sequential(*layers_fuse)
+
+    def forward(
+        self, moving_image: torch.Tensor, fixed_image: torch.Tensor
+    ) -> torch.Tensor:
+        stacked_input = torch.concat((moving_image, fixed_image), dim=1)
+
+        result_1 = self.layers_1(stacked_input)
+        result_2 = self.layers_2(stacked_input)
+        result_4 = self.layers_4(stacked_input)
+
+        stacked = torch.concat((result_1, result_2, result_4), dim=1)
+        vector_field = self.layers_fuse(stacked)
+
+        return vector_field
