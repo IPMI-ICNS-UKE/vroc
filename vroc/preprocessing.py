@@ -195,30 +195,22 @@ def affine_registration(
     registration_method = sitk.ImageRegistrationMethod()
 
     # TODO: Choose metric according to registration problem, i.e. uni- vs. multi-modal
-    # Similarity metric settings.
     # registration_method.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     registration_method.SetMetricAsMeanSquares()
     registration_method.SetMetricSamplingStrategy(registration_method.RANDOM)
-    registration_method.SetMetricSamplingPercentage(0.05, seed=1337)  # 0.05
+    registration_method.SetMetricSamplingPercentage(0.05, seed=1337)
 
-    # Optimizer settings.
     registration_method.SetOptimizerAsGradientDescentLineSearch(
-        learningRate=1.0,  # 1.0
-        numberOfIterations=300,  # 300
-        convergenceMinimumValue=1e-6,  # 1e-6
-        convergenceWindowSize=10,  # 10
+        learningRate=1.0,
+        numberOfIterations=300,
+        convergenceMinimumValue=1e-3,
+        convergenceWindowSize=10,
     )
     registration_method.SetOptimizerScalesFromPhysicalShift()
-    # Setup for the multi-resolution framework.
-    registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4])  # 4
-    registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2])  # 2
-    registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+    # registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4])
+    # registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2])
+    # registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
     registration_method.SetInterpolator(sitk.sitkLinear)
-
-    transform = sitk.CompositeTransform(
-        [initial_transform, sitk.AffineTransform(fixed_image.GetDimension())]
-    )
-    registration_method.SetInitialTransform(transform, inPlace=False)
 
     if moving_mask is not None:
         moving_mask = sitk.Cast(moving_mask, sitk.sitkUInt8)
@@ -227,7 +219,14 @@ def affine_registration(
         fixed_mask = sitk.Cast(fixed_mask, sitk.sitkUInt8)
         registration_method.SetMetricFixedMask(fixed_mask)
 
-    optimized_transform = registration_method.Execute(fixed_image, moving_image)
+    registration_method.SetMovingInitialTransform(initial_transform)
+    registration_method.SetInitialTransform(
+        # sitk.AffineTransform(fixed_image.GetDimension())
+        sitk.ComposeScaleSkewVersor3DTransform()
+    )
+    optimized_transform = sitk.CompositeTransform(
+        [registration_method.Execute(fixed_image, moving_image), initial_transform]
+    )
 
     warped_moving = sitk.Resample(
         moving_image,

@@ -27,7 +27,16 @@ logging.getLogger(__name__).setLevel(logging.DEBUG)
 logging.getLogger("vroc").setLevel(logging.DEBUG)
 logging.getLogger("vroc.models.VarReg3d").setLevel(logging.INFO)
 
-OUTPUT_FOLDER = Path("/datalake/learn2reg/NLST_Validation/predictions")
+ROOT_DIR = (
+    Path("/home/tsentker/data/learn2reg"),
+    Path("/datalake/learn2reg"),
+)
+ROOT_DIR = next(p for p in ROOT_DIR if p.exists())
+FOLDER = "NLST_Validation"
+
+device = "cuda:0"
+
+OUTPUT_FOLDER = Path(f"{ROOT_DIR}/{FOLDER}/predictions")
 
 
 # def write_nlst_vector_field(vector_field, case: str, output_folder: Path):
@@ -130,20 +139,16 @@ registration = VrocRegistration(
     device="cuda:0",
 )
 
-
-FOLDER = "NLST_Validation"
-# FOLDER = "NLST"
-
 tres_before = []
 tres_after = []
 t_start = time.time()
 for case in range(101, 102):
     fixed_landmarks = read_landmarks(
-        f"/datalake/learn2reg/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
+        f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
         sep=" ",
     )
     moving_landmarks = read_landmarks(
-        f"/datalake/learn2reg/{FOLDER}/keypointsTr/NLST_{case:04d}_0001.csv",
+        f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0001.csv",
         sep=" ",
     )
 
@@ -155,10 +160,10 @@ for case in range(101, 102):
         image_spacing,
         reference_image,
     ) = load(
-        moving_image_filepath=f"/datalake/learn2reg/{FOLDER}/imagesTr/NLST_{case:04d}_0001.nii.gz",
-        fixed_image_filepath=f"/datalake/learn2reg//{FOLDER}/imagesTr/NLST_{case:04d}_0000.nii.gz",
-        moving_mask_filepath=f"/datalake/learn2reg//{FOLDER}/masksTr/NLST_{case:04d}_0001.nii.gz",
-        fixed_mask_filepath=f"/datalake/learn2reg//{FOLDER}/masksTr/NLST_{case:04d}_0000.nii.gz",
+        moving_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/NLST_{case:04d}_0001.nii.gz",
+        fixed_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/NLST_{case:04d}_0000.nii.gz",
+        moving_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/NLST_{case:04d}_0001.nii.gz",
+        fixed_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/NLST_{case:04d}_0000.nii.gz",
     )
 
     moving_mask = binary_dilation(moving_mask.astype(np.uint8), iterations=1).astype(

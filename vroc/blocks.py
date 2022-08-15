@@ -4,11 +4,15 @@ import math
 from abc import ABC
 from typing import Literal, Optional, Tuple, Type, Union
 
+import matplotlib
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.parameter import Parameter
 
 from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
+from vroc.kernels import gradient_kernel_3d
 
 
 class EncoderBlock(nn.Module):
@@ -358,7 +362,7 @@ class SpatialTransformer(nn.Module):
 
         return grid
 
-    def forward(self, src, flow):
+    def forward(self, moving, flow):
         # new locations
         new_locs = self.identity_grid + flow
         shape = flow.shape[2:]
@@ -376,10 +380,10 @@ class SpatialTransformer(nn.Module):
             new_locs = new_locs.permute(0, 2, 3, 4, 1)
             new_locs = new_locs[..., [2, 1, 0]]
 
-        if is_mask := src.dtype == torch.bool:
-            src = torch.as_tensor(src, dtype=torch.float32)
+        if is_mask := moving.dtype == torch.bool:
+            moving = torch.as_tensor(moving, dtype=torch.float32)
 
-        warped = F.grid_sample(src, new_locs, align_corners=True, mode=self.mode)
+        warped = F.grid_sample(moving, new_locs, align_corners=True, mode=self.mode)
 
         if is_mask:
             warped = warped > 0.5
@@ -533,7 +537,7 @@ class NCCForces3d(BaseForces3d):
         method: Literal["active", "passive", "dual"] = "dual",
         fixed_image_gradient: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
-        epsilon: float = 1e-6,
+        epsilon: float = 1e-5,
         radius: Tuple[int, ...] = (3, 3, 3),
     ):
         # normalizer = sum(i * i for i in original_image_spacing) / len(original_image_spacing)
@@ -562,7 +566,6 @@ class NCCForces3d(BaseForces3d):
             sum_ff - 2 * fixed_mean * sum_f + npixel_filter * fixed_mean * fixed_mean
         )
         var_mf = var_m * var_f
-        # var_mf[var_mf < 1e-5] = 1.0
 
         cross = (
             sum_mf
@@ -571,8 +574,10 @@ class NCCForces3d(BaseForces3d):
             + npixel_filter * moving_mean * fixed_mean
         )
 
-        cross_correlation = cross * cross / (var_mf + epsilon)
-        cross_correlation[var_mf < 1e-5] = 1.0
+        cross_correlation = torch.ones_like(cross)
+        cross_correlation[var_mf > epsilon] = (
+            cross[var_mf > epsilon] * cross[var_mf > epsilon] / var_mf[var_mf > epsilon]
+        )
 
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
@@ -583,12 +588,14 @@ class NCCForces3d(BaseForces3d):
         moving_mean_centered = moving_image - moving_mean
         fixed_mean_centered = fixed_image - fixed_mean
 
-        factor = (2.0 * cross / (var_mf + epsilon)) * (
-            moving_mean_centered - cross / (var_f * fixed_mean_centered + epsilon)
-        )
+        mask = (var_mf > epsilon) & (var_f > epsilon) & (fixed_mean_centered != 0.0)
 
+        factor = torch.zeros_like(cross)
+        factor[mask] = (2.0 * cross[mask] / var_mf[mask]) * (
+            moving_mean_centered[mask]
+            - cross[mask] / (var_f[mask] * fixed_mean_centered[mask])
+        )
         metric = 1 - torch.mean(cross_correlation[fixed_mask])
-        print(metric)
         return (-1) * factor * total_grad
 
     def forward(
@@ -605,6 +612,107 @@ class NCCForces3d(BaseForces3d):
             moving_mask=moving_mask,
             fixed_mask=fixed_mask,
             method=self.method,
+            original_image_spacing=original_image_spacing,
+        )
+
+
+class NGFForces3d(BaseForces3d):
+    def _grad_param(self, method, axis):
+        kernel = gradient_kernel_3d(method, axis)
+
+        kernel = kernel.reshape(1, 1, *kernel.shape)
+        return Parameter(torch.Tensor(kernel).float())
+
+    def _calculate_ngf_forces_3d(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor | None = None,
+        fixed_mask: torch.Tensor | None = None,
+        original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+        epsilon: float = None,
+    ):
+        # # reshape
+        # b, c = moving_image.shape[:2]
+        # spatial_shape = moving_image.shape[2:]
+        #
+        # moving_image = moving_image.view(b * c, 1, *spatial_shape)
+        # fixed_image = fixed_image.view(b * c, 1, *spatial_shape)
+
+        grad_u_kernel = self._grad_param("finite_diff", axis=0).to("cuda")
+        grad_v_kernel = self._grad_param("finite_diff", axis=1).to("cuda")
+        grad_w_kernel = self._grad_param("finite_diff", axis=2).to("cuda")
+        # gradient
+        moving_grad_u = (
+            F.conv3d(moving_image, grad_u_kernel, padding="same")
+            * original_image_spacing[0]
+        )
+        moving_grad_v = (
+            F.conv3d(moving_image, grad_v_kernel, padding="same")
+            * original_image_spacing[1]
+        )
+        moving_grad_w = (
+            F.conv3d(moving_image, grad_w_kernel, padding="same")
+            * original_image_spacing[2]
+        )
+
+        fixed_grad_u = (
+            F.conv3d(fixed_image, grad_u_kernel, padding="same")
+            * original_image_spacing[0]
+        )
+        fixed_grad_v = (
+            F.conv3d(fixed_image, grad_v_kernel, padding="same")
+            * original_image_spacing[1]
+        )
+        fixed_grad_w = (
+            F.conv3d(fixed_image, grad_w_kernel, padding="same")
+            * original_image_spacing[2]
+        )
+
+        if epsilon is None:
+            with torch.no_grad():
+                epsilon = torch.mean(
+                    torch.abs(moving_grad_u)
+                    + torch.abs(moving_grad_v)
+                    + torch.abs(moving_grad_w)
+                )
+
+        # gradient norm
+        moving_grad_norm = (
+            moving_grad_u**2 + moving_grad_v**2 + moving_grad_w**2 + epsilon**2
+        )
+        fixed_grad_norm = (
+            fixed_grad_u**2 + fixed_grad_v**2 + fixed_grad_w**2 + epsilon**2
+        )
+
+        # nominator
+        moving_grad = torch.concat([moving_grad_u, moving_grad_v, moving_grad_w], dim=1)
+        fixed_grad = torch.concat([fixed_grad_u, fixed_grad_v, fixed_grad_w], dim=1)
+        grad_product = moving_grad * fixed_grad
+
+        # denominator
+        norm_product = moving_grad_norm * fixed_grad_norm
+
+        # integrator
+        ngf = (grad_product**2 / norm_product) * fixed_mask
+
+        metric = torch.mean(ngf)
+
+        return (-1) * ngf
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        original_image_spacing: FloatTuple3D,
+    ):
+        return self._calculate_ngf_forces_3d(
+            moving_image=moving_image,
+            fixed_image=fixed_image,
+            moving_mask=moving_mask,
+            fixed_mask=fixed_mask,
             original_image_spacing=original_image_spacing,
         )
 
