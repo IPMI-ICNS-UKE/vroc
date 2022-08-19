@@ -14,12 +14,16 @@ class TRELoss(nn.Module):
     def __init__(
         self,
         apply_sqrt: bool = False,
-        reduction: Literal["mean", "sum", "none"] | None = "mean",
+        reduction: Literal["mean", "sum", "none", "quantile_0.95"] | None = "mean",
     ):
         super().__init__()
         self.apply_sqrt = apply_sqrt
         # convert PyTorch's unpythonic string "none"
         self.reduction = reduction if reduction != "none" else None
+
+        if self.reduction and self.reduction.startswith("quantile"):
+            self.reduction, self.quantile = self.reduction.split("_")
+            self.quantile = float(self.quantile)
 
     def forward(
         self,
@@ -63,7 +67,9 @@ class TRELoss(nn.Module):
             distances = distances.mean()
         elif self.reduction == "sum":
             distances = distances.sum()
-        elif not self._reduction:
+        elif self.reduction == "quantile":
+            distances = torch.quantile(distances, q=self.quantile)
+        elif not self.reduction:
             # do nothing; this also covers falsy values like None, False, 0
             pass
         else:

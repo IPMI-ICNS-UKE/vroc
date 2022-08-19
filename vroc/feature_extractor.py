@@ -13,7 +13,7 @@ from vroc.common_types import FloatTuple3D
 from vroc.interpolation import resize_spacing
 from vroc.models import AutoEncoder, VarReg3d
 from vroc.oriented_histogram import OrientedHistogram
-from vroc.registration import ImageWrapper, VrocRegistration
+from vroc.registration import VrocRegistration
 
 
 class FeatureExtractor(ABC):

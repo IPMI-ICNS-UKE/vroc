@@ -326,7 +326,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         use_image_spacing: bool = False,
         restrict_to_mask_bbox: bool = False,
         early_stopping_delta: float = 0.0,
-        early_stopping_window: int = 20,
+        early_stopping_window: int | None = 20,
         boosting_model: nn.Module | None = None,
         debug: bool = False,
     ):
@@ -361,7 +361,7 @@ class VarReg3d(nn.Module, LoggerMixin):
             early_stopping_delta, n_levels=self.n_levels
         )
         self.early_stopping_window = VarReg3d._expand_to_level_tuple(
-            early_stopping_window, n_levels=self.n_levels
+            early_stopping_window, n_levels=self.n_levels, expand_none=True
         )
         self.boosting_model = boosting_model
         self.debug = debug
@@ -419,12 +419,12 @@ class VarReg3d(nn.Module, LoggerMixin):
 
     @staticmethod
     def _expand_to_level_tuple(
-        value: Any, n_levels: int, is_tuple: bool = False, skip_none: bool = True
+        value: Any, n_levels: int, is_tuple: bool = False, expand_none: bool = False
     ) -> Optional[Tuple]:
-        if skip_none and value is None:
+        if not expand_none and value is None:
             return value
         else:
-            if isinstance(value, (int, float)):
+            if not is_tuple:
                 return (value,) * n_levels
             elif is_tuple and not is_tuple_of_tuples(value):
                 return (value,) * n_levels
@@ -622,7 +622,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         if self.debug:
             # disable interactive plotting
             plt.ioff()
-            fig, ax = plt.subplots(3, 3, sharex=True, sharey=True, squeeze=False)
+            fig, ax = plt.subplots(4, 3, sharex=True, sharey=True, squeeze=False)
             camera = Camera(fig)
 
         for i_level, (scale_factor, iterations) in enumerate(
@@ -686,6 +686,9 @@ class VarReg3d(nn.Module, LoggerMixin):
                 warped_scaled_moving_mask = spatial_transformer(
                     scaled_moving_mask, composed_vector_field
                 )
+                # warped_scaled_moving_mask = spatial_transformer(
+                #     scaled_moving_mask, scaled_initial_vector_field
+                # )
 
                 level_metrics.append(
                     self._calculate_metric(
@@ -745,6 +748,19 @@ class VarReg3d(nn.Module, LoggerMixin):
                         vector_field[0, ..., mid_slice, :].detach().cpu().numpy()
                     )
 
+                    _moving_mask = (
+                        scaled_moving_mask[0, 0, :, mid_slice, :].detach().cpu().numpy()
+                    )
+                    _fixed_mask = (
+                        scaled_fixed_mask[0, 0, :, mid_slice, :].detach().cpu().numpy()
+                    )
+                    _warped_mask = (
+                        warped_scaled_moving_mask[0, 0, :, mid_slice, :]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+
                     _moving_image = resize(
                         image=_moving_image,
                         output_shape=full_cropped_shape[2::2],
@@ -776,6 +792,22 @@ class VarReg3d(nn.Module, LoggerMixin):
                             order=0,
                         )
                         / scale_factor
+                    )
+
+                    _moving_mask = resize(
+                        image=_moving_mask,
+                        output_shape=full_cropped_shape[2::2],
+                        order=0,
+                    )
+                    _fixed_mask = resize(
+                        image=_fixed_mask,
+                        output_shape=full_cropped_shape[2::2],
+                        order=0,
+                    )
+                    _warped_mask = resize(
+                        image=_warped_mask,
+                        output_shape=full_cropped_shape[2::2],
+                        order=0,
                     )
 
                     # images
@@ -816,6 +848,14 @@ class VarReg3d(nn.Module, LoggerMixin):
                         ha="center",
                         transform=ax[0, 1].transAxes,
                     )
+
+                    # masks
+                    ax[3, 0].imshow(_moving_mask, cmap=image_cmap, clim=(0, 1))
+                    ax[3, 0].set_title("moving mask")
+                    ax[3, 1].imshow(_fixed_mask, cmap=image_cmap, clim=(0, 1))
+                    ax[3, 1].set_title("fixed mask")
+                    ax[3, 2].imshow(_warped_mask, cmap=image_cmap, clim=(0, 1))
+                    ax[3, 2].set_title("warped mask")
 
                     camera.snap()
 
@@ -907,10 +947,21 @@ class DemonsVectorFieldBooster(nn.Module):
         self.n_iterations = n_iterations
         self.forces = DemonForces3d(method="dual")
 
+        tau_map = [
+            nn.Conv3d(
+                in_channels=3, out_channels=8, kernel_size=3, dilation=1, padding="same"
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=8, out_channels=3, kernel_size=3, dilation=1, padding="same"
+            ),
+            nn.ReLU(inplace=True),
+        ]
+
         regularization_1 = [
             nn.Conv3d(
-                in_channels=3,
-                out_channels=16,
+                in_channels=4,
+                out_channels=8,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
@@ -918,8 +969,8 @@ class DemonsVectorFieldBooster(nn.Module):
             ),
             nn.LeakyReLU(inplace=True),
             nn.Conv3d(
-                in_channels=16,
-                out_channels=16,
+                in_channels=8,
+                out_channels=8,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
@@ -928,8 +979,8 @@ class DemonsVectorFieldBooster(nn.Module):
         ]
         regularization_2 = [
             nn.Conv3d(
-                in_channels=3,
-                out_channels=16,
+                in_channels=4,
+                out_channels=8,
                 kernel_size=3,
                 dilation=2,
                 padding="same",
@@ -937,8 +988,8 @@ class DemonsVectorFieldBooster(nn.Module):
             ),
             nn.LeakyReLU(inplace=True),
             nn.Conv3d(
-                in_channels=16,
-                out_channels=16,
+                in_channels=8,
+                out_channels=8,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
@@ -947,16 +998,6 @@ class DemonsVectorFieldBooster(nn.Module):
         ]
 
         fuse = [
-            nn.LeakyReLU(inplace=True),
-            nn.Conv3d(
-                in_channels=32,
-                out_channels=16,
-                kernel_size=3,
-                dilation=1,
-                padding="same",
-                bias=False,
-            ),
-            nn.LeakyReLU(),
             nn.Conv3d(
                 in_channels=16,
                 out_channels=3,
@@ -967,6 +1008,7 @@ class DemonsVectorFieldBooster(nn.Module):
             ),
         ]
 
+        self.tau_map = nn.Sequential(*tau_map)
         self.regularization_1 = nn.Sequential(*regularization_1)
         self.regularization_2 = nn.Sequential(*regularization_2)
         self.fuse = nn.Sequential(*fuse)
@@ -984,6 +1026,9 @@ class DemonsVectorFieldBooster(nn.Module):
             if i > 0:
                 moving_image = self.spatial_transformer(moving_image, vector_field)
 
+            diff = (moving_image - fixed_image) / (fixed_image + 1e-6)
+            diff = F.softsign(diff)
+
             forces = self.forces(
                 moving_image,
                 fixed_image,
@@ -991,119 +1036,21 @@ class DemonsVectorFieldBooster(nn.Module):
                 None,
                 image_spacing,
             )
-            vector_field += forces
 
-            vector_field_1 = self.regularization_1(vector_field)
-            vector_field_2 = self.regularization_2(vector_field)
-            vector_field = self.fuse(
-                torch.concat((vector_field_1, vector_field_2), dim=1)
+            # forces = self.tau_map(forces)
+            updated_vector_field = vector_field + forces
+
+            updated_vector_field_1 = self.regularization_1(
+                torch.concat((updated_vector_field, diff), dim=1)
             )
-
-        return vector_field
-
-
-class VectorFieldBooster(nn.Module):
-    def __init__(self, max_correction: float = 10):
-        super().__init__()
-
-        self.max_correction = max_correction
-
-        layers_1 = [
-            nn.Conv3d(
-                in_channels=2,
-                out_channels=16,
-                kernel_size=3,
-                dilation=1,
-                padding="same",
-                bias=True,
-            ),
-            nn.LeakyReLU(),
-            nn.Conv3d(
-                in_channels=16,
-                out_channels=32,
-                kernel_size=3,
-                dilation=1,
-                padding="same",
-                bias=True,
-            ),
-        ]
-
-        layers_2 = [
-            nn.Conv3d(
-                in_channels=2,
-                out_channels=16,
-                kernel_size=3,
-                dilation=2,
-                padding="same",
-                bias=True,
-            ),
-            nn.LeakyReLU(),
-            nn.Conv3d(
-                in_channels=16,
-                out_channels=32,
-                kernel_size=3,
-                dilation=1,
-                padding="same",
-                bias=True,
-            ),
-        ]
-
-        layers_4 = [
-            nn.Conv3d(
-                in_channels=2,
-                out_channels=16,
-                kernel_size=3,
-                dilation=4,
-                padding="same",
-                bias=True,
-            ),
-            nn.LeakyReLU(),
-            nn.Conv3d(
-                in_channels=16,
-                out_channels=32,
-                kernel_size=3,
-                dilation=1,
-                padding="same",
-                bias=True,
-            ),
-        ]
-
-        layers_fuse = [
-            nn.LeakyReLU(),
-            nn.Conv3d(
-                in_channels=96,
-                out_channels=64,
-                kernel_size=3,
-                dilation=1,
-                padding="same",
-                bias=True,
-            ),
-            nn.LeakyReLU(),
-            nn.Conv3d(
-                in_channels=64,
-                out_channels=3,
-                kernel_size=1,
-                dilation=1,
-                padding="same",
-                bias=True,
-            ),
-        ]
-
-        self.layers_1 = nn.Sequential(*layers_1)
-        self.layers_2 = nn.Sequential(*layers_2)
-        self.layers_4 = nn.Sequential(*layers_4)
-        self.layers_fuse = nn.Sequential(*layers_fuse)
-
-    def forward(
-        self, moving_image: torch.Tensor, fixed_image: torch.Tensor
-    ) -> torch.Tensor:
-        stacked_input = torch.concat((moving_image, fixed_image), dim=1)
-
-        result_1 = self.layers_1(stacked_input)
-        result_2 = self.layers_2(stacked_input)
-        result_4 = self.layers_4(stacked_input)
-
-        stacked = torch.concat((result_1, result_2, result_4), dim=1)
-        vector_field = self.layers_fuse(stacked)
+            updated_vector_field_2 = self.regularization_2(
+                torch.concat((updated_vector_field, diff), dim=1)
+            )
+            vector_field = vector_field + self.fuse(
+                torch.concat(
+                    (updated_vector_field_1, updated_vector_field_2),
+                    dim=1,
+                )
+            )
 
         return vector_field

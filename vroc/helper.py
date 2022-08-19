@@ -11,10 +11,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 import torch
+import torch.nn.functional as F
 from scipy.ndimage import map_coordinates
 from torch.utils.data import default_collate
 
-from vroc.common_types import FloatTuple3D, Function, PathLike
+from vroc.common_types import FloatTuple3D, Function, IntTuple3D, PathLike
 
 
 class BackgroundGenerator(threading.Thread):
@@ -283,3 +284,18 @@ def concat_dicts(dicts: Sequence[dict], extend_lists: bool = False):
                     concat[key] = [value]
 
     return concat
+
+
+def binary_dilation(mask: torch.Tensor, kernel_size: IntTuple3D) -> torch.Tensor:
+    kernel = torch.ones(
+        (
+            1,
+            1,
+        )
+        + kernel_size,
+        dtype=torch.float32,
+        device=mask.device,
+    )
+    dilated = F.conv3d(mask, kernel, padding="same")
+
+    return torch.clip(dilated, 0, 1)

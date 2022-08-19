@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
+from vroc.helper import binary_dilation
 from vroc.kernels import gradient_kernel_3d
 
 
@@ -344,51 +345,77 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
 class SpatialTransformer(nn.Module):
     """N-D Spatial Transformer."""
 
-    def __init__(self, shape, mode="bilinear"):
+    def __init__(
+        self,
+        shape: IntTuple,
+        mode: str = "bilinear",
+    ):
         super().__init__()
 
         self.mode = mode
 
         # create sampling grid
-        identity_grid = self._create_identity_grid(shape)
+        identity_grid = self.create_identity_grid(shape)
         self.register_buffer("identity_grid", identity_grid, persistent=False)
 
-    def _create_identity_grid(self, shape):
-        vectors = [torch.arange(0, s) for s in shape]
+    @staticmethod
+    def create_identity_grid(shape, device: torch.device = None):
+        vectors = [
+            torch.arange(0, s, dtype=torch.float32, device=device) for s in shape
+        ]
         grids = torch.meshgrid(vectors, indexing="ij")
         grid = torch.stack(grids)
         grid = torch.unsqueeze(grid, 0)
-        grid = grid.type(torch.FloatTensor)
 
         return grid
 
-    def forward(self, moving, flow):
-        # new locations
-        new_locs = self.identity_grid + flow
-        shape = flow.shape[2:]
+    def _warp(self, image: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+        if is_mask := ((image_dtype := image.dtype) in (torch.bool, torch.uint8)):
+            image = torch.as_tensor(image, dtype=torch.float32)
+            mode = "nearest"
+        else:
+            mode = self.mode
 
-        # need to normalize grid values to [-1, 1] for resampler
-        for i in range(len(shape)):
-            new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
-
-        # move channels dim to last position
-        # also not sure why, but the channels need to be reversed
-        if len(shape) == 2:
-            new_locs = new_locs.permute(0, 2, 3, 1)
-            new_locs = new_locs[..., [1, 0]]
-        elif len(shape) == 3:
-            new_locs = new_locs.permute(0, 2, 3, 4, 1)
-            new_locs = new_locs[..., [2, 1, 0]]
-
-        if is_mask := moving.dtype == torch.bool:
-            moving = torch.as_tensor(moving, dtype=torch.float32)
-
-        warped = F.grid_sample(moving, new_locs, align_corners=True, mode=self.mode)
+        warped = F.grid_sample(image, grid, align_corners=True, mode=mode)
 
         if is_mask:
-            warped = warped > 0.5
+            warped = torch.as_tensor(warped, dtype=image_dtype)
 
         return warped
+
+    def forward(self, image, transformation: torch.Tensor) -> torch.Tensor:
+        # transformation can be a affine 4x4 matrix or a dense vector field:
+        # shape affine matrix: (batch, 4, 4)
+        # shape dense vector field: (batch, 3, x_size, y_size, z_size)
+
+        image_spatial_shape = image.shape[2:]
+        image_n_dim = len(image_spatial_shape)
+
+        if transformation.shape[-2:] == (4, 4):
+            # transformation is affine matrix
+            # discard last row of 4x4 matrix to get 3x4 matrix
+            # (last low of affine matrix is not used by PyTorch)
+            grid = F.affine_grid(
+                transformation[:, :3], size=image.shape, align_corners=True
+            )
+        else:
+            # transformation is dense vector field
+            grid = self.identity_grid + transformation
+            # need to normalize grid values to [-1, 1] for PyTorch's grid_sample
+            for i in range(image_n_dim):
+                grid[:, i, ...] = 2 * (
+                    grid[:, i, ...] / (image_spatial_shape[i] - 1) - 0.5
+                )
+
+            # move channels dim to last position and reverse channels
+            if image_n_dim == 2:
+                grid = grid.permute(0, 2, 3, 1)
+                grid = grid[..., [1, 0]]
+            elif image_n_dim == 3:
+                grid = grid.permute(0, 2, 3, 4, 1)
+                grid = grid[..., [2, 1, 0]]
+
+        return self._warp(image=image, grid=grid)
 
 
 class BaseForces3d(nn.Module):
@@ -488,12 +515,23 @@ class DemonForces3d(BaseForces3d):
         fixed_image_gradient: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
     ):
-        # if method == 'dual' use union of moving and fixed mask
-        if self.method == "dual":
-            union_mask = torch.logical_or(moving_mask, fixed_mask)
-            moving_mask, fixed_mask = union_mask, union_mask
+        # # if method == 'dual' use union of moving and fixed mask
+        # if self.method == "dual":
+        #     union_mask = torch.logical_or(moving_mask, fixed_mask)
+        #     moving_mask, fixed_mask = union_mask, union_mask
 
         # grad tensors have the shape of (batch_size, 3, x_size, y_size, z_size)
+        # if moving_mask is not None:
+        #     moving_mask = binary_dilation(
+        #         torch.as_tensor(moving_mask, dtype=torch.float32),
+        #         kernel_size=(3, 3, 3)
+        #     )
+        # if fixed_mask is not None:
+        #     fixed_mask = binary_dilation(
+        #         torch.as_tensor(fixed_mask, dtype=torch.float32),
+        #         kernel_size=(3, 3, 3)
+        #     )
+
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
         )

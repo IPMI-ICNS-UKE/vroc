@@ -221,8 +221,8 @@ def affine_registration(
 
     registration_method.SetMovingInitialTransform(initial_transform)
     registration_method.SetInitialTransform(
-        # sitk.AffineTransform(fixed_image.GetDimension())
-        sitk.ComposeScaleSkewVersor3DTransform()
+        sitk.AffineTransform(fixed_image.GetDimension())
+        # sitk.ComposeScaleSkewVersor3DTransform()
     )
     optimized_transform = sitk.CompositeTransform(
         [registration_method.Execute(fixed_image, moving_image), initial_transform]

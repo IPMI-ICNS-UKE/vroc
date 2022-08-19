@@ -11,6 +11,7 @@ from matplotlib.animation import FFMpegWriter
 from scipy.ndimage.morphology import binary_dilation
 
 from vroc.common_types import PathLike
+from vroc.decorators import timing
 from vroc.feature_extractor import OrientedHistogramFeatureExtrator
 from vroc.guesser import ParameterGuesser
 from vroc.helper import compute_tre_numpy, compute_tre_sitk, read_landmarks
@@ -79,6 +80,7 @@ def write_nlst_vector_field(
     return str(output_filepath)
 
 
+@timing()
 def load(
     moving_image_filepath,
     fixed_image_filepath,
@@ -121,9 +123,10 @@ def load(
 # )
 # parameter_guesser.fit()
 
+DEVICE = "cuda:0"
 params = {
     "iterations": 1000,
-    "tau": 20.0,
+    "tau": 2.25,
     "sigma_x": 1.25,
     "sigma_y": 1.25,
     "sigma_z": 1.25,
@@ -134,15 +137,13 @@ registration = VrocRegistration(
     roi_segmenter=None,
     feature_extractor=None,
     parameter_guesser=None,
-    default_parameters=params,
-    debug=True,
-    device="cuda:0",
+    device=DEVICE,
 )
 
 tres_before = []
 tres_after = []
 t_start = time.time()
-for case in range(101, 102):
+for case in range(101, 111):
     fixed_landmarks = read_landmarks(
         f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
         sep=" ",
@@ -167,28 +168,29 @@ for case in range(101, 102):
     )
 
     moving_mask = binary_dilation(moving_mask.astype(np.uint8), iterations=1).astype(
-        np.uint8
+        bool
     )
-    fixed_mask = binary_dilation(fixed_mask.astype(np.uint8), iterations=1).astype(
-        np.uint8
-    )
+    fixed_mask = binary_dilation(fixed_mask.astype(np.uint8), iterations=1).astype(bool)
+
+    moving_mask = moving_mask.astype(bool)
+    fixed_mask = fixed_mask.astype(bool)
 
     union_mask = moving_mask | fixed_mask
+    # moving_mask = union_mask
+    # fixed_mask = union_mask
 
-    warped_image, vector_field, debug_info = registration.register(
+    registration_result = registration.register(
         moving_image=moving_image,
         fixed_image=fixed_image,
-        moving_mask=union_mask,
-        fixed_mask=union_mask,
+        moving_mask=moving_mask,
+        fixed_mask=fixed_mask,
         register_affine=True,
         valid_value_range=(-1024, 3071),
         early_stopping_delta=0.001,
-        early_stopping_window=100,
+        early_stopping_window=None,
+        default_parameters=params,
+        debug=False,
     )
-
-    animation = debug_info["animation"]
-    writer = FFMpegWriter(fps=1)
-    animation.save("registration.mp4", writer=writer)
 
     # fig, ax = plt.subplots(2, 3, sharex=True, sharey=True)
     # mid_slice = fixed_image.shape[1] // 2
@@ -219,13 +221,11 @@ for case in range(101, 102):
     #     output_folder=OUTPUT_FOLDER,
     # )
 
-    vf = torch.as_tensor(vector_field[np.newaxis], device="cuda:0")
-    ml = torch.as_tensor(moving_landmarks[np.newaxis], device="cuda:0")
-    fl = torch.as_tensor(fixed_landmarks[np.newaxis], device="cuda:0")
+    vector_field = registration_result.composed_vector_field
 
-    tre_loss = TRELoss(image_spacing=(1.5, 1.5, 1.5), apply_sqrt=True).to("cuda:0")
-    loss_before = float(tre_loss(vf * 0.0, ml, fl))
-    loss_after = float(tre_loss(vf, ml, fl))
+    vf = torch.as_tensor(vector_field[np.newaxis], device=DEVICE)
+    ml = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
+    fl = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
 
     tre_before = compute_tre_numpy(
         moving_landmarks=moving_landmarks,
@@ -243,12 +243,15 @@ for case in range(101, 102):
     print(
         f"NLST_0{case}: "
         f"tre_before={np.mean(tre_before):.2f}, "
-        f"tre_after={np.mean(tre_after):.2f}, "
-        f"tre_loss_before={loss_before:.2f}, "
-        f"tre_loss_after={loss_after:.2f}"
+        f"tre_after={np.mean(tre_after):.2f}"
     )
     tres_before.append(np.mean(tre_before))
     tres_after.append(np.mean(tre_after))
+
+    if debug_info := registration_result.debug_info:
+        animation = debug_info["animation"]
+        writer = FFMpegWriter(fps=1)
+        animation.save("registration.mp4", writer=writer)
 
 print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")
 print(f"after: mean TRE={np.mean(tres_after)}, std TRE={np.std(tres_after)}")
