@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -93,3 +94,69 @@ class WarpedMSELoss(nn.Module):
         warped_image = self.spatial_transformer(moving_image, vector_field)
 
         return F.mse_loss(warped_image[fixed_image_mask], fixed_image[fixed_image_mask])
+
+
+def mse_loss(
+    moving_image: torch.Tensor, fixed_image: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor:
+    return F.mse_loss(moving_image[mask], fixed_image[mask])
+
+
+def ncc_loss(
+    moving_image: torch.Tensor, fixed_image: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor:
+    moving_image = torch.masked_select(moving_image, mask)
+    fixed_image = torch.masked_select(fixed_image, mask)
+    value = (
+        -1.0
+        * torch.sum(
+            (fixed_image - torch.mean(fixed_image))
+            * (moving_image - torch.mean(moving_image))
+        )
+        / torch.sqrt(
+            torch.sum((fixed_image - torch.mean(fixed_image)) ** 2)
+            * torch.sum((moving_image - torch.mean(moving_image)) ** 2)
+            + 1e-10
+        )
+    )
+
+    return value
+
+
+def ngf_loss(
+    moving_image: torch.Tensor,
+    fixed_image: torch.Tensor,
+    mask: torch.tensor,
+    epsilon=1e-5,
+) -> torch.Tensor:
+    dx_f = fixed_image[..., 1:, 1:, 1:] - fixed_image[..., :-1, 1:, 1:]
+    dy_f = fixed_image[..., 1:, 1:, 1:] - fixed_image[..., 1:, :-1, 1:]
+    dz_f = fixed_image[..., 1:, 1:, 1:] - fixed_image[..., 1:, 1:, :-1]
+
+    if epsilon is None:
+        with torch.no_grad():
+            epsilon = torch.mean(torch.abs(dx_f) + torch.abs(dy_f) + torch.abs(dz_f))
+
+    norm = torch.sqrt(dx_f.pow(2) + dy_f.pow(2) + dz_f.pow(2) + epsilon**2)
+
+    ngf_fixed_image = F.pad(
+        torch.cat((dx_f, dy_f, dz_f), dim=1) / norm, (0, 1, 0, 1, 0, 1)
+    )
+
+    dx_m = moving_image[..., 1:, 1:, 1:] - moving_image[..., :-1, 1:, 1:]
+    dy_m = moving_image[..., 1:, 1:, 1:] - moving_image[..., 1:, :-1, 1:]
+    dz_m = moving_image[..., 1:, 1:, 1:] - moving_image[..., 1:, 1:, :-1]
+
+    norm = torch.sqrt(dx_m.pow(2) + dy_m.pow(2) + dz_m.pow(2) + epsilon**2)
+
+    ngf_moving_image = F.pad(
+        torch.cat((dx_m, dy_m, dz_m), dim=1) / norm, (0, 1, 0, 1, 0, 1)
+    )
+
+    value = 0
+    for dim in range(3):
+        value = value + ngf_moving_image[:, dim, ...] * ngf_fixed_image[:, dim, ...]
+
+    value = 0.5 * torch.masked_select(-value.pow(2), mask)
+
+    return value.mean()

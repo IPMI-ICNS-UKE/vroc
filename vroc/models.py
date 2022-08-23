@@ -313,8 +313,8 @@ class VarReg3d(nn.Module, LoggerMixin):
         scale_factors: FloatTuple | float = (1.0,),
         iterations: IntTuple | int = 100,
         tau: FloatTuple | float = 1.0,
-        variant: Literal["demons", "ncc", "ngf"] = "demons",
-        forces: Literal["active", "passive", "dual"] = "dual",
+        force_type: Literal["demons", "ncc", "ngf"] = "demons",
+        gradient_type: Literal["active", "passive", "dual"] = "dual",
         regularization_sigma: FloatTuple3D
         | Tuple[FloatTuple3D, ...] = (
             1.0,
@@ -354,7 +354,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         self.original_image_spacing = original_image_spacing
         self.use_image_spacing = use_image_spacing
 
-        self.forces = forces
+        self.forces = gradient_type
 
         self.restrict_to_mask_bbox = restrict_to_mask_bbox
         self.early_stopping_delta = VarReg3d._expand_to_level_tuple(
@@ -382,15 +382,15 @@ class VarReg3d(nn.Module, LoggerMixin):
         self._image_shape = None
         self._full_size_spatial_transformer = None
 
-        if variant == "demons":
+        if force_type == "demons":
             self._forces_layer = DemonForces3d(method=self.forces)
-        elif variant == "ncc":
+        elif force_type == "ncc":
             self._forces_layer = NCCForces3d(method=self.forces)
-        elif variant == "ngf":
+        elif force_type == "ngf":
             self._forces_layer = NGFForces3d()
         else:
             raise NotImplementedError(
-                f"Registration variant {variant} is not implemented"
+                f"Registration variant {force_type} is not implemented"
             )
 
         for i_level, sigma in enumerate(self.regularization_sigma):
@@ -893,7 +893,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         warped_moving_image = spatial_transformer(
             original_moving_image, composed_vector_field
         )
-        if original_moving_mask is not None:
+        if (original_moving_mask is not None) & (initial_vector_field is not None):
             affine_warped_moving_mask = spatial_transformer(
                 original_moving_mask, original_initial_vector_field
             )

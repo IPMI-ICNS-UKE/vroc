@@ -97,8 +97,8 @@ class OrientedHistogramFeatureExtrator(FeatureExtractor):
         varreg = VarReg3d(
             iterations=200,
             scale_factors=1.0,
-            variant="demons",
-            forces="dual",
+            force_type="demons",
+            gradient_type="dual",
             tau=2.0,
             regularization_sigma=(1, 1, 1),
             restrict_to_mask_bbox=False,

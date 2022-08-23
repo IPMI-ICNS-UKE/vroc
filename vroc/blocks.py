@@ -515,10 +515,10 @@ class DemonForces3d(BaseForces3d):
         fixed_image_gradient: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
     ):
-        # # if method == 'dual' use union of moving and fixed mask
-        # if self.method == "dual":
-        #     union_mask = torch.logical_or(moving_mask, fixed_mask)
-        #     moving_mask, fixed_mask = union_mask, union_mask
+        # if method == 'dual' use union of moving and fixed mask
+        if self.method == "dual":
+            union_mask = torch.logical_or(moving_mask, fixed_mask)
+            moving_mask, fixed_mask = union_mask, union_mask
 
         # grad tensors have the shape of (batch_size, 3, x_size, y_size, z_size)
         # if moving_mask is not None:
@@ -575,15 +575,16 @@ class NCCForces3d(BaseForces3d):
         method: Literal["active", "passive", "dual"] = "dual",
         fixed_image_gradient: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
-        epsilon: float = 1e-5,
-        radius: Tuple[int, ...] = (3, 3, 3),
+        epsilon: float = 1e-10,
+        radius: Tuple[int, ...] = (5, 5, 5),
     ):
         # normalizer = sum(i * i for i in original_image_spacing) / len(original_image_spacing)
 
-        filter = torch.ones((1, 1) + radius).to("cuda")
+        filter = torch.ones((1, 1) + radius).to(moving_image)
         npixel_filter = torch.prod(torch.tensor(radius))
         stride = (1, 1, 1)
 
+        # TODO: compute fixed params only once per level in base class init
         mm = moving_image * moving_image
         ff = fixed_image * fixed_image
         mf = moving_image * fixed_image
@@ -626,7 +627,12 @@ class NCCForces3d(BaseForces3d):
         moving_mean_centered = moving_image - moving_mean
         fixed_mean_centered = fixed_image - fixed_mean
 
-        mask = (var_mf > epsilon) & (var_f > epsilon) & (fixed_mean_centered != 0.0)
+        mask = (
+            (var_mf > epsilon)
+            & (var_f > epsilon)
+            & (fixed_mean_centered != 0.0)
+            & (moving_mean_centered != 0.0)
+        )
 
         factor = torch.zeros_like(cross)
         factor[mask] = (2.0 * cross[mask] / var_mf[mask]) * (

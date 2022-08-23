@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import Callable, List, Literal, Sequence, Tuple
 
 import numpy as np
 import SimpleITK as sitk
@@ -94,6 +94,9 @@ class VrocRegistration(LoggerMixin):
         fixed_mask: np.ndarray | None = None,
         image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         register_affine: bool = True,
+        affine_loss_fn: Callable | None = None,
+        force_type: Literal["demons", "ncc", "ngf"] = "demons",
+        gradient_type: Literal["active", "passive", "dual"] = "dual",
         segment_roi: bool = True,
         valid_value_range: Tuple[Number, Number] | None = None,
         early_stopping_delta: float = 0.0,
@@ -136,6 +139,7 @@ class VrocRegistration(LoggerMixin):
                 fixed_image=fixed_image,
                 moving_mask=moving_mask,
                 fixed_mask=fixed_mask,
+                loss_function=affine_loss_fn,
                 n_iterations=300,
             )
         else:
@@ -203,8 +207,8 @@ class VrocRegistration(LoggerMixin):
         varreg = VarReg3d(
             iterations=parameters["iterations"],
             scale_factors=scale_factors,
-            variant="demons",
-            forces="dual",
+            force_type=force_type,
+            gradient_type=gradient_type,
             tau=parameters["tau"],
             regularization_sigma=(
                 parameters["sigma_x"],

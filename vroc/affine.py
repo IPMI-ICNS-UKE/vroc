@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable, Tuple
 
 import numpy as np
 import torch
@@ -178,7 +179,8 @@ def run_affine_registration(
         affine_matrix = affine_transform.forward()
         warped_image = spatial_transformer.forward(moving_image, affine_matrix[None])
 
-        loss = loss_function(warped_image[roi], fixed_image[roi])
+        loss = loss_function(warped_image, fixed_image, roi)
+
         loss.backward()
         optimizer.step()
         scheduler.step(loss)
