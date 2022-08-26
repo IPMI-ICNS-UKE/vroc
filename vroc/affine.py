@@ -8,11 +8,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.ndimage import binary_dilation
-from torch.optim import Adam
+from torch.optim import SGD, Adam, NAdam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from vroc.blocks import SpatialTransformer
 from vroc.helper import compute_tre_numpy, read_landmarks
+from vroc.loss import mse_loss
 
 
 class AffineTransform3d(nn.Module):
@@ -105,7 +106,11 @@ class AffineTransform3d(nn.Module):
         shear_matrix[2, 1] = shear_yz
 
         transformation_matrix = (
-            shear_matrix @ rotation_matrix @ scale_matrix @ translation_matrix
+            shear_matrix
+            @ rotation_matrix
+            @ scale_matrix
+            @ translation_matrix
+            # rotation_matrix @ translation_matrix
         )
 
         return transformation_matrix
@@ -126,7 +131,7 @@ class AffineTransform3d(nn.Module):
         )
 
         affine_grid = (affine_grid / 2 + 0.5) * torch.tensor(
-            image_spatial_shape, device=device
+            image_spatial_shape[::-1], device=device
         )
 
         # move channels dim to last position and reverse channels
@@ -155,15 +160,15 @@ def run_affine_registration(
         roi = moving_mask | fixed_mask
     else:
         # ROI is total image
-        roi = ...
+        roi = torch.ones_like(fixed_image, dtype=torch.bool)
 
     if not loss_function:
-        loss_function = F.mse_loss
+        loss_function = mse_loss
 
     affine_transform = AffineTransform3d().to(device)
     spatial_transformer = SpatialTransformer(shape=moving_image.shape[2:]).to(device)
 
-    optimizer = Adam(affine_transform.parameters(), lr=1e-3)
+    optimizer = NAdam(affine_transform.parameters(), lr=1e-3)
     scheduler = ReduceLROnPlateau(
         optimizer=optimizer,
         mode="min",
@@ -280,7 +285,7 @@ if __name__ == "__main__":
 
         warped_image, vector_field = run_affine_registration(
             moving_image=moving_image,
-            fixed_image=fixed_image,
+            fixed_image=fixed_image_aff,
             moving_mask=moving_mask,
             fixed_mask=fixed_mask,
         )

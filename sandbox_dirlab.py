@@ -2,13 +2,20 @@ import logging
 import time
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import nibabel as nib
 import numpy as np
 import SimpleITK as sitk
 import torch
+from matplotlib.animation import FFMpegWriter
 from scipy.ndimage.morphology import binary_dilation
 
+from vroc.common_types import PathLike
+from vroc.feature_extractor import OrientedHistogramFeatureExtrator
+from vroc.guesser import ParameterGuesser
 from vroc.helper import compute_tre_numpy, compute_tre_sitk, read_landmarks
 from vroc.logger import LogFormatter
+from vroc.loss import TRELoss, local_ncc_loss, mind_loss, mse_loss, ncc_loss, ngf_loss
 from vroc.registration import VrocRegistration
 
 handler = logging.StreamHandler()
@@ -45,7 +52,7 @@ def load(
 
     reference_image = fixed_image
 
-    image_spacing = fixed_image.GetSpacing()[::-1]
+    image_spacing = fixed_image.GetSpacing()
 
     moving_image = sitk.GetArrayFromImage(moving_image)
     fixed_image = sitk.GetArrayFromImage(fixed_image)
@@ -67,9 +74,16 @@ def load(
     )
 
 
+# feature_extractor = OrientedHistogramFeatureExtrator(device="cuda:0")
+# parameter_guesser = ParameterGuesser(
+#     database_filepath="/datalake/learn2reg/best_parameters.sqlite",
+#     parameters_to_guess=('sigma_x', 'sigma_y', 'sigma_z')
+# )
+# parameter_guesser.fit()
+
 params = {
     "iterations": 800,
-    "tau": 2.25,
+    "tau": 2,
     "sigma_x": 2,
     "sigma_y": 2,
     "sigma_z": 2,
@@ -80,15 +94,13 @@ registration = VrocRegistration(
     roi_segmenter=None,
     feature_extractor=None,
     parameter_guesser=None,
-    default_parameters=params,
-    debug=False,
     device="cuda:0",
 )
 
 tres_before = []
 tres_after = []
 t_start = time.time()
-for case in range(1, 11):
+for case in range(8, 11):
     fixed_landmarks = read_landmarks(
         f"{ROOT_DIR}/{FOLDER}/data/Case{case:02d}Pack/extremePhases/landmarks_0.txt",
         sep="\t",
@@ -113,45 +125,53 @@ for case in range(1, 11):
     )
 
     moving_mask = binary_dilation(moving_mask.astype(np.uint8), iterations=1).astype(
-        np.uint8
+        bool
     )
-    fixed_mask = binary_dilation(fixed_mask.astype(np.uint8), iterations=1).astype(
-        np.uint8
-    )
+    fixed_mask = binary_dilation(fixed_mask.astype(np.uint8), iterations=1).astype(bool)
 
-    union_mask = moving_mask | fixed_mask
+    # moving_mask = moving_mask.astype(bool)
+    # fixed_mask = fixed_mask.astype(bool)
+    # union_mask = moving_mask | fixed_mask
 
-    warped_image, vector_field = registration.register(
+    debug = False
+    reg_result = registration.register(
         moving_image=moving_image,
         fixed_image=fixed_image,
-        moving_mask=union_mask,
-        fixed_mask=union_mask,
+        moving_mask=moving_mask,
+        fixed_mask=fixed_mask,
+        image_spacing=image_spacing,
         register_affine=True,
+        affine_loss_fn=ncc_loss,
+        force_type="demons",
+        gradient_type="dual",
         valid_value_range=(-1024, 3071),
-        early_stopping_delta=1e-6,
-        early_stopping_window=250,
+        early_stopping_delta=0.00,
+        early_stopping_window=100,
+        default_parameters=params,
+        debug=debug,
     )
 
-    vf = torch.as_tensor(vector_field[np.newaxis], device=device)
-    ml = torch.as_tensor(moving_landmarks[np.newaxis], device=device)
-    fl = torch.as_tensor(fixed_landmarks[np.newaxis], device=device)
+    if debug:
+        animation = reg_result.debug_info["animation"]
+        writer = FFMpegWriter(fps=1)
+        animation.save("registration.mp4", writer=writer)
 
     tre_before = compute_tre_numpy(
         moving_landmarks=moving_landmarks,
         fixed_landmarks=fixed_landmarks,
         vector_field=None,
-        image_spacing=reference_image.GetSpacing(),
+        image_spacing=image_spacing,
     )
     tre_after = compute_tre_numpy(
         moving_landmarks=moving_landmarks,
         fixed_landmarks=fixed_landmarks,
-        vector_field=vector_field,
-        image_spacing=reference_image.GetSpacing(),
+        vector_field=reg_result.composed_vector_field,
+        image_spacing=image_spacing,
         snap_to_voxel=True,
     )
 
     print(
-        f"dirlab_{case:02d}: "
+        f"dirlab_0{case}: "
         f"tre_before={np.mean(tre_before):.2f}, "
         f"tre_after={np.mean(tre_after):.2f}, "
     )
