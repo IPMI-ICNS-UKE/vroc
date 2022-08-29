@@ -30,9 +30,13 @@ class VrocRegistration(LoggerMixin):
     DEFAULT_REGISTRATION_PARAMETERS = {
         "iterations": 800,
         "tau": 2.25,
+        "tau_level_decay": 0.0,
+        "tau_iteration_decay": 0.0,
         "sigma_x": 1.25,
         "sigma_y": 1.25,
         "sigma_z": 1.25,
+        "sigma_level_decay": 0.0,
+        "sigma_iteration_decay": 0.0,
         "n_levels": 3,
     }
 
@@ -183,10 +187,17 @@ class VrocRegistration(LoggerMixin):
             self.logger.info(f"No parameters were guessed")
             guessed_parameters = {}
 
-        # gather all parameters (try guessed parameters, then default parameters)
+        # gather all parameters
+        # (try guessed parameters, then passed default parameters,
+        # then VROC default parameters)
         parameters = {
             param_name: self._get_parameter_value(
-                [guessed_parameters, default_parameters], param_name
+                [
+                    guessed_parameters,
+                    default_parameters,
+                    VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS,
+                ],
+                param_name,
             )
             for param_name in self.available_registration_parameters
         }
@@ -203,12 +214,16 @@ class VrocRegistration(LoggerMixin):
             scale_factors=scale_factors,
             force_type=force_type,
             gradient_type=gradient_type,
+            tau_level_decay=parameters["tau_level_decay"],
+            tau_iteration_decay=parameters["tau_iteration_decay"],
             tau=parameters["tau"],
             regularization_sigma=(
                 parameters["sigma_x"],
                 parameters["sigma_y"],
                 parameters["sigma_z"],
             ),
+            sigma_level_decay=parameters["sigma_level_decay"],
+            sigma_iteration_decay=parameters["sigma_iteration_decay"],
             restrict_to_mask_bbox=True,
             early_stopping_delta=early_stopping_delta,
             early_stopping_window=early_stopping_window,

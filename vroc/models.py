@@ -24,6 +24,7 @@ from vroc.blocks import (
 )
 from vroc.checks import are_of_same_length, is_tuple, is_tuple_of_tuples
 from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
+from vroc.decay import exponential_decay
 from vroc.decorators import timing
 from vroc.helper import get_bounding_box
 from vroc.interpolation import resize
@@ -313,6 +314,8 @@ class VarReg3d(nn.Module, LoggerMixin):
         scale_factors: FloatTuple | float = (1.0,),
         iterations: IntTuple | int = 100,
         tau: FloatTuple | float = 1.0,
+        tau_level_decay: float = 0.0,
+        tau_iteration_decay: float = 0.0,
         force_type: Literal["demons", "ncc", "ngf"] = "demons",
         gradient_type: Literal["active", "passive", "dual"] = "dual",
         regularization_sigma: FloatTuple3D
@@ -322,6 +325,8 @@ class VarReg3d(nn.Module, LoggerMixin):
             1.0,
         ),
         regularization_radius: IntTuple3D | Tuple[IntTuple3D, ...] | None = None,
+        sigma_level_decay: float = 0.0,
+        sigma_iteration_decay: float = 0.0,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         use_image_spacing: bool = False,
         restrict_to_mask_bbox: bool = False,
@@ -342,15 +347,17 @@ class VarReg3d(nn.Module, LoggerMixin):
         )
 
         self.tau = VarReg3d._expand_to_level_tuple(tau, n_levels=self.n_levels)
-        self.regularization_sigma = VarReg3d._expand_to_level_tuple(
-            regularization_sigma, n_levels=self.n_levels, is_tuple=True
-        )
+        self.tau_level_decay = tau_level_decay
+        self.tau_iteration_decay = tau_iteration_decay
+
         self.regularization_sigma = VarReg3d._expand_to_level_tuple(
             regularization_sigma, n_levels=self.n_levels, is_tuple=True
         )
         self.regularization_radius = VarReg3d._expand_to_level_tuple(
             regularization_radius, n_levels=self.n_levels, is_tuple=True
         )
+        self.sigma_level_decay = sigma_level_decay
+        self.sigma_iteration_decay = sigma_iteration_decay
         self.original_image_spacing = original_image_spacing
         self.use_image_spacing = use_image_spacing
 
@@ -564,6 +571,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         initial_vector_field: torch.Tensor | None = None,
     ):
+        device = moving_image.device
         if moving_image.ndim != fixed_image.ndim:
             raise RuntimeError("Dimension mismatch betwen moving and fixed image")
         # define dimensionalities and shapes
@@ -669,7 +677,7 @@ class VarReg3d(nn.Module, LoggerMixin):
 
             level_metrics = []
 
-            for i in range(iterations):
+            for i_iteration in range(iterations):
                 t_step_start = time.time()
                 if initial_vector_field is not None:
                     # if we have an initial vector field: compose both vector fields.
@@ -697,7 +705,6 @@ class VarReg3d(nn.Module, LoggerMixin):
                         fixed_mask=scaled_fixed_mask,
                     )
                 )
-                log = {"level": i_level, "iteration": i, "metric": level_metrics[-1]}
 
                 forces = self._forces_layer(
                     warped_moving,
@@ -706,16 +713,50 @@ class VarReg3d(nn.Module, LoggerMixin):
                     scaled_fixed_mask,
                     original_image_spacing,
                 )
-                vector_field += self.tau[i_level] * forces
-
-                _regularization_layer = self.get_submodule(
-                    f"regularization_layer_level_{i_level}",
+                decayed_tau = exponential_decay(
+                    initial_value=self.tau[i_level],
+                    i_level=i_level,
+                    i_iteration=i_iteration,
+                    level_lambda=self.tau_level_decay,
+                    iteration_lambda=self.tau_iteration_decay,
                 )
+
+                vector_field += decayed_tau * forces
+
+                # _regularization_layer = self.get_submodule(
+                #     f"regularization_layer_level_{i_level}",
+                # )
+
+                decayed_sigma = tuple(
+                    exponential_decay(
+                        initial_value=s,
+                        i_level=i_level,
+                        i_iteration=i_iteration,
+                        level_lambda=self.sigma_level_decay,
+                        iteration_lambda=self.sigma_iteration_decay,
+                    )
+                    for s in self.regularization_sigma[i_level]
+                )
+                _regularization_layer = GaussianSmoothing3d(
+                    sigma=decayed_sigma,
+                    sigma_cutoff=(2.0, 2.0, 2.0),
+                    force_same_size=True,
+                    spacing=self.original_image_spacing,
+                    use_image_spacing=self.use_image_spacing,
+                ).to(device)
+
                 vector_field = _regularization_layer(vector_field)
 
                 # check early stopping
                 if self._check_early_stopping(metrics=level_metrics, i_level=i_level):
                     break
+
+                log = {
+                    "level": i_level,
+                    "iteration": i_iteration,
+                    "tau": decayed_tau,
+                    "metric": level_metrics[-1],
+                }
 
                 t_step_end = time.time()
                 log["step_runtime"] = t_step_end - t_step_start
@@ -843,7 +884,7 @@ class VarReg3d(nn.Module, LoggerMixin):
                     ax[0, 1].text(
                         0.5,
                         1.3,
-                        f"level={i_level}, iteration={i}",
+                        f"level={i_level}, iteration={i_iteration}",
                         size=plt.rcParams["axes.titlesize"],
                         ha="center",
                         transform=ax[0, 1].transAxes,
@@ -947,68 +988,74 @@ class DemonsVectorFieldBooster(nn.Module):
         self.n_iterations = n_iterations
         self.forces = DemonForces3d(method="dual")
 
-        tau_map = [
-            nn.Conv3d(
-                in_channels=3, out_channels=8, kernel_size=3, dilation=1, padding="same"
-            ),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv3d(
-                in_channels=8, out_channels=3, kernel_size=3, dilation=1, padding="same"
-            ),
-            nn.ReLU(inplace=True),
-        ]
-
         regularization_1 = [
             nn.Conv3d(
                 in_channels=4,
-                out_channels=8,
+                out_channels=16,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
-                bias=False,
+                bias=True,
             ),
             nn.LeakyReLU(inplace=True),
             nn.Conv3d(
-                in_channels=8,
-                out_channels=8,
+                in_channels=16,
+                out_channels=32,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
-                bias=False,
+                bias=True,
             ),
         ]
         regularization_2 = [
             nn.Conv3d(
                 in_channels=4,
-                out_channels=8,
+                out_channels=16,
                 kernel_size=3,
                 dilation=2,
                 padding="same",
-                bias=False,
+                bias=True,
             ),
             nn.LeakyReLU(inplace=True),
             nn.Conv3d(
-                in_channels=8,
-                out_channels=8,
+                in_channels=16,
+                out_channels=32,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
-                bias=False,
+                bias=True,
             ),
         ]
 
         fuse = [
             nn.Conv3d(
-                in_channels=16,
-                out_channels=3,
-                kernel_size=1,
+                in_channels=64,
+                out_channels=32,
+                kernel_size=3,
                 dilation=1,
                 padding="same",
-                bias=False,
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=32,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
             ),
         ]
 
-        self.tau_map = nn.Sequential(*tau_map)
         self.regularization_1 = nn.Sequential(*regularization_1)
         self.regularization_2 = nn.Sequential(*regularization_2)
         self.fuse = nn.Sequential(*fuse)
@@ -1018,13 +1065,20 @@ class DemonsVectorFieldBooster(nn.Module):
         self,
         moving_image: torch.Tensor,
         fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        vector_field: torch.Tensor,
         image_spacing: torch.Tensor,
     ) -> torch.Tensor:
-        vector_field = torch.zeros((1, 3) + self.shape, device=moving_image.device)
+        vector_field_boost = torch.zeros(
+            (1, 3) + self.shape, device=moving_image.device
+        )
 
         for i in range(self.n_iterations):
-            if i > 0:
-                moving_image = self.spatial_transformer(moving_image, vector_field)
+            composed_vector_field = vector_field_boost + self.spatial_transformer(
+                vector_field, vector_field_boost
+            )
+            moving_image = self.spatial_transformer(moving_image, composed_vector_field)
 
             diff = (moving_image - fixed_image) / (fixed_image + 1e-6)
             diff = F.softsign(diff)
@@ -1032,25 +1086,25 @@ class DemonsVectorFieldBooster(nn.Module):
             forces = self.forces(
                 moving_image,
                 fixed_image,
-                None,
-                None,
+                moving_mask,
+                fixed_mask,
                 image_spacing,
             )
 
             # forces = self.tau_map(forces)
-            updated_vector_field = vector_field + forces
+            updated_vector_field_boost = vector_field_boost + forces
 
-            updated_vector_field_1 = self.regularization_1(
-                torch.concat((updated_vector_field, diff), dim=1)
+            updated_vector_field_boost_1 = self.regularization_1(
+                torch.concat((updated_vector_field_boost, diff), dim=1)
             )
-            updated_vector_field_2 = self.regularization_2(
-                torch.concat((updated_vector_field, diff), dim=1)
+            updated_vector_field_boost_2 = self.regularization_2(
+                torch.concat((updated_vector_field_boost, diff), dim=1)
             )
-            vector_field = vector_field + self.fuse(
+            vector_field_boost = vector_field_boost + self.fuse(
                 torch.concat(
-                    (updated_vector_field_1, updated_vector_field_2),
+                    (updated_vector_field_boost_1, updated_vector_field_boost_2),
                     dim=1,
                 )
             )
 
-        return vector_field
+        return vector_field_boost

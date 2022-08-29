@@ -762,6 +762,8 @@ class NGFForces3d(BaseForces3d):
 
 
 if __name__ == "__main__":
+    import time
+
     d1 = GaussianSmoothing3d(
         sigma=(1.0, 2.0, 3.0),
         # radius=(1, 2, 3),
@@ -772,10 +774,11 @@ if __name__ == "__main__":
     d2 = GaussianSmoothing3d(
         sigma=(1.0, 2.0, 3.0), radius=(1, 2, 3), sigma_cutoff=None, force_same_size=True
     )
-
+    t = time.time()
     d3 = GaussianSmoothing3d(
         sigma=(1.0, 2.0, 3.0), radius=(1, 2, 3), sigma_cutoff=None, force_same_size=True
     )
+    print(time.time() - t)
 
     print(d1.kernel_size)
     print(d2.kernel_size)

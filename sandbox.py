@@ -95,12 +95,18 @@ parameter_guesser = ParameterGuesser(
 )
 parameter_guesser.fit()
 
+from vroc.decay import half_life_to_lambda
+
 params = {
     "iterations": 800,
     "tau": 2.25,
+    "tau_level_decay": 0.0,
+    "tau_iteration_decay": 0.0,
     "sigma_x": 1.25,
     "sigma_y": 1.25,
     "sigma_z": 1.25,
+    # "sigma_level_decay": half_life_to_lambda(-32),
+    # "sigma_iteration_decay": 0.0, #half_life_to_lambda(3200),
     "n_levels": 3,
 }
 
@@ -157,8 +163,8 @@ for case in range(101, 111):
         force_type="demons",
         gradient_type="active",
         valid_value_range=(-1024, 3071),
-        early_stopping_delta=0.0000,
-        early_stopping_window=100,
+        early_stopping_delta=0.00001,
+        early_stopping_window=400,
         default_parameters=params,
         debug=False,
     )
@@ -178,8 +184,8 @@ for case in range(101, 111):
         f"NLST_0{case}: "
         # f"tre_before={np.mean(tre_before):.2f}, "
         # f"tre_after={np.mean(tre_after):.2f}, "
-        f"tre_loss_before={loss_before:.2f}, "
-        f"tre_loss_after={loss_after:.2f}"
+        f"tre_loss_before={loss_before:.3f}, "
+        f"tre_loss_after={loss_after:.3f}"
     )
     tres_before.append(np.mean(loss_before))
     tres_after.append(np.mean(loss_after))
@@ -188,6 +194,7 @@ for case in range(101, 111):
         animation = debug_info["animation"]
         writer = FFMpegWriter(fps=1)
         animation.save("registration.mp4", writer=writer)
+
 
 print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")
 print(f"after: mean TRE={np.mean(tres_after)}, std TRE={np.std(tres_after)}")
