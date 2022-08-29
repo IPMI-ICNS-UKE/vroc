@@ -62,3 +62,20 @@ class OrientedHistogram:
             )
 
         return hist / n_voxels
+
+
+if __name__ == "__main__":
+    import torch
+
+    a = np.random.random(100)
+    b = np.random.random(100)
+    w = np.random.random(100)
+
+    hist, _, _ = np.histogram2d(
+        a,
+        b,
+        bins=(10, 20),
+        range=((0, 1), (0, 1)),
+        weights=w,
+        density=False,
+    )

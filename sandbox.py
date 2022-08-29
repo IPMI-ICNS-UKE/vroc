@@ -88,12 +88,12 @@ def load(
     )
 
 
-# feature_extractor = OrientedHistogramFeatureExtrator(device=DEVICE)
-# parameter_guesser = ParameterGuesser(
-#     database_filepath="/datalake/learn2reg/best_parameters.sqlite",
-#     parameters_to_guess=('sigma_x', 'sigma_y', 'sigma_z')
-# )
-# parameter_guesser.fit()
+feature_extractor = OrientedHistogramFeatureExtrator(device=DEVICE)
+parameter_guesser = ParameterGuesser(
+    database_filepath="/datalake/learn2reg/param_sampling.sqlite",
+    parameters_to_guess=("tau", "sigma_x", "sigma_y", "sigma_z", "n_levels"),
+)
+parameter_guesser.fit()
 
 params = {
     "iterations": 800,
@@ -106,8 +106,8 @@ params = {
 
 registration = VrocRegistration(
     roi_segmenter=None,
-    feature_extractor=None,
-    parameter_guesser=None,
+    # feature_extractor=feature_extractor,
+    # parameter_guesser=parameter_guesser,
     device=DEVICE,
 )
 
@@ -147,8 +147,7 @@ for case in range(101, 111):
 
     # union_mask = moving_mask | fixed_mask
 
-    debug = False
-    reg_result = registration.register(
+    registration_result = registration.register(
         moving_image=moving_image,
         fixed_image=fixed_image,
         moving_mask=moving_mask,
@@ -158,39 +157,15 @@ for case in range(101, 111):
         force_type="demons",
         gradient_type="active",
         valid_value_range=(-1024, 3071),
-        early_stopping_delta=0.00,
+        early_stopping_delta=0.0000,
         early_stopping_window=100,
         default_parameters=params,
-        debug=debug,
+        debug=False,
     )
 
-    if debug:
-        animation = reg_result.debug_info["animation"]
-        writer = FFMpegWriter(fps=1)
-        animation.save("registration.mp4", writer=writer)
+    vector_field = registration_result.composed_vector_field
 
-    # output_filepath = write_nlst_vector_field(
-    #     reg_result.composed_vector_field,
-    #     case=f"{case:04d}",
-    #     output_folder=OUTPUT_FOLDER,
-    # )
-    #
-    # disp_field = nib.load(output_filepath).get_fdata()
-    #
-    # tre_before = compute_tre_numpy(
-    #     moving_landmarks=moving_landmarks,
-    #     fixed_landmarks=fixed_landmarks,
-    #     vector_field=None,
-    #     image_spacing=image_spacing,
-    # )
-    # tre_after = compute_tre_numpy(
-    #     moving_landmarks=moving_landmarks,
-    #     fixed_landmarks=fixed_landmarks,
-    #     vector_field=disp_field,
-    #     image_spacing=image_spacing
-    # )
-
-    vf = torch.as_tensor(reg_result.composed_vector_field[np.newaxis], device=DEVICE)
+    vf = torch.as_tensor(vector_field[np.newaxis], device=DEVICE)
     ml = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
     fl = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
 
@@ -208,6 +183,11 @@ for case in range(101, 111):
     )
     tres_before.append(np.mean(loss_before))
     tres_after.append(np.mean(loss_after))
+
+    if debug_info := registration_result.debug_info:
+        animation = debug_info["animation"]
+        writer = FFMpegWriter(fps=1)
+        animation.save("registration.mp4", writer=writer)
 
 print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")
 print(f"after: mean TRE={np.mean(tres_after)}, std TRE={np.std(tres_after)}")

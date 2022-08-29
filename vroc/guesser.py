@@ -8,7 +8,7 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 
 from vroc.common_types import PathLike
-from vroc.database.client import DatabaseClient
+from vroc.hyperopt_database.client import DatabaseClient
 from vroc.logger import LoggerMixin
 
 
@@ -28,12 +28,20 @@ class ParameterGuesser(LoggerMixin):
         self._parameters_to_guess = parameters_to_guess
 
     def fit(self):
-        self._image_pairs = self._client.fetch_image_pair_features()
+        self._image_pairs = self._client.fetch_image_pairs()
 
-        features = np.array(
-            [image_pair["features"] for image_pair in self._image_pairs]
-        )
+        features = []
+        for image_pair in self._image_pairs:
+            feature = self._client.fetch_image_pair_feature(
+                moving_image=image_pair["moving_image"],
+                fixed_image=image_pair["fixed_image"],
+                feature_name="OH_16",
+            )
+            features.append(feature)
 
+        features = np.array(features, dtype=np.float32)
+
+        # flatten oriented histograms
         features = features.reshape(len(features), -1)
 
         self.logger.info(f"Fitting UMAP on features with shape {features.shape}")
@@ -61,10 +69,13 @@ class ParameterGuesser(LoggerMixin):
         index = int(indices.squeeze())
         nearest_image_pair = self._image_pairs[index]
 
-        parameters = self._client.fetch_best_parameters(
+        metric = self._client.fetch_metric("TRE_MEAN")
+        best_run = self._client.fetch_best_run(
             moving_image=nearest_image_pair["moving_image"],
             fixed_image=nearest_image_pair["fixed_image"],
+            metric=metric,
         )
+        parameters = best_run["parameters"]
 
         if self._parameters_to_guess is not None:
             parameters = {

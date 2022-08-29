@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import numpy as np
 import pandas as pd
 from peewee import JOIN, prefetch
+from sklearn.metrics.pairwise import cosine_distances
 
 import vroc.database.models as orm
 from vroc.common_types import PathLike
@@ -114,6 +115,32 @@ class DatabaseClient(LoggerMixin):
 
         return runs
 
+    def fetch_best_run(
+        self, moving_image: orm.Image, fixed_image: orm.Image, metric: orm.Metric
+    ) -> dict:
+        return self.fetch_best_runs(
+            moving_image=moving_image, fixed_image=fixed_image, metric=metric, k=1
+        )[0]
+
+    def fetch_best_runs(
+        self,
+        moving_image: orm.Image,
+        fixed_image: orm.Image,
+        metric: orm.Metric,
+        k: int = 5,
+    ) -> List[dict]:
+        runs = self.fetch_runs(
+            moving_image=moving_image, fixed_image=fixed_image, metric=metric
+        )
+
+        reverse = not metric.lower_is_better
+
+        runs = sorted(
+            runs, key=lambda run: run["run_metrics"][0]["value_after"], reverse=reverse
+        )
+
+        return runs[:k]
+
     def fetch_image_pairs(self) -> List[Dict[str, orm.Image]]:
         image_pairs = orm.Run.select(
             orm.Run.moving_image, orm.Run.fixed_image
@@ -133,13 +160,18 @@ class DatabaseClient(LoggerMixin):
         fixed_image: orm.Image,
         feature_name: str,
         feature: np.ndarray,
+        overwrite: bool = False,
     ):
-        orm.ImagePairFeature.create(
+        query = orm.ImagePairFeature.insert(
             moving_image=moving_image,
             fixed_image=fixed_image,
             feature_name=feature_name,
             feature=pickle.dumps(feature),
         )
+        if overwrite:
+            query = query.on_conflict_replace()
+
+        query.execute()
 
     def fetch_image_pair_feature(
         self, moving_image: orm.Image, fixed_image: orm.Image, feature_name: str
@@ -194,7 +226,7 @@ class DatabaseClient(LoggerMixin):
 
 if __name__ == "__main__":
 
-    client = DatabaseClient("/datalake/learn2reg/param_sampling_copy.sqlite")
+    client = DatabaseClient("/datalake/learn2reg/param_sampling.sqlite")
 
     tre_mean = client.fetch_metric(name="TRE_MEAN")
     moving_image = client.fetch_image(
@@ -210,14 +242,24 @@ if __name__ == "__main__":
         dataset="NLST",
     )
 
-    runs = client.fetch_runs(moving_image, fixed_image, as_dataframe=True)
+    # runs = client.fetch_runs(moving_image, fixed_image, as_dataframe=True)
     image_pairs = client.fetch_image_pairs()
 
     for image_pair in image_pairs:
-        runs = client.fetch_runs(
+        runs = client.fetch_best_runs(
             moving_image=image_pair["moving_image"],
             fixed_image=image_pair["fixed_image"],
-            as_dataframe=True,
+            metric=tre_mean,
+            k=1000000,
         )
-        runs = runs.sort_values(by="tre_mean_after")
+
+        p = runs[0]["parameters"]
+        pp = runs[5000]["parameters"]
+
+        p = np.array(list(p.values())).reshape(1, -1)
+        pp = np.array(list(pp.values())).reshape(1, -1)
+
+        d = np.abs((p - pp) / p)
+        d = d.mean()
+
         break

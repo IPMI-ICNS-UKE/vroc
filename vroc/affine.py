@@ -166,7 +166,7 @@ def run_affine_registration(
         loss_function = mse_loss
 
     affine_transform = AffineTransform3d().to(device)
-    spatial_transformer = SpatialTransformer(shape=moving_image.shape[2:]).to(device)
+    spatial_transformer = SpatialTransformer(shape=moving_image.shape[-3:]).to(device)
 
     optimizer = NAdam(affine_transform.parameters(), lr=1e-3)
     scheduler = ReduceLROnPlateau(

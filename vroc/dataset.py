@@ -14,6 +14,7 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 from scipy.ndimage.morphology import binary_dilation
+from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, IterableDataset
 from tqdm import tqdm
 
@@ -281,18 +282,42 @@ class NLSTDataset(DatasetMixin, Dataset):
         root_dir: PathLike,
         i_worker: Optional[int] = None,
         n_worker: Optional[int] = None,
+        is_train: bool = True,
+        train_size: float = 1.0,
         dilate_masks: int = 0,
         as_sitk: bool = False,
+        unroll_vector_fields: bool = False,
     ):
         self.root_dir = root_dir
-        self.filepaths = self.fetch_filepaths(self.root_dir)
+        filepaths = self.fetch_filepaths(self.root_dir)
+
+        if train_size < 1.0:
+            train_filepaths, test_filepaths = train_test_split(
+                filepaths, train_size=train_size, random_state=1337
+            )
+            self.filepaths = train_filepaths if is_train else test_filepaths
+        else:
+            self.filepaths = filepaths
+
         self.i_worker = i_worker
         self.n_worker = n_worker
         self.dilate_masks = dilate_masks
         self.as_sitk = as_sitk
+        self.unroll_vector_fields = unroll_vector_fields
 
         if i_worker is not None and n_worker is not None:
             self.filepaths = self.filepaths[self.i_worker :: self.n_worker]
+
+        if self.unroll_vector_fields:
+            unrolled = []
+            for _filepaths in self.filepaths:
+                vector_fields = _filepaths.pop("precomputed_vector_fields")
+
+                for vector_field in vector_fields:
+                    unrolled.append(
+                        {**_filepaths, "precomputed_vector_fields": [vector_field]}
+                    )
+            self.filepaths = unrolled
 
     @staticmethod
     @convert("root_dir", Path)
@@ -406,6 +431,13 @@ class NLSTDataset(DatasetMixin, Dataset):
             fixed_mask = np.asarray(fixed_mask[np.newaxis], dtype=np.float32)
             moving_mask = np.asarray(moving_mask[np.newaxis], dtype=np.float32)
 
+            random_vector_field = random.choice(
+                self.filepaths[item]["precomputed_vector_fields"]
+            )
+
+            with open(random_vector_field, "rb") as f:
+                random_vector_field = pickle.load(f)
+
             data = {
                 "moving_image_name": str(
                     self.filepaths[item]["moving_image"].relative_to(self.root_dir)
@@ -421,9 +453,7 @@ class NLSTDataset(DatasetMixin, Dataset):
                 "fixed_keypoints": fixed_keypoints,
                 "image_shape": image_shape,
                 "image_spacing": image_spacing,
-                "precomputed_vector_fields": self.filepaths[item][
-                    "precomputed_vector_fields"
-                ],
+                "precomputed_vector_field": random_vector_field,
             }
 
             return data
@@ -473,5 +503,11 @@ class AutoencoderDataset(DatasetMixin, Dataset):
 
 
 if __name__ == "__main__":
-    dataset = NLSTDataset(root_dir=Path("/datalake/learn2reg/NLST"), as_sitk=True)
-    data = next(iter(dataset))
+    dataset = NLSTDataset(
+        root_dir=Path("/datalake/learn2reg/NLST"),
+        as_sitk=False,
+        unroll_vector_fields=True,
+    )
+    # dataset = iter(dataset)
+    # data = next(dataset)
+    # dataa = next(dataset)

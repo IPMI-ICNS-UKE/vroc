@@ -1,14 +1,11 @@
 import logging
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
-from peewee import IntegrityError
 
 from vroc.feature_extractor import OrientedHistogramFeatureExtrator
 from vroc.hyperopt_database.client import DatabaseClient
-from vroc.hyperopt_database.client import DatabaseClient as HyperoptDatabaseClient
 from vroc.logger import LogFormatter
 
 handler = logging.StreamHandler()
@@ -22,15 +19,15 @@ logging.getLogger("vroc").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path("/datalake/learn2reg/NLST")
+OVERWRITE = True
 
-client = DatabaseClient("/datalake/learn2reg/param_sampling_copy.sqlite")
+client = DatabaseClient("/datalake/learn2reg/param_sampling.sqlite")
 
-feature_extractor = OrientedHistogramFeatureExtrator(n_bins=16, device="cuda:1")
+feature_extractor = OrientedHistogramFeatureExtrator(n_bins=16, device="cuda:0")
 
 image_pairs = client.fetch_image_pairs()
 
 for image_pair in image_pairs:
-
     moving_image = image_pair["moving_image"]
     fixed_image = image_pair["fixed_image"]
 
@@ -66,12 +63,10 @@ for image_pair in image_pairs:
         image_spacing=image_spacing,
     )
 
-    try:
-        client.insert_image_pair_feature(
-            moving_image=moving_image,
-            fixed_image=fixed_image,
-            feature_name=feature_extractor.name,
-            feature=feature,
-        )
-    except IntegrityError:
-        pass
+    client.insert_image_pair_feature(
+        moving_image=moving_image,
+        fixed_image=fixed_image,
+        feature_name=feature_extractor.feature_name,
+        feature=feature,
+        overwrite=True,
+    )

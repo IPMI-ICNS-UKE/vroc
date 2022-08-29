@@ -8,12 +8,13 @@ import SimpleITK as sitk
 import torch
 
 from vroc.affine import run_affine_registration
-from vroc.common_types import FloatTuple3D, Image, Number
+from vroc.common_types import FloatTuple3D, Image, Number, TorchDevice
+from vroc.convert import as_tensor
 from vroc.decorators import timing
 from vroc.guesser import ParameterGuesser
 from vroc.logger import LoggerMixin
 from vroc.metrics import root_mean_squared_error
-from vroc.models import VarReg3d
+from vroc.models import DemonsVectorFieldBooster, VarReg3d
 
 
 @dataclass
@@ -27,8 +28,8 @@ class RegistrationResult:
 
 class VrocRegistration(LoggerMixin):
     DEFAULT_REGISTRATION_PARAMETERS = {
-        "iterations": 1000,
-        "tau": 2.0,
+        "iterations": 800,
+        "tau": 2.25,
         "sigma_x": 1.25,
         "sigma_y": 1.25,
         "sigma_z": 1.25,
@@ -37,10 +38,10 @@ class VrocRegistration(LoggerMixin):
 
     def __init__(
         self,
-        roi_segmenter,
+        roi_segmenter=None,
         feature_extractor: "FeatureExtractor" | None = None,
         parameter_guesser: ParameterGuesser | None = None,
-        device: str = "cuda",
+        device: TorchDevice = "cuda",
     ):
         self.roi_segmenter = roi_segmenter
 
@@ -88,10 +89,10 @@ class VrocRegistration(LoggerMixin):
     @timing()
     def register(
         self,
-        moving_image: np.ndarray,
-        fixed_image: np.ndarray,
-        moving_mask: np.ndarray | None = None,
-        fixed_mask: np.ndarray | None = None,
+        moving_image: np.ndarray | torch.Tensor,
+        fixed_image: np.ndarray | torch.Tensor,
+        moving_mask: np.ndarray | torch.Tensor | None = None,
+        fixed_mask: np.ndarray | torch.Tensor | None = None,
         image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         register_affine: bool = True,
         affine_loss_fn: Callable | None = None,
@@ -110,17 +111,27 @@ class VrocRegistration(LoggerMixin):
             default_parameters or VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS
         )
 
-        # add batch and color dimension and move to specified device
-        moving_image = torch.as_tensor(moving_image[np.newaxis, np.newaxis]).to(
-            self.device
+        # n_spatial_dims is defined by length of image_spacing
+        n_spatial_dims = len(image_spacing)
+        if n_spatial_dims not in (3,):
+            raise NotImplementedError(
+                "Registration is currently only implemented for volumetric (3D) images"
+            )
+
+        # cast to torch tensors if inputs are not torch tensors
+        # add batch and color dimension and move to specified device if needed
+        moving_image = as_tensor(
+            moving_image, n_dim=5, dtype=torch.float32, device=self.device
         )
-        fixed_image = torch.as_tensor(fixed_image[np.newaxis, np.newaxis]).to(
-            self.device
+        fixed_image = as_tensor(
+            fixed_image, n_dim=5, dtype=torch.float32, device=self.device
         )
-        moving_mask = torch.as_tensor(moving_mask[np.newaxis, np.newaxis]).to(
-            self.device
+        moving_mask = as_tensor(
+            moving_mask, n_dim=5, dtype=torch.bool, device=self.device
         )
-        fixed_mask = torch.as_tensor(fixed_mask[np.newaxis, np.newaxis]).to(self.device)
+        fixed_mask = as_tensor(
+            fixed_mask, n_dim=5, dtype=torch.bool, device=self.device
+        )
 
         if valid_value_range:
             moving_image, fixed_image = self._clip_images(
@@ -144,23 +155,6 @@ class VrocRegistration(LoggerMixin):
             )
         else:
             affine_transform_vector_field = None
-
-            # if debug:
-            #     # calculate RMSE before and after affine registration
-            #     before = root_mean_squared_error(
-            #         image=moving_image.as_numpy(),
-            #         reference_image=fixed_image.as_numpy(),
-            #         mask=fixed_mask.as_numpy(),
-            #     )
-            #     after = root_mean_squared_error(
-            #         image=warped_affine_moving_image.as_numpy(),
-            #         reference_image=fixed_image.as_numpy(),
-            #         mask=fixed_mask.as_numpy(),
-            #     )
-            #
-            #     self.logger.debug(
-            #         f"Affine registration: RMSE before: {before}, RMSE after {after}"
-            #     )
 
         # handle ROIs
         # passed masks overwrite ROI segmenter
@@ -230,6 +224,23 @@ class VrocRegistration(LoggerMixin):
                 original_image_spacing=image_spacing,
                 initial_vector_field=affine_transform_vector_field,
             )
+
+            # composed_vector_field = varreg_result["composed_vector_field"]
+            #
+            # booster = DemonsVectorFieldBooster(
+            #     shape=composed_vector_field.shape[2:], n_iterations=5
+            # )
+            # state = torch.load("/datalake/learn2reg/demons_vector_field_booster.pth")
+            # booster.load_state_dict(state["model"])
+            # booster = booster.to(self.device)
+            #
+            # boosted = booster(
+            #     (moving_image + 1024) / 4095,
+            #     (fixed_image + 1024) / 4095,
+            #     composed_vector_field,
+            #     image_spacing,
+            # )
+            # varreg_result["composed_vector_field"] = boosted
 
             warped_moving_image = (
                 varreg_result["warped_moving_image"].cpu().numpy().squeeze(axis=(0, 1))

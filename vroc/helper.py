@@ -330,3 +330,29 @@ def binary_dilation(mask: torch.Tensor, kernel_size: IntTuple3D) -> torch.Tensor
     dilated = F.conv3d(mask, kernel, padding="same")
 
     return torch.clip(dilated, 0, 1)
+
+
+def compose_vector_fields(
+    vector_field_1: torch.Tensor,
+    vector_field_2: torch.Tensor,
+    spatial_transformer: "SpatialTransformer" | None = None,
+) -> torch.Tensor:
+    if (n_dimensions := vector_field_1.ndim) != vector_field_2.ndim != 5:
+        raise NotImplementedError(
+            "Currently only imlemented for 3D images, i.e. 5D input tensors"
+        )
+
+    if (shape := vector_field_1.shape) != vector_field_2.shape:
+        raise RuntimeError(
+            f"Shape mismatch between vector fields: "
+            f"{vector_field_1.shape} vs. {vector_field_2.shape}"
+        )
+
+    n_spatial_dimensions = n_dimensions.ndim - 2
+
+    if not spatial_transformer:
+        spatial_transformer = SpatialTransformer(
+            shape=shape[-n_spatial_dimensions:], mode="bilinear"
+        )
+
+    return vector_field_2 + spatial_transformer(vector_field_1, vector_field_2)
