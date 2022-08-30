@@ -535,9 +535,10 @@ class DemonForces3d(BaseForces3d):
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
         )
-        gamma = 1 / (
-            (sum(i**2 for i in original_image_spacing)) / len(original_image_spacing)
-        )
+        # gamma = 1 / (
+        #     (sum(i**2 for i in original_image_spacing)) / len(original_image_spacing)
+        # )
+        gamma = 1
         # calculcate squared L2 of grad, i.e., || grad ||^2
         l2_grad = total_grad.pow(2).sum(dim=1, keepdim=True)
         epsilon = 1e-6  # to prevent division by zero
