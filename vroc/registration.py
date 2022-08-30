@@ -358,7 +358,7 @@ class VrocRegistration(LoggerMixin):
 
         model = model.to(self.device)
 
-        moving_image = torch.clone(registration_result.warped_moving_image)
+        moving_image = torch.clone(registration_result.moving_image)
         fixed_image = torch.clone(registration_result.fixed_image)
 
         moving_image = (moving_image - valid_value_range[0]) / (
@@ -441,6 +441,9 @@ class VrocRegistration(LoggerMixin):
         warped_moving_image = model.spatial_transformer(
             moving_image, composed_boosted_vector_field
         )
+        warped_moving_image = (
+            warped_moving_image * (valid_value_range[1] - valid_value_range[0])
+        ) + valid_value_range[0]
         registration_result.warped_moving_image = warped_moving_image
         registration_result.vector_fields.append(vector_field_boost)
 

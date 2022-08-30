@@ -14,7 +14,12 @@ from torch.optim import Adam
 from vroc.common_types import PathLike
 from vroc.feature_extractor import OrientedHistogramFeatureExtrator
 from vroc.guesser import ParameterGuesser
-from vroc.helper import compute_tre_numpy, compute_tre_sitk, read_landmarks
+from vroc.helper import (
+    compute_tre_numpy,
+    compute_tre_sitk,
+    read_landmarks,
+    rescale_range,
+)
 from vroc.logger import LogFormatter
 from vroc.loss import TRELoss, mse_loss, ncc_loss, ngf_loss
 from vroc.models import DemonsVectorFieldBooster
@@ -37,6 +42,7 @@ ROOT_DIR = next(p for p in ROOT_DIR if p.exists())
 FOLDER = "NLST_Validation"
 
 OUTPUT_FOLDER = Path(f"{ROOT_DIR}/{FOLDER}/predictions")
+OUTPUT_FOLDER.mkdir(exist_ok=True)
 
 DEVICE = "cuda:0"
 
@@ -122,7 +128,7 @@ registration = VrocRegistration(
 tres_before = []
 tres_after = []
 t_start = time.time()
-for case in range(106, 107):
+for case in range(101, 111):
     fixed_landmarks = read_landmarks(
         f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
         sep=" ",
@@ -172,7 +178,7 @@ for case in range(106, 107):
     # )
 
     model = DemonsVectorFieldBooster(shape=(224, 192, 224), n_iterations=4).to(DEVICE)
-    optimizer = Adam(model.parameters(), lr=1e-4)
+    optimizer = Adam(model.parameters(), lr=1e-3)
 
     moving_keypoints = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
     fixed_keypoints = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
@@ -202,6 +208,35 @@ for case in range(106, 107):
     )
 
     vector_field = registration_result.composed_vector_field
+    warped_moving_image = registration_result.warped_moving_image.swapaxes(0, 2)
+
+    warped_moving_image = sitk.GetImageFromArray(warped_moving_image)
+    warped_moving_image.CopyInformation(reference_image)
+    sitk.WriteImage(
+        warped_moving_image, str(OUTPUT_FOLDER / f"warped_image_{case}_{case}.nii.gz")
+    )
+
+    output_filepath = write_nlst_vector_field(
+        vector_field,
+        case=f"{case:04d}",
+        output_folder=OUTPUT_FOLDER,
+    )
+
+    disp_field = nib.load(output_filepath).get_fdata()
+    disp_field = np.moveaxis(disp_field, -1, 0)
+
+    tre_before = compute_tre_numpy(
+        moving_landmarks=moving_landmarks,
+        fixed_landmarks=fixed_landmarks,
+        vector_field=None,
+        image_spacing=image_spacing,
+    )
+    tre_after = compute_tre_numpy(
+        moving_landmarks=moving_landmarks,
+        fixed_landmarks=fixed_landmarks,
+        vector_field=disp_field,
+        image_spacing=image_spacing,
+    )
 
     vf = torch.as_tensor(vector_field[np.newaxis], device=DEVICE)
 
@@ -218,8 +253,8 @@ for case in range(106, 107):
 
     print(
         f"NLST_0{case}: "
-        # f"tre_before={np.mean(tre_before):.2f}, "
-        # f"tre_after={np.mean(tre_after):.2f}, "
+        f"tre_before={np.mean(tre_before):.2f}, "
+        f"tre_after={np.mean(tre_after):.2f}, "
         f"tre_loss_before={loss_before:.3f}, "
         f"tre_loss_after={loss_after:.3f}"
     )
