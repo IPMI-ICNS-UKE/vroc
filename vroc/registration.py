@@ -387,7 +387,7 @@ class VrocRegistration(LoggerMixin):
             image_spacing,
         )
         tre_metric_before_boosting = tre_loss_before_boosting.sqrt().mean()
-
+        max_iteration_length = len(str(n_iterations))
         for i_iteration in range(n_iterations):
 
             optimizer.zero_grad()
@@ -430,12 +430,19 @@ class VrocRegistration(LoggerMixin):
             gradient_scaler.update()
 
             self.logger.info(
+                f"Train boosting, iteration {i_iteration:0{max_iteration_length}d} / "
                 f"loss: {loss:.6f} / "
                 f"TRE before: {tre_metric_before_boosting} / "
                 f"TRE after: {tre_metric_after_boosting}"
             )
 
         registration_result.composed_vector_field = composed_boosted_vector_field
+        # warp moving image with composed boosed vector field
+        warped_moving_image = model.spatial_transformer(
+            moving_image, composed_boosted_vector_field
+        )
+        registration_result.warped_moving_image = warped_moving_image
+        registration_result.vector_fields.append(vector_field_boost)
 
         if not return_as_tensor:
             registration_result.to_numpy()
