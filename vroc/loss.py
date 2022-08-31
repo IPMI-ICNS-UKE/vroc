@@ -160,3 +160,45 @@ def ngf_loss(
     value = 0.5 * torch.masked_select(-value.pow(2), mask)
 
     return value.mean()
+
+
+def jacobian_determinant(vector_field: torch.Tensor) -> torch.Tensor:
+    # vector field has shape (1, 3, x, y, z)
+    dx, dy, dz = torch.gradient(vector_field, dim=(2, 3, 4))
+
+    # add identity matrix: det(dT/dx) = det(I + du/dx)
+    dx[:, 0] = dx[:, 0] + 1
+    dy[:, 1] = dy[:, 1] + 1
+    dz[:, 2] = dz[:, 2] + 1
+
+    # Straightforward application of rule of sarrus yields the following lines.
+
+    # sarrus_plus_1 = dx[:, 0] * dy[:, 1] * dz[:, 2]
+    # sarrus_plus_2 = dy[:, 0] * dz[:, 1] * dx[:, 2]
+    # sarrus_plus_3 = dz[:, 0] * dx[:, 1] * dy[:, 2]
+    #
+    # sarrus_minus_1 = dx[:, 2] * dy[:, 1] * dz[:, 0]
+    # sarrus_minus_2 = dy[:, 2] * dz[:, 1] * dx[:, 0]
+    # sarrus_minus_3 = dz[:, 2] * dx[:, 1] * dy[:, 0]
+    #
+    # det_j = (sarrus_plus_1 + sarrus_plus_2 + sarrus_plus_3) - (
+    #     sarrus_minus_1 + sarrus_minus_2 + sarrus_minus_3
+    # )
+
+    # However, we factor out ∂VFx/∂x, ∂VFx/∂y, ∂VFx/∂z to save a few FLOPS:
+
+    det_j = (
+        dx[:, 0] * (dy[:, 1] * dz[:, 2] - dy[:, 2] * dz[:, 1])
+        + dy[:, 0] * (dz[:, 1] * dx[:, 2] - dz[:, 2] * dx[:, 1])
+        + dz[:, 0] * (dx[:, 1] * dy[:, 2] - dx[:, 2] * dy[:, 1])
+    )
+
+    return det_j[:, None]
+
+
+def smooth_vector_field_loss(
+    vector_field: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor:
+    det_j = jacobian_determinant(vector_field)
+
+    return det_j[mask].std()

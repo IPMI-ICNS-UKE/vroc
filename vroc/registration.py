@@ -15,7 +15,7 @@ from vroc.convert import as_tensor
 from vroc.decorators import timing
 from vroc.guesser import ParameterGuesser
 from vroc.logger import LoggerMixin
-from vroc.loss import TRELoss
+from vroc.loss import TRELoss, smooth_vector_field_loss
 from vroc.metrics import root_mean_squared_error
 from vroc.models import DemonsVectorFieldBooster, VarReg3d
 
@@ -423,7 +423,14 @@ class VrocRegistration(LoggerMixin):
                 # if loss > 0:
                 #     loss = loss**2
 
-                loss = tre_metric_after_boosting
+                losses = {
+                    "tre": tre_metric_after_boosting - tre_metric_before_boosting,
+                    "smooth": smooth_vector_field_loss(
+                        vector_field=composed_boosted_vector_field, mask=fixed_mask
+                    ),
+                }
+
+                loss = 1.0 * losses["tre"] + 0.0 * losses["smooth"]
 
             gradient_scaler.scale(loss).backward()
             gradient_scaler.step(optimizer)
@@ -431,7 +438,7 @@ class VrocRegistration(LoggerMixin):
 
             self.logger.info(
                 f"Train boosting, iteration {i_iteration:0{max_iteration_length}d} / "
-                f"loss: {loss:.6f} / "
+                f"loss: {loss:.4f}, tre: {losses['tre']:.4f}, smooth: {losses['smooth']:.4f}) / "
                 f"TRE before: {tre_metric_before_boosting} / "
                 f"TRE after: {tre_metric_after_boosting}"
             )

@@ -20,8 +20,10 @@ from vroc.helper import (
     read_landmarks,
     rescale_range,
 )
+from vroc.l2r_eval import calculate_l2r_smoothness
 from vroc.logger import LogFormatter
 from vroc.loss import TRELoss, mse_loss, ncc_loss, ngf_loss
+from vroc.metrics import jacobian_determinant
 from vroc.models import DemonsVectorFieldBooster
 from vroc.registration import VrocRegistration
 
@@ -41,7 +43,7 @@ ROOT_DIR = (
 ROOT_DIR = next(p for p in ROOT_DIR if p.exists())
 FOLDER = "NLST_Validation"
 
-OUTPUT_FOLDER = Path(f"{ROOT_DIR}/{FOLDER}/predictions")
+OUTPUT_FOLDER = Path(f"{ROOT_DIR}/{FOLDER}/predictions/non_boosted")
 OUTPUT_FOLDER.mkdir(exist_ok=True)
 
 DEVICE = "cuda:0"
@@ -127,7 +129,10 @@ registration = VrocRegistration(
 
 tres_before = []
 tres_after = []
+smoothnesses = []
 t_start = time.time()
+
+
 for case in range(101, 111):
     fixed_landmarks = read_landmarks(
         f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
@@ -161,6 +166,9 @@ for case in range(101, 111):
 
     # union_mask = moving_mask | fixed_mask
 
+    moving_keypoints = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
+    fixed_keypoints = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
+
     # registration_result = registration.register(
     #     moving_image=moving_image,
     #     fixed_image=fixed_image,
@@ -172,22 +180,20 @@ for case in range(101, 111):
     #     gradient_type="active",
     #     valid_value_range=(-1024, 3071),
     #     early_stopping_delta=0.00001,
-    #     early_stopping_window=400,
+    #     early_stopping_window=None,
     #     default_parameters=params,
     #     debug=False,
+    #     return_as_tensor=False,
     # )
 
     model = DemonsVectorFieldBooster(shape=(224, 192, 224), n_iterations=4).to(DEVICE)
-    optimizer = Adam(model.parameters(), lr=1e-3)
-
-    moving_keypoints = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
-    fixed_keypoints = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
+    optimizer = Adam(model.parameters(), lr=5e-4)
 
     registration_result = registration.register_and_train_boosting(
         # boosting specific kwargs
         model=model,
         optimizer=optimizer,
-        n_iterations=100,
+        n_iterations=200,
         moving_keypoints=moving_keypoints,
         fixed_keypoints=fixed_keypoints,
         # registration specific kwargs
@@ -202,41 +208,27 @@ for case in range(101, 111):
         gradient_type="active",
         valid_value_range=(-1024, 3071),
         early_stopping_delta=0.00001,
-        early_stopping_window=None,
+        early_stopping_window=400,
         default_parameters=params,
         debug=False,
     )
-
     vector_field = registration_result.composed_vector_field
-    warped_moving_image = registration_result.warped_moving_image.swapaxes(0, 2)
 
-    warped_moving_image = sitk.GetImageFromArray(warped_moving_image)
-    warped_moving_image.CopyInformation(reference_image)
-    sitk.WriteImage(
-        warped_moving_image, str(OUTPUT_FOLDER / f"warped_image_{case}_{case}.nii.gz")
-    )
+    smoothness = calculate_l2r_smoothness(vector_field, fixed_mask)
+    smoothnesses.append(smoothness)
 
-    output_filepath = write_nlst_vector_field(
-        vector_field,
-        case=f"{case:04d}",
-        output_folder=OUTPUT_FOLDER,
-    )
-
-    disp_field = nib.load(output_filepath).get_fdata()
-    disp_field = np.moveaxis(disp_field, -1, 0)
-
-    tre_before = compute_tre_numpy(
-        moving_landmarks=moving_landmarks,
-        fixed_landmarks=fixed_landmarks,
-        vector_field=None,
-        image_spacing=image_spacing,
-    )
-    tre_after = compute_tre_numpy(
-        moving_landmarks=moving_landmarks,
-        fixed_landmarks=fixed_landmarks,
-        vector_field=disp_field,
-        image_spacing=image_spacing,
-    )
+    # warped_moving_image = registration_result.warped_moving_image.swapaxes(0, 2)
+    # warped_moving_image = sitk.GetImageFromArray(warped_moving_image)
+    # warped_moving_image.CopyInformation(reference_image)
+    # sitk.WriteImage(
+    #     warped_moving_image, str(OUTPUT_FOLDER / f"warped_image_{case}_{case}.nii")
+    # )
+    #
+    # write_nlst_vector_field(
+    #     vector_field,
+    #     case=f"{case:04d}",
+    #     output_folder=OUTPUT_FOLDER,
+    # )
 
     vf = torch.as_tensor(vector_field[np.newaxis], device=DEVICE)
 
@@ -253,10 +245,9 @@ for case in range(101, 111):
 
     print(
         f"NLST_0{case}: "
-        f"tre_before={np.mean(tre_before):.2f}, "
-        f"tre_after={np.mean(tre_after):.2f}, "
         f"tre_loss_before={loss_before:.3f}, "
-        f"tre_loss_after={loss_after:.3f}"
+        f"tre_loss_after={loss_after:.3f}, "
+        f"smoothness={smoothness:.3f}, "
     )
     tres_before.append(np.mean(loss_before))
     tres_after.append(np.mean(loss_after))
@@ -269,5 +260,6 @@ for case in range(101, 111):
 
 print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")
 print(f"after: mean TRE={np.mean(tres_after)}, std TRE={np.std(tres_after)}")
+print(f"after: mean smoothness={np.mean(smoothnesses)}, std TRE={np.std(smoothnesses)}")
 
 print(f"run took {time.time() - t_start}")
