@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import scipy
 
@@ -79,9 +81,14 @@ def jacobian_determinant(disp):
     return jacdet
 
 
-def calculate_l2r_smoothness(vector_field: np.ndarray, mask: np.ndarray) -> float:
+def calculate_l2r_smoothness(
+    vector_field: np.ndarray, mask: np.ndarray | None
+) -> float:
     det_j = jacobian_determinant(vector_field[None]) + 3
     det_j = np.log(det_j.clip(1e-9, 1e9))
-    mask = mask[2:-2, 2:-2, 2:-2]
+    if mask is not None:
+        mask = mask[2:-2, 2:-2, 2:-2]
+    else:
+        mask = ...
 
     return det_j[mask].std()

@@ -387,6 +387,11 @@ class VrocRegistration(LoggerMixin):
             image_spacing,
         )
         tre_metric_before_boosting = tre_loss_before_boosting.sqrt().mean()
+
+        smoothness_before_boosting = smooth_vector_field_loss(
+            vector_field=composed_vector_field, mask=fixed_mask, l2r_variant=True
+        )
+
         max_iteration_length = len(str(n_iterations))
         for i_iteration in range(n_iterations):
 
@@ -417,20 +422,32 @@ class VrocRegistration(LoggerMixin):
                 )
 
                 tre_metric_after_boosting = tre_loss_after_boosting.sqrt().mean()
+                # tre_difference_loss = tre_metric_after_boosting - tre_metric_before_boosting
+                tre_ratio_loss = tre_metric_after_boosting / tre_metric_before_boosting
 
-                # loss = (tre_loss_after_boosting - tre_loss_before_boosting).mean()
-                # # penalize worsening of TRE more
-                # if loss > 0:
-                #     loss = loss**2
+                smoothness_after_boosting = smooth_vector_field_loss(
+                    vector_field=composed_boosted_vector_field,
+                    mask=fixed_mask,
+                    l2r_variant=True,
+                )
+
+                smoothness_ratio_loss = (
+                    smoothness_after_boosting / smoothness_before_boosting
+                )
+                # ratio < 1: better, ratio > 1 worse
+                # only penalize worsening of smoothness
+                if smoothness_ratio_loss < 1:
+                    smoothness_ratio_loss = 0.5 * smoothness_ratio_loss + 0.5
+                # smoothness_ratio_loss = torch.maximum(
+                #     smoothness_ratio_loss, torch.as_tensor(1.0)
+                # )
 
                 losses = {
-                    "tre": tre_metric_after_boosting - tre_metric_before_boosting,
-                    "smooth": smooth_vector_field_loss(
-                        vector_field=composed_boosted_vector_field, mask=fixed_mask
-                    ),
+                    "tre": tre_ratio_loss,
+                    "smooth": smoothness_ratio_loss,
                 }
 
-                loss = 1.0 * losses["tre"] + 0.0 * losses["smooth"]
+                loss = 1.0 * losses["tre"] + 1.0 * losses["smooth"]
 
             gradient_scaler.scale(loss).backward()
             gradient_scaler.step(optimizer)

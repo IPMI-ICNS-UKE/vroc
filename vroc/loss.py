@@ -197,8 +197,13 @@ def jacobian_determinant(vector_field: torch.Tensor) -> torch.Tensor:
 
 
 def smooth_vector_field_loss(
-    vector_field: torch.Tensor, mask: torch.Tensor
+    vector_field: torch.Tensor, mask: torch.Tensor, l2r_variant: bool = False
 ) -> torch.Tensor:
     det_j = jacobian_determinant(vector_field)
+
+    if l2r_variant:
+        det_j = det_j + 3
+        det_j = torch.clip(det_j, 1e-9, 1e9)
+        det_j = torch.log(det_j)
 
     return det_j[mask].std()
