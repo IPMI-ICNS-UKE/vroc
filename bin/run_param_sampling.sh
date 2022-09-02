@@ -1,3 +1,6 @@
+#!/bin/bash
+
+
 SESSION="VROC"
 
 SESSIONEXISTS=$(tmux list-sessions | grep $SESSION)
