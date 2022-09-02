@@ -21,10 +21,10 @@ if [ "$SESSIONEXISTS" = "" ]; then
   tmux new-window -t $SESSION:3 -n 'VROC 3'
   tmux send-keys -t 'VROC 3' 'conda activate vroc' C-m 'python sample_parameter_space.py /home/administrator/data/learn2reg/NLST /home/administrator/data/learn2reg/results/param_sampling.sqlite --n-worker 5 --i-worker 2 --device cuda:3' C-m
 
-  tmux new-window -t $SESSION:3 -n 'VROC 4'
+  tmux new-window -t $SESSION:4 -n 'VROC 4'
   tmux send-keys -t 'VROC 4' 'conda activate vroc' C-m 'python sample_parameter_space.py /home/administrator/data/learn2reg/NLST /home/administrator/data/learn2reg/results/param_sampling.sqlite --n-worker 5 --i-worker 3 --device cuda:4' C-m
 
-  tmux new-window -t $SESSION:3 -n 'VROC 5'
+  tmux new-window -t $SESSION:5 -n 'VROC 5'
   tmux send-keys -t 'VROC 5' 'conda activate vroc' C-m 'python sample_parameter_space.py /home/administrator/data/learn2reg/NLST /home/administrator/data/learn2reg/results/param_sampling.sqlite --n-worker 5 --i-worker 4 --device cuda:5' C-m
 fi
 
