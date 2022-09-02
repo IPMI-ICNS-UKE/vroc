@@ -326,7 +326,7 @@ class NLSTDataset(DatasetMixin, Dataset):
         image_folder: str = "imagesTr",
         mask_folder: str = "masksTr",
         keypoints_folder: str = "keypointsTr",
-        vector_fields_folder: str = "detailed_boosting_data",
+        vector_fields_folder: str = "detailed_boosting_dataa",
     ):
         root_dir: Path
 
@@ -431,12 +431,15 @@ class NLSTDataset(DatasetMixin, Dataset):
             fixed_mask = np.asarray(fixed_mask[np.newaxis], dtype=np.float32)
             moving_mask = np.asarray(moving_mask[np.newaxis], dtype=np.float32)
 
-            random_vector_field = random.choice(
-                self.filepaths[item]["precomputed_vector_fields"]
-            )
+            if self.filepaths[item]["precomputed_vector_fields"]:
+                random_vector_field = random.choice(
+                    self.filepaths[item]["precomputed_vector_fields"]
+                )
 
-            with open(random_vector_field, "rb") as f:
-                random_vector_field = pickle.load(f)
+                with open(random_vector_field, "rb") as f:
+                    random_vector_field = pickle.load(f)
+            else:
+                random_vector_field = None
 
             data = {
                 "moving_image_name": str(
@@ -506,8 +509,9 @@ if __name__ == "__main__":
     dataset = NLSTDataset(
         root_dir=Path("/datalake/learn2reg/NLST"),
         as_sitk=False,
-        unroll_vector_fields=True,
+        unroll_vector_fields=False,
     )
+    # dataset[0]
     # dataset = iter(dataset)
     # data = next(dataset)
     # dataa = next(dataset)
