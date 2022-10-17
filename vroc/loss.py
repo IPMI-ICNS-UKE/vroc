@@ -80,7 +80,7 @@ class TRELoss(nn.Module):
 
 
 class WarpedMSELoss(nn.Module):
-    def __init__(self, shape: IntTuple3D):
+    def __init__(self, shape: IntTuple3D | None):
         super().__init__()
         self.spatial_transformer = SpatialTransformer(shape=shape)
 

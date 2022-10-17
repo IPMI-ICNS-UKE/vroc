@@ -10,14 +10,20 @@ import torch.nn as nn
 import torch.optim as optim
 
 from vroc.affine import run_affine_registration
-from vroc.common_types import FloatTuple3D, Image, Number, TorchDevice
+from vroc.common_types import (
+    ArrayOrTensor,
+    FloatTuple2D,
+    FloatTuple3D,
+    Number,
+    TorchDevice,
+)
 from vroc.convert import as_tensor
 from vroc.decorators import timing
 from vroc.guesser import ParameterGuesser
 from vroc.logger import LoggerMixin
 from vroc.loss import TRELoss, smooth_vector_field_loss
 from vroc.metrics import root_mean_squared_error
-from vroc.models import DemonsVectorFieldBooster, VarReg3d
+from vroc.models import DemonsVectorFieldBooster, VarReg
 
 
 @dataclass
@@ -30,11 +36,13 @@ class RegistrationResult:
     composed_vector_field: np.ndarray | torch.Tensor
     vector_fields: List[np.ndarray | torch.Tensor]
 
-    # initial masks
+    # masks
     moving_mask: np.ndarray | torch.Tensor | None = None
+    warped_moving_mask: np.ndarray | torch.Tensor = None
     fixed_mask: np.ndarray | torch.Tensor | None = None
 
     warped_affine_moving_image: np.ndarray | torch.Tensor | None = None
+    warped_affine_moving_mask: np.ndarray | torch.Tensor | None = None
     debug_info: dict | None = None
 
     def to_numpy(self):
@@ -59,9 +67,11 @@ class RegistrationResult:
         self.vector_fields = cast(self.vector_fields)
 
         self.moving_mask = cast(self.moving_mask)
+        self.warped_moving_mask = cast(self.warped_moving_mask)
         self.fixed_mask = cast(self.fixed_mask)
 
         self.warped_affine_moving_image = cast(self.warped_affine_moving_image)
+        self.warped_affine_moving_mask = cast(self.warped_affine_moving_mask)
 
 
 class VrocRegistration(LoggerMixin):
@@ -76,6 +86,7 @@ class VrocRegistration(LoggerMixin):
         "sigma_level_decay": 0.0,
         "sigma_iteration_decay": 0.0,
         "n_levels": 3,
+        "largest_scale_factor": 1.0,
     }
 
     def __init__(
@@ -99,7 +110,7 @@ class VrocRegistration(LoggerMixin):
         self.device = device
 
     @property
-    def available_registration_parameters(self) -> Tuple[str]:
+    def available_registration_parameters(self) -> Tuple[str, ...]:
         return tuple(VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS.keys())
 
     def _get_parameter_value(self, parameters: List[dict], parameter_name: str):
@@ -124,20 +135,22 @@ class VrocRegistration(LoggerMixin):
         pass
 
     def _clip_images(
-        self, images: Sequence[np.ndarray | torch.Tensor], lower: Number, upper: Number
+        self, images: Sequence[ArrayOrTensor], lower: Number, upper: Number
     ):
         return tuple(image.clip(lower, upper) for image in images)
 
     @timing()
     def register(
         self,
-        moving_image: np.ndarray | torch.Tensor,
-        fixed_image: np.ndarray | torch.Tensor,
-        moving_mask: np.ndarray | torch.Tensor | None = None,
-        fixed_mask: np.ndarray | torch.Tensor | None = None,
-        image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+        moving_image: ArrayOrTensor,
+        fixed_image: ArrayOrTensor,
+        moving_mask: ArrayOrTensor | None = None,
+        fixed_mask: ArrayOrTensor | None = None,
+        image_spacing: FloatTuple2D | FloatTuple3D = (1.0, 1.0, 1.0),
         register_affine: bool = True,
-        affine_loss_fn: Callable | None = None,
+        affine_loss_function: Callable | None = None,
+        affine_iterations: int = 300,
+        affine_step_size: float = 1e-3,
         force_type: Literal["demons", "ncc", "ngf"] = "demons",
         gradient_type: Literal["active", "passive", "dual"] = "dual",
         segment_roi: bool = True,
@@ -147,33 +160,39 @@ class VrocRegistration(LoggerMixin):
         default_parameters: dict | None = None,
         return_as_tensor: bool = False,
         debug: bool = False,
+        debug_step_size: int = 10,
     ) -> RegistrationResult:
-        # these are default registration parameters used if no parameter guesser is
-        # passed or the given parameter guesser returns only a subset of parameters
-        self.default_parameters = (
-            default_parameters or VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS
-        )
-
         # n_spatial_dims is defined by length of image_spacing
         n_spatial_dims = len(image_spacing)
-        if n_spatial_dims not in (3,):
+        # n_total_dims = n_spatial_dims + batch dim + color dim
+        n_total_dims = n_spatial_dims + 2
+        if n_spatial_dims not in {2, 3}:
             raise NotImplementedError(
-                "Registration is currently only implemented for volumetric (3D) images"
+                "Registration is currently only implemented for 2D and 3D images"
             )
+
+        # check if shapes match
+        if moving_image.shape != fixed_image.shape:
+            raise ValueError(
+                f"Shape mismatch between "
+                f"{moving_image.shape=} and {fixed_image.shape=}"
+            )
+
+        self.logger.info(f"Got images with shape {moving_image.shape}")
 
         # cast to torch tensors if inputs are not torch tensors
         # add batch and color dimension and move to specified device if needed
         moving_image = as_tensor(
-            moving_image, n_dim=5, dtype=torch.float32, device=self.device
+            moving_image, n_dim=n_total_dims, dtype=torch.float32, device=self.device
         )
         fixed_image = as_tensor(
-            fixed_image, n_dim=5, dtype=torch.float32, device=self.device
+            fixed_image, n_dim=n_total_dims, dtype=torch.float32, device=self.device
         )
         moving_mask = as_tensor(
-            moving_mask, n_dim=5, dtype=torch.bool, device=self.device
+            moving_mask, n_dim=n_total_dims, dtype=torch.bool, device=self.device
         )
         fixed_mask = as_tensor(
-            fixed_mask, n_dim=5, dtype=torch.bool, device=self.device
+            fixed_mask, n_dim=n_total_dims, dtype=torch.bool, device=self.device
         )
 
         if valid_value_range:
@@ -193,8 +212,9 @@ class VrocRegistration(LoggerMixin):
                 fixed_image=fixed_image,
                 moving_mask=moving_mask,
                 fixed_mask=fixed_mask,
-                loss_function=affine_loss_fn,
-                n_iterations=300,
+                loss_function=affine_loss_function,
+                n_iterations=affine_iterations,
+                step_size=affine_step_size,
             )
         else:
             affine_transform_vector_field = None
@@ -240,15 +260,27 @@ class VrocRegistration(LoggerMixin):
             )
             for param_name in self.available_registration_parameters
         }
+        # regularization_sigma is dependent on spatial dimension of the images
+        # 2D: (x, y), 3D: (x, y, z)
+        regularization_sigma = (
+            parameters["sigma_x"],
+            parameters["sigma_y"],
+            parameters["sigma_z"],
+        )[:n_spatial_dims]
 
+        # delete sigma_z so that it is not logged in the following logger call
+        if n_spatial_dims == 2:
+            del parameters["sigma_z"]
         self.logger.info(f"Start registration with parameters {parameters}")
 
         # run VarReg
         scale_factors = tuple(
-            1 / 2**i_level for i_level in reversed(range(parameters["n_levels"]))
+            parameters["largest_scale_factor"] / 2**i_level
+            for i_level in reversed(range(parameters["n_levels"]))
         )
+        self.logger.debug(f"Using image pyramid scale factors: {scale_factors}")
 
-        varreg = VarReg3d(
+        varreg = VarReg(
             iterations=parameters["iterations"],
             scale_factors=scale_factors,
             force_type=force_type,
@@ -256,17 +288,14 @@ class VrocRegistration(LoggerMixin):
             tau_level_decay=parameters["tau_level_decay"],
             tau_iteration_decay=parameters["tau_iteration_decay"],
             tau=parameters["tau"],
-            regularization_sigma=(
-                parameters["sigma_x"],
-                parameters["sigma_y"],
-                parameters["sigma_z"],
-            ),
+            regularization_sigma=regularization_sigma,
             sigma_level_decay=parameters["sigma_level_decay"],
             sigma_iteration_decay=parameters["sigma_iteration_decay"],
             restrict_to_mask_bbox=True,
             early_stopping_delta=early_stopping_delta,
             early_stopping_window=early_stopping_window,
             debug=debug,
+            debug_step_size=debug_step_size,
         ).to(self.device)
 
         with torch.inference_mode():
@@ -279,29 +308,15 @@ class VrocRegistration(LoggerMixin):
                 initial_vector_field=affine_transform_vector_field,
             )
 
-            # composed_vector_field = varreg_result["composed_vector_field"]
-            #
-            # booster = DemonsVectorFieldBooster(
-            #     shape=composed_vector_field.shape[2:], n_iterations=5
-            # )
-            # state = torch.load("/datalake/learn2reg/demons_vector_field_booster.pth")
-            # booster.load_state_dict(state["model"])
-            # booster = booster.to(self.device)
-            #
-            # boosted = booster(
-            #     (moving_image + 1024) / 4095,
-            #     (fixed_image + 1024) / 4095,
-            #     composed_vector_field,
-            #     image_spacing,
-            # )
-            # varreg_result["composed_vector_field"] = boosted
-
         result = RegistrationResult(
             moving_image=moving_image,
+            warped_moving_image=varreg_result["warped_moving_image"],
+            warped_affine_moving_image=varreg_result["warped_affine_moving_image"],
             fixed_image=fixed_image,
             moving_mask=moving_mask,
+            warped_moving_mask=varreg_result["warped_moving_mask"],
+            warped_affine_moving_mask=varreg_result["warped_affine_moving_mask"],
             fixed_mask=fixed_mask,
-            warped_moving_image=varreg_result["warped_moving_image"],
             composed_vector_field=varreg_result["composed_vector_field"],
             vector_fields=varreg_result["vector_fields"],
             debug_info=varreg_result["debug_info"],
@@ -344,7 +359,7 @@ class VrocRegistration(LoggerMixin):
             fixed_mask=fixed_mask,
             image_spacing=image_spacing,
             register_affine=register_affine,
-            affine_loss_fn=affine_loss_fn,
+            affine_loss_function=affine_loss_fn,
             force_type=force_type,
             gradient_type=gradient_type,
             segment_roi=segment_roi,

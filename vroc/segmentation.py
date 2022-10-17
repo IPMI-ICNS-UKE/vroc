@@ -6,7 +6,10 @@ import scipy.ndimage as ndi
 import torch
 import torch.nn as nn
 
-from vroc.helper import batch_array, rescale_range
+from vroc.common_types import TorchDevice
+from vroc.helper import batch_array, nearest_factor_pow_2, rescale_range
+from vroc.interpolation import resize
+from vroc.preprocessing import crop_or_pad
 
 
 class Segmenter2D(ABC):
@@ -91,12 +94,44 @@ class LungSegmenter2D(Segmenter2D):
         return image[:, np.newaxis]
 
 
-if __name__ == "__main__":
-    from vroc.models import UNet
+class LungSegmenter3D:
+    def __init__(self, model: nn.Module, device: TorchDevice):
+        self.model = model.to(device)
+        self.device = device
 
-    lung_segmenter = LungSegmenter2D(
-        model=UNet().to("cuda"),
-        state_filepath=Path(
-            "/home/tsentker/Documents/projects/ebolagnul/lung_segmenter.pth"
-        ),
-    )
+    def segment(self, image: np.ndarray, subsample: float = 2.0) -> np.ndarray:
+        image = np.asarray(image, dtype=np.float32)
+        if image.ndim != 3:
+            raise ValueError("Please pass a 3D image")
+
+        original_shape = image.shape
+
+        image = resize(
+            image, output_shape=tuple(s // subsample for s in original_shape)
+        )
+        unpadded_shape = image.shape
+        padded_shape = tuple(nearest_factor_pow_2(s) for s in unpadded_shape)
+
+        image, _ = crop_or_pad(image=image, mask=None, target_shape=padded_shape)
+        image = rescale_range(
+            image,
+            input_range=(-1024, 3071),
+            output_range=(0, 1),
+            clip=True,
+        )
+        image = torch.as_tensor(image[None, None], device=self.device)
+
+        self.model.eval()
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            prediction = self.model(image)
+            prediction = torch.sigmoid(prediction)
+
+        prediction = prediction.detach().cpu().numpy().squeeze(axis=(0, 1))
+        prediction, _ = crop_or_pad(
+            image=prediction, mask=None, target_shape=unpadded_shape
+        )
+
+        prediction = image = resize(prediction, output_shape=original_shape)
+        prediction = prediction > 0.5
+
+        return prediction

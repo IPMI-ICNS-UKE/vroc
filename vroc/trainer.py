@@ -43,7 +43,7 @@ class BaseTrainer(ABC, LoggerMixin):
 
         self.model = model
         self.optimizer = optimizer
-        self.device = device
+        self.device = torch.device(device)
         self.run_folder = run_folder
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -132,6 +132,10 @@ class BaseTrainer(ABC, LoggerMixin):
         self.log_info("started epoch", context="TRAIN")
         for data in self.train_loader:
             batch_metrics = self._train_on_batch(data)
+
+            batch_metrics_formatted = self._format_metric_dict(batch_metrics)
+            self.log_debug(f"metrics: {batch_metrics_formatted}", context="TRAIN")
+
             self._track_metrics(batch_metrics, context={"subset": "train"})
 
             yield batch_metrics
@@ -139,6 +143,17 @@ class BaseTrainer(ABC, LoggerMixin):
             self.i_step += 1
         self.i_epoch += 1
         self.log_info("finished epoch", context="TRAIN")
+
+    def _format_metric_dict(self, metrics: dict) -> str:
+        metrics_formatted = {
+            key: f"{value:.4f}" if isinstance(value, float) else str(value)
+            for key, value in metrics.items()
+        }
+        formatted_str = " / ".join(
+            f"{key}: {value}" for key, value in metrics_formatted.items()
+        )
+
+        return formatted_str
 
     @timing()
     def validate(self):
@@ -152,7 +167,9 @@ class BaseTrainer(ABC, LoggerMixin):
         metrics = []
         for data in self.val_loader:
             batch_metrics = self._validate_on_batch(data)
-            self.log_debug(f"metrics: {batch_metrics}", context="VAL")
+            batch_metrics_formatted = self._format_metric_dict(batch_metrics)
+
+            self.log_debug(f"metrics: {batch_metrics_formatted}", context="VAL")
             metrics.append(batch_metrics)
 
         metrics = concat_dicts(metrics, extend_lists=True)
@@ -173,10 +190,12 @@ class BaseTrainer(ABC, LoggerMixin):
         while True:
             # train one epoch, i.e. one dataset iteration
             for batch_metrics in self.train_one_epoch():
-                self.log_debug(f"metrics: {batch_metrics}", context="TRAIN")
-
-                if self.i_step > 0 and self.i_step % validation_interval == 0:
-                    # run validation
+                if (
+                    self.i_step > 0
+                    and self.val_loader
+                    and self.i_step % validation_interval == 0
+                ):
+                    # run validation at given intervals (if validation loader is given)
                     self.validate()
 
                 if self.i_step >= steps:

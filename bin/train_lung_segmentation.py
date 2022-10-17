@@ -150,7 +150,7 @@ class LungCTSegmentationTrainer(BaseTrainer):
             ax[0].set_title("image")
             ax[1].set_title("ground truth")
             ax[2].set_title("prediction")
-            fig.suptitle(image_id)
+            fig.suptitle(data)
 
             plots.append(Image(fig))
             # fig = px.imshow(image[..., mid_z_slice], zmin=0.0, zmax=0.5)
@@ -240,4 +240,4 @@ trainer = LungCTSegmentationTrainer(
     run_folder="/datalake/learn2reg/runs",
     experiment_name="lung_segmentation",
 )
-trainer.run(steps=100_000, validation_interval=1000)
+# trainer.run(steps=100_000, validation_interval=1000)

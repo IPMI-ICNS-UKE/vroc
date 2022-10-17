@@ -4,17 +4,14 @@ import numpy as np
 import SimpleITK as sitk
 from ipmi.registration.ct.landmarks import extract_lung_landmarks
 
-moving_images = sorted(
-    Path("/datalake/learn2reg/NLST_Validation/imagesTr").glob("*_0001.nii.gz")
-)
-fixed_images = sorted(
-    Path("/datalake/learn2reg/NLST_Validation/imagesTr").glob("*_0000.nii.gz")
-)
-fixed_masks = sorted(
-    Path("/datalake/learn2reg/NLST_Validation/masksTr").glob("*_0000.nii.gz")
-)
+FOLDER = Path("/datalake/learn2reg/NLST_testdata")
+STAGE = "Ts"
 
-keypoints_folder = Path("/datalake/learn2reg/NLST_Validation/keypointsTr")
+moving_images = sorted((FOLDER / f"images{STAGE}").glob("*_0001.nii.gz"))
+fixed_images = sorted((FOLDER / f"images{STAGE}").glob("*_0000.nii.gz"))
+fixed_masks = sorted((FOLDER / f"masks{STAGE}").glob("*_0000.nii.gz"))
+
+keypoints_folder = FOLDER / f"keypoints{STAGE}"
 keypoints_folder.mkdir(exist_ok=True)
 
 for moving_image_filepath, fixed_image_filepath, fixed_mask_filepath in zip(

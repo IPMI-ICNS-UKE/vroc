@@ -9,8 +9,37 @@ import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
 
-from vroc.common_types import IntTuple3D
+from vroc.common_types import IntTuple, IntTuple3D, Number
 from vroc.metrics import root_mean_squared_error
+
+
+def pad(image: np.ndarray, target_shape: IntTuple, pad_value: Number = 0.0):
+    if image.ndim != len(target_shape):
+        raise ValueError("Dimension mismatch")
+
+    if any(i > t for (i, t) in zip(image.shape, target_shape)):
+        raise ValueError(
+            f"Image of shape {image.shape} is too large "
+            f"for target shape of {target_shape}"
+        )
+
+    pad_width = [(0, 0)] * image.ndim
+    for i_axis in range(image.ndim):
+        if target_shape[i_axis] is not None:
+            if image.shape[i_axis] < target_shape[i_axis]:
+                # calculate left and right padding
+                padding = target_shape[i_axis] - image.shape[i_axis]
+                padding_left = padding // 2
+                padding_right = padding - padding_left
+
+                pad_width[i_axis] = (padding_left, padding_right)
+
+    return np.pad(
+        image,
+        pad_width,
+        mode="constant",
+        constant_values=pad_value,
+    )
 
 
 def crop_or_pad(
@@ -56,7 +85,8 @@ def crop_or_pad(
                 ] * image.ndim
                 cropping_slicing[i_axis] = slice(cropping_left, -cropping_right)
                 image = image[tuple(cropping_slicing)]
-                mask = mask[tuple(cropping_slicing)]
+                if mask is not None:
+                    mask = mask[tuple(cropping_slicing)]
 
     return image, mask
 
@@ -185,6 +215,7 @@ def affine_registration(
     min_filter.Execute(fixed_image)
     min_intensity = min_filter.GetMinimum()
 
+    # initial transform overlaying both images
     initial_transform = sitk.CenteredTransformInitializer(
         fixed_image,
         moving_image,
@@ -207,11 +238,13 @@ def affine_registration(
         convergenceWindowSize=10,
     )
     registration_method.SetOptimizerScalesFromPhysicalShift()
-    # registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4])
-    # registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2])
+    # optional: multi-level registration
+    # registration_method.SetShrinkFactorsPerLevel(shrinkFactors=[4, 2, 1])
+    # registration_method.SetSmoothingSigmasPerLevel(smoothingSigmas=[2, 1, 0])
     # registration_method.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
     registration_method.SetInterpolator(sitk.sitkLinear)
 
+    # restrict registration to specific regions defined by moving/fixed mask
     if moving_mask is not None:
         moving_mask = sitk.Cast(moving_mask, sitk.sitkUInt8)
         registration_method.SetMetricMovingMask(moving_mask)
@@ -222,8 +255,9 @@ def affine_registration(
     registration_method.SetMovingInitialTransform(initial_transform)
     registration_method.SetInitialTransform(
         sitk.AffineTransform(fixed_image.GetDimension())
-        # sitk.ComposeScaleSkewVersor3DTransform()
     )
+    # the final transform is the composite of the
+    # initial alignment + the actual rigid/affine registration result
     optimized_transform = sitk.CompositeTransform(
         [registration_method.Execute(fixed_image, moving_image), initial_transform]
     )

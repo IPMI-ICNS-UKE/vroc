@@ -8,7 +8,7 @@ from functools import partial
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch.optim import Adam
+from torch.optim import SGD, Adam
 from torch.utils.data import DataLoader
 
 from vroc.blocks import SpatialTransformer
@@ -16,48 +16,146 @@ from vroc.dataset import NLSTDataset
 from vroc.helper import dict_collate, rescale_range
 from vroc.logger import LogFormatter
 from vroc.loss import TRELoss, WarpedMSELoss
-from vroc.models import DemonsVectorFieldBooster, VectorFieldBooster
-
-logger = logging.getLogger(__name__)
-
-handler = logging.StreamHandler()
-handler.setLevel(logging.INFO)
-handler.setFormatter(LogFormatter())
-logging.basicConfig(handlers=[handler])
-
-logging.getLogger(__name__).setLevel(logging.INFO)
-logging.getLogger("vroc").setLevel(logging.INFO)
-
-DEVICE = "cuda:0"
-
-train_dataset = NLSTDataset(
-    "/datalake/learn2reg/NLST", i_worker=None, n_worker=None, dilate_masks=1
-)
+from vroc.models import DemonsVectorFieldBooster
+from vroc.trainer import BaseTrainer, BestModelSaver, MetricType
 
 
-model = DemonsVectorFieldBooster(shape=(224, 192, 224), n_iterations=5).to(DEVICE)
-optimizer = Adam(model.parameters())
-tre_loss = TRELoss(apply_sqrt=True)
-mse_loss = WarpedMSELoss(shape=(224, 192, 224)).to(DEVICE)
-optimizer.zero_grad()
-i = 0
+class VectorFieldBoosterTrainer(BaseTrainer):
+    METRICS = {
+        "loss": MetricType.SMALLER_IS_BETTER,
+        "tre_loss_rel_change": MetricType.SMALLER_IS_BETTER,
+        "tre_metric_abs_change": MetricType.SMALLER_IS_BETTER,
+        "mse_loss_rel_change": MetricType.SMALLER_IS_BETTER,
+    }
 
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=1,
-    collate_fn=partial(dict_collate, noop_keys=("precomputed_vector_fields")),
-    shuffle=True,
-)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
+        self.spatial_transformer = SpatialTransformer(shape=(224, 192, 224)).to(DEVICE)
+        self.tre_loss = TRELoss(apply_sqrt=True, reduction=None)
+        self.tre_metric = TRELoss(apply_sqrt=True, reduction="mean")
+        self.mse_loss = WarpedMSELoss(shape=(224, 192, 224)).to(DEVICE)
 
-accumulation_steps = 8
+    def train_on_batch(self, data: dict) -> dict:
+        moving_image = rescale_range(
+            data["moving_image"], input_range=(-1024, 3071), output_range=(0, 1)
+        )
+        fixed_image = rescale_range(
+            data["fixed_image"], input_range=(-1024, 3071), output_range=(0, 1)
+        )
 
-trailing_loss = deque(maxlen=100)
+        moving_image = torch.as_tensor(moving_image, device=self.device)
+        fixed_image = torch.as_tensor(fixed_image, device=self.device)
+        moving_mask = torch.as_tensor(data["moving_mask"], device=self.device)
+        fixed_mask = torch.as_tensor(
+            data["fixed_mask"], device=self.device, dtype=torch.bool
+        )
+        moving_keypoints = torch.as_tensor(data["moving_keypoints"], device=self.device)
+        fixed_keypoints = torch.as_tensor(data["fixed_keypoints"], device=self.device)
+        image_spacing = torch.as_tensor(data["image_spacing"][0], device=self.device)
 
-spatial_transformer = SpatialTransformer(shape=(224, 192, 224)).to(DEVICE)
+        precomputed = data["precomputed_vector_field"][0]
 
-for i_epoch in range(1000):
-    for data in train_loader:
+        affine_vector_field = torch.as_tensor(
+            precomputed["affine_vector_field"][None], device=self.device
+        )
+
+        varreg_vector_field = torch.as_tensor(
+            precomputed["varreg_vector_field"][None], device=self.device
+        )
+
+        # boost the vector field
+        self.optimizer.zero_grad()
+        with torch.cuda.amp.autocast():
+            composed_varreg_vector_field = (
+                varreg_vector_field
+                + self.spatial_transformer(affine_vector_field, varreg_vector_field)
+            )
+
+            vector_field_boost = self.model(
+                moving_image,
+                fixed_image,
+                moving_mask,
+                fixed_mask,
+                composed_varreg_vector_field,
+                image_spacing,
+            )
+
+            composed_boosted_vector_field = (
+                vector_field_boost
+                + self.spatial_transformer(
+                    composed_varreg_vector_field, vector_field_boost
+                )
+            )
+
+            tre_loss_after_varreg = self.tre_loss(
+                composed_varreg_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+
+            tre_loss_after_boosting = self.tre_loss(
+                composed_boosted_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+
+            tre_metric_after_varreg = self.tre_metric(
+                composed_varreg_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+
+            tre_metric_after_boosting = self.tre_metric(
+                composed_boosted_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+
+            self.log_info(
+                f"{tre_metric_after_varreg=:.3f} / {tre_metric_after_boosting=:.3f}",
+                context="TRAIN",
+            )
+
+            tre_metric_abs_change = tre_metric_after_boosting - tre_metric_after_varreg
+
+            mse_loss_after_varreg = self.mse_loss(
+                moving_image, composed_varreg_vector_field, fixed_image, fixed_mask
+            )
+            mse_loss_after_boosting = self.mse_loss(
+                moving_image, composed_boosted_vector_field, fixed_image, fixed_mask
+            )
+
+            tre_loss_rel_change = 1 + (
+                tre_loss_after_boosting - tre_loss_after_varreg
+            ) / (tre_loss_after_varreg + 1e-6)
+            mse_loss_rel_change = 1 + (
+                mse_loss_after_boosting - mse_loss_after_varreg
+            ) / (mse_loss_after_varreg + 1e-6)
+
+            loss = tre_loss_after_boosting - tre_loss_after_varreg
+            loss = loss.mean()
+            # penalize worsening of TRE more
+            if loss > 0:
+                loss = loss**2
+
+        self.scaler.scale(loss).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        logger.info("Perform optimizer step")
+
+        return {
+            "loss": float(loss),
+            "tre_loss_rel_change": float(tre_loss_rel_change.mean()),
+            "tre_metric_abs_change": float(tre_metric_abs_change.mean()),
+            "mse_loss_rel_change": float(mse_loss_rel_change.mean()),
+        }
+
+    def validate_on_batch(self, data: dict) -> dict:
 
         moving_image = rescale_range(
             data["moving_image"], input_range=(-1024, 3071), output_range=(0, 1)
@@ -66,118 +164,171 @@ for i_epoch in range(1000):
             data["fixed_image"], input_range=(-1024, 3071), output_range=(0, 1)
         )
 
-        moving_image = torch.as_tensor(moving_image, device=DEVICE)
-        fixed_image = torch.as_tensor(fixed_image, device=DEVICE)
-        # moving_mask = torch.as_tensor(data["moving_mask"], device=DEVICE)
+        moving_image = torch.as_tensor(moving_image, device=self.device)
+        fixed_image = torch.as_tensor(fixed_image, device=self.device)
+        moving_mask = torch.as_tensor(data["moving_mask"], device=self.device)
         fixed_mask = torch.as_tensor(
-            data["fixed_mask"], device=DEVICE, dtype=torch.bool
+            data["fixed_mask"], device=self.device, dtype=torch.bool
         )
-        moving_keypoints = torch.as_tensor(data["moving_keypoints"], device=DEVICE)
-        fixed_keypoints = torch.as_tensor(data["fixed_keypoints"], device=DEVICE)
-        image_spacing = torch.as_tensor(data["image_spacing"][0], device=DEVICE)
+        moving_keypoints = torch.as_tensor(data["moving_keypoints"], device=self.device)
+        fixed_keypoints = torch.as_tensor(data["fixed_keypoints"], device=self.device)
+        image_spacing = torch.as_tensor(data["image_spacing"][0], device=self.device)
 
-        for filepath in data["precomputed_vector_fields"][0]:
-            with open(filepath, "rb") as f:
-                precomputed = pickle.load(f)
+        precomputed = data["precomputed_vector_field"][0]
 
-            affine_vector_field = torch.as_tensor(
-                precomputed["affine_vector_field"][None], device=DEVICE
+        affine_vector_field = torch.as_tensor(
+            precomputed["affine_vector_field"][None], device=self.device
+        )
+
+        varreg_vector_field = torch.as_tensor(
+            precomputed["varreg_vector_field"][None], device=self.device
+        )
+
+        with torch.inference_mode():
+            composed_varreg_vector_field = (
+                varreg_vector_field
+                + self.spatial_transformer(affine_vector_field, varreg_vector_field)
             )
-            affine_moving_image = spatial_transformer(moving_image, affine_vector_field)
 
-            varreg_vector_field = torch.as_tensor(
-                precomputed["varreg_vector_field"][None], device=DEVICE
+            vector_field_boost = self.model(
+                moving_image,
+                fixed_image,
+                moving_mask,
+                fixed_mask,
+                composed_varreg_vector_field,
+                image_spacing,
             )
 
-            tre_before = precomputed["tre_before"].mean()
-            tre_after_affine = precomputed["tre_after_affine"].mean()
-            tre_after_varreg = precomputed["tre_after_varreg"].mean()
-
-            # boost the vector field
-            with torch.cuda.amp.autocast():
-                composed_varreg_vector_field = (
-                    varreg_vector_field
-                    + spatial_transformer(affine_vector_field, varreg_vector_field)
+            composed_boosted_vector_field = (
+                vector_field_boost
+                + self.spatial_transformer(
+                    composed_varreg_vector_field, vector_field_boost
                 )
-
-                warped_image_varreg = spatial_transformer(
-                    moving_image, composed_varreg_vector_field
-                )
-                vector_field_boost = model(
-                    warped_image_varreg, fixed_image, image_spacing
-                )
-
-                composed_boosted_vector_field = (
-                    vector_field_boost
-                    + spatial_transformer(
-                        composed_varreg_vector_field, vector_field_boost
-                    )
-                )
-
-                # warped_image_varreg = spatial_transformer(moving_image, composed_varreg_vector_field)
-                # warped_image_boosted = spatial_transformer(moving_image,
-                #                                    composed_boosted_vector_field)
-                #
-                # fixed_image = fixed_image.detach().cpu().numpy()
-                # warped_image_varreg = warped_image_varreg.detach().cpu().numpy()
-                # warped_image_boosted = warped_image_boosted.detach().cpu().numpy()
-                # image_diff = warped_image_varreg - warped_image_boosted
-                # varreg_vector_field = varreg_vector_field.detach().cpu().numpy()
-                # boosted_vector_field = boosted_vector_field.detach().cpu().numpy()
-                #
-                # diff = varreg_vector_field - boosted_vector_field
-                # fig, ax = plt.subplots(2, 3, sharex=True, sharey=True)
-                # ax[0, 0].imshow(warped_image_varreg[0, 0, :, 95, :])
-                # ax[0, 1].imshow(warped_image_boosted[0, 0, :, 95, :])
-                # ax[0, 2].imshow(fixed_image[0, 0, :, 95, :])
-                # ax[1, 0].imshow(varreg_vector_field[0, 2, :, 95, :], cmap='seismic', clim=(-20, 20))
-                # ax[1, 1].imshow(boosted_vector_field[0, 2, :, 95, :],
-                #              cmap='seismic', clim=(-20, 20))
-                # ax[1, 2].imshow(diff[0, 2, :, 95, :],
-                #              cmap='seismic', clim=(-0.5, 0.5))
-
-                tre_after_boosting = tre_loss(
-                    composed_boosted_vector_field,
-                    moving_keypoints,
-                    fixed_keypoints,
-                    image_spacing,
-                )
-
-                mse_after_varreg = mse_loss(
-                    moving_image, composed_varreg_vector_field, fixed_image, fixed_mask
-                )
-                mse_after_boosting = mse_loss(
-                    moving_image, composed_boosted_vector_field, fixed_image, fixed_mask
-                )
-
-                tre_impovement = (
-                    1
-                    + (tre_after_boosting - tre_after_varreg)
-                    / (tre_after_varreg + 1e-6)
-                ) ** 2
-                mse_improvement = (
-                    1
-                    + (mse_after_boosting - mse_after_varreg)
-                    / (mse_after_varreg + 1e-6)
-                ) ** 2
-
-                loss = tre_impovement  # (tre_impovement + mse_improvement) / 2.0
-
-            trailing_loss.append(float(loss))
-            logger.info(
-                f"[{i_epoch}] {filepath.name} TRE: "
-                f"{tre_before:.2f} / "
-                f"{tre_after_affine:.2f} / "
-                f"{tre_after_varreg:.2f} / "
-                f"{tre_after_boosting:.2f}, "
-                f"Loss: {loss:.6f} (tre: {tre_impovement:.6f}, mse: {mse_improvement:.6f})"
-                f"trailing {np.mean(trailing_loss):.6f}"
             )
-            loss = loss / accumulation_steps
-            loss.backward()
-            i += 1
 
-            if i % accumulation_steps == 0:
-                logger.info("Perform optimizer step")
-                optimizer.step()
-                optimizer.zero_grad()
+            tre_loss_after_varreg = self.tre_loss(
+                composed_varreg_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+
+            tre_loss_after_boosting = self.tre_loss(
+                composed_boosted_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+
+            tre_metric_after_varreg = self.tre_metric(
+                composed_varreg_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+
+            tre_metric_after_boosting = self.tre_metric(
+                composed_boosted_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+
+            self.log_info(
+                f"{tre_metric_after_varreg=:.3f} / {tre_metric_after_boosting=:.3f}",
+                context="VAL",
+            )
+
+            tre_metric_abs_change = tre_metric_after_boosting - tre_metric_after_varreg
+
+            mse_loss_after_varreg = self.mse_loss(
+                moving_image, composed_varreg_vector_field, fixed_image, fixed_mask
+            )
+            mse_loss_after_boosting = self.mse_loss(
+                moving_image, composed_boosted_vector_field, fixed_image, fixed_mask
+            )
+
+            tre_loss_rel_change = 1 + (
+                tre_loss_after_boosting - tre_loss_after_varreg
+            ) / (tre_loss_after_varreg + 1e-6)
+            mse_loss_rel_change = 1 + (
+                mse_loss_after_boosting - mse_loss_after_varreg
+            ) / (mse_loss_after_varreg + 1e-6)
+
+            loss = tre_loss_after_boosting - tre_loss_after_varreg
+            loss = loss.mean()
+            # penalize worsening of TRE more
+            if loss > 0:
+                loss = loss**2
+
+        return {
+            "loss": float(loss),
+            "tre_loss_rel_change": float(tre_loss_rel_change.mean()),
+            "tre_metric_abs_change": float(tre_metric_abs_change.mean()),
+            "mse_loss_rel_change": float(mse_loss_rel_change.mean()),
+        }
+
+
+if __name__ == "__main__":
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(LogFormatter())
+    logging.basicConfig(handlers=[handler])
+
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    logging.getLogger("vroc").setLevel(logging.INFO)
+
+    DEVICE = "cuda:0"
+
+    train_dataset = NLSTDataset(
+        "/datalake/learn2reg/NLST",
+        i_worker=None,
+        n_worker=None,
+        train_size=0.90,
+        is_train=True,
+        dilate_masks=1,
+        unroll_vector_fields=True,
+    )
+    train_dataset.filepaths = train_dataset.filepaths[:1]
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=1,
+        collate_fn=partial(dict_collate, noop_keys=("precomputed_vector_fields")),
+        shuffle=True,
+        # num_workers=4,
+    )
+
+    test_dataset = NLSTDataset(
+        "/datalake/learn2reg/NLST",
+        i_worker=None,
+        n_worker=None,
+        train_size=0.90,
+        is_train=False,
+        dilate_masks=1,
+        unroll_vector_fields=True,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=1,
+        collate_fn=partial(dict_collate, noop_keys=("precomputed_vector_fields")),
+        shuffle=False,
+    )
+
+    model = DemonsVectorFieldBooster(shape=(224, 192, 224), n_iterations=4).to(DEVICE)
+    optimizer = Adam(model.parameters(), lr=1e-3)
+    # optimizer = SGD(lr=1e-3)
+
+    trainer = VectorFieldBoosterTrainer(
+        model=model,
+        loss_function=None,
+        optimizer=optimizer,
+        train_loader=train_loader,
+        val_loader=test_loader,
+        run_folder="/datalake/learn2reg/runs",
+        experiment_name="vector_field_boosting",
+        device=DEVICE,
+    )
+    trainer.logger.setLevel(logging.DEBUG)
+    trainer.run(steps=200_000, validation_interval=1000)

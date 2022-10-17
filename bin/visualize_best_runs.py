@@ -2,7 +2,7 @@ import seaborn as sns
 
 from vroc.hyperopt_database.client import DatabaseClient
 
-client = DatabaseClient("/datalake/learn2reg/hyperparams_runs/merged_runs.sqlite")
+client = DatabaseClient("/datalake/learn2reg/param_sampling.sqlite")
 
 
 # runs = client.fetch_runs("NLST_0001")

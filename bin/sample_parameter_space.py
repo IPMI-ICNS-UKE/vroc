@@ -119,7 +119,7 @@ def sample_parameter_space(
         "TRE_STD": database.get_or_create_metric(name="TRE_STD", lower_is_better=True),
         "RMSE": database.get_or_create_metric(name="RMSE", lower_is_better=True),
     }
-
+    # print('go')
     iterations_done = 0
     while True:
         for data in train_dataset:
@@ -176,6 +176,7 @@ def sample_parameter_space(
             )
             for _ in range(iterations_per_image):
                 params = optimizer.ask()
+                # print(params.kwargs)
 
                 registration = VrocRegistration(
                     roi_segmenter=None,
@@ -189,7 +190,7 @@ def sample_parameter_space(
                     moving_mask=moving_mask,
                     fixed_mask=fixed_mask,
                     register_affine=True,
-                    affine_loss_fn=ncc_loss,
+                    affine_loss_function=ncc_loss,
                     force_type="demons",
                     gradient_type="active",
                     valid_value_range=(-1024, 3071),
@@ -276,16 +277,16 @@ if __name__ == "__main__":
     logging.getLogger(__name__).setLevel(logging.INFO)
     logging.getLogger("vroc").setLevel(logging.INFO)
 
-    typer.run(sample_parameter_space)
+    # typer.run(sample_parameter_space)
 
-    # I_WORKER = 0
-    #
-    # sample_parameter_space(
-    #     nlst_dir=Path("/datalake/learn2reg/NLST"),
-    #     database_filepath=Path("/datalake/learn2reg/param_sampling_test.sqlite"),
-    #     optimizer_name="TwoPointsDE",
-    #     iterations_per_image=10,
-    #     n_worker=1,
-    #     i_worker=I_WORKER,
-    #     device=f"cuda:{I_WORKER}",
-    # )
+    I_WORKER = 0
+
+    sample_parameter_space(
+        nlst_dir=Path("/datalake/learn2reg/NLST"),
+        database_filepath=Path("/datalake/learn2reg/param_sampling_testt.sqlite"),
+        optimizer_name="TwoPointsDE",
+        iterations_per_image=10,
+        n_worker=5,
+        i_worker=I_WORKER,
+        device=f"cuda:{I_WORKER}",
+    )

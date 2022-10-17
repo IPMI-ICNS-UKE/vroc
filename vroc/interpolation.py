@@ -74,9 +74,9 @@ def resize(
     return resize_function(image=image, output_shape=output_shape, order=order)
 
 
-def downscale(image: np.ndarray, factor: float, order: int = 1):
-    downscaled_shape = tuple(s / factor for s in image.shape)
-    return resize(image=image, output_shape=downscaled_shape, order=order)
+def rescale(image: np.ndarray, factor: float, order: int = 1):
+    rescaled_shape = tuple(s / factor for s in image.shape)
+    return resize(image=image, output_shape=rescaled_shape, order=order)
 
 
 def resize_spacing(

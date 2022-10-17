@@ -11,7 +11,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
+from vroc.common_types import (
+    FloatTuple,
+    FloatTuple2D,
+    FloatTuple3D,
+    IntTuple,
+    IntTuple2D,
+    IntTuple3D,
+)
 from vroc.helper import binary_dilation
 from vroc.kernels import gradient_kernel_3d
 
@@ -277,6 +284,68 @@ class BaseGaussianSmoothing(ABC, nn.Module):
         return kernels
 
 
+class GaussianSmoothing2d(BaseGaussianSmoothing):
+    def __init__(
+        self,
+        sigma: FloatTuple3D = (1.0, 1.0),
+        sigma_cutoff: FloatTuple2D | None = (1.0, 1.0, 1.0),
+        radius: IntTuple2D | None = None,
+        force_same_size: bool = False,
+        spacing: FloatTuple2D = (1.0, 1.0),
+        use_image_spacing: bool = False,
+    ):
+        super().__init__()
+
+        if sigma_cutoff and not (len(sigma) == len(sigma_cutoff) == 2):
+            raise ValueError("Length of sigma and sigma_cutoff has to be 2")
+
+        if sigma_cutoff and radius:
+            raise RuntimeError("Please set either sigma_cutoff or radius")
+
+        self.sigma = sigma
+        self.sigma_cutoff = sigma_cutoff
+        self.force_same_size = force_same_size
+        self.use_image_spacing = use_image_spacing
+        self.spacing = spacing
+
+        if self.use_image_spacing:
+            self.sigma = tuple(
+                elem_1 * elem_2 for elem_1, elem_2 in zip(self.sigma, self.spacing)
+            )
+        kernel_x, kernel_y = BaseGaussianSmoothing.make_gaussian_kernel(
+            sigma=self.sigma,
+            sigma_cutoff=self.sigma_cutoff,
+            force_same_size=self.force_same_size,
+            radius=radius,
+        )
+        self.kernel_size = (kernel_x.shape[-1], kernel_y.shape[-1])
+
+        kernel_x, kernel_y = (
+            kernel_x[None, None],
+            kernel_y[None, None],
+        )
+
+        self.same_size = kernel_x.shape == kernel_y.shape
+
+        if self.same_size:
+            self.kernel = torch.cat((kernel_x, kernel_y), dim=0)
+            self.register_buffer("weight", self.kernel)
+
+        else:
+            self.register_buffer("weight_x", kernel_x)
+            self.register_buffer("weight_y", kernel_y)
+
+    def forward(self, image):
+        if self.same_size:
+            image = F.conv2d(image, self.weight, groups=2, stride=1, padding="same")
+        else:
+            image_x = F.conv3d(image[:, 0:1], self.weight_x, stride=1, padding="same")
+            image_y = F.conv3d(image[:, 1:2], self.weight_y, stride=1, padding="same")
+            image = torch.cat((image_x, image_y), dim=1)
+
+        return image
+
+
 class GaussianSmoothing3d(BaseGaussianSmoothing):
     def __init__(
         self,
@@ -305,7 +374,7 @@ class GaussianSmoothing3d(BaseGaussianSmoothing):
             self.sigma = tuple(
                 elem_1 * elem_2 for elem_1, elem_2 in zip(self.sigma, self.spacing)
             )
-        kernel_x, kernel_y, kernel_z = GaussianSmoothing3d.make_gaussian_kernel(
+        kernel_x, kernel_y, kernel_z = BaseGaussianSmoothing.make_gaussian_kernel(
             sigma=self.sigma,
             sigma_cutoff=self.sigma_cutoff,
             force_same_size=self.force_same_size,
@@ -347,16 +416,20 @@ class SpatialTransformer(nn.Module):
 
     def __init__(
         self,
-        shape: IntTuple,
+        shape: IntTuple | None,
         mode: str = "bilinear",
     ):
         super().__init__()
 
+        self.shape = shape
         self.mode = mode
 
-        # create sampling grid
-        identity_grid = self.create_identity_grid(shape)
-        self.register_buffer("identity_grid", identity_grid, persistent=False)
+        # create sampling grid if shape is given
+        if self.shape:
+            identity_grid = self.create_identity_grid(shape)
+            self.register_buffer("identity_grid", identity_grid, persistent=False)
+        else:
+            self.identity_grid = None
 
     @staticmethod
     def create_identity_grid(shape, device: torch.device = None):
@@ -384,12 +457,20 @@ class SpatialTransformer(nn.Module):
         return warped
 
     def forward(self, image, transformation: torch.Tensor) -> torch.Tensor:
-        # transformation can be a affine 4x4 matrix or a dense vector field:
+        # transformation can be an affine 4x4 matrix or a dense vector field:
         # shape affine matrix: (batch, 4, 4)
         # shape dense vector field: (batch, 3, x_size, y_size, z_size)
 
         image_spatial_shape = image.shape[2:]
-        image_n_dim = len(image_spatial_shape)
+        n_spatial_dims = len(image_spatial_shape)
+
+        if self.identity_grid is None:
+            # create identity grid dynamically
+            identity_grid = self.create_identity_grid(
+                image_spatial_shape, device=image.device
+            )
+        else:
+            identity_grid = self.identity_grid
 
         if transformation.shape[-2:] == (4, 4):
             # transformation is affine matrix
@@ -400,25 +481,36 @@ class SpatialTransformer(nn.Module):
             )
         else:
             # transformation is dense vector field
-            grid = self.identity_grid + transformation
+            grid = identity_grid + transformation
             # need to normalize grid values to [-1, 1] for PyTorch's grid_sample
-            for i in range(image_n_dim):
+            for i in range(n_spatial_dims):
                 grid[:, i, ...] = 2 * (
                     grid[:, i, ...] / (image_spatial_shape[i] - 1) - 0.5
                 )
 
             # move channels dim to last position and reverse channels
-            if image_n_dim == 2:
+            if n_spatial_dims == 2:
                 grid = grid.permute(0, 2, 3, 1)
                 grid = grid[..., [1, 0]]
-            elif image_n_dim == 3:
+            elif n_spatial_dims == 3:
                 grid = grid.permute(0, 2, 3, 4, 1)
                 grid = grid[..., [2, 1, 0]]
 
         return self._warp(image=image, grid=grid)
 
+    def compose_vector_fields(
+        self, vector_field_1: torch.Tensor, vector_field_2: torch.Tensor
+    ) -> torch.Tensor:
+        if vector_field_1.shape != vector_field_2.shape:
+            raise RuntimeError(
+                f"Shape mismatch between vector fields: "
+                f"{vector_field_1.shape} vs. {vector_field_2.shape}"
+            )
 
-class BaseForces3d(nn.Module):
+        return vector_field_2 + self(vector_field_1, vector_field_2)
+
+
+class BaseForces(nn.Module):
     def __init__(self, method: Literal["active", "passive", "dual"] = "dual"):
         super().__init__()
         self.method = method
@@ -428,31 +520,34 @@ class BaseForces3d(nn.Module):
         self._fixed_image_gradient = None
 
     @staticmethod
-    def _calc_image_gradient_3d(image: torch.Tensor) -> torch.Tensor:
-        if image.ndim != 5:
-            raise ValueError(f"Expected 5D tensor, got tensor with shape {image.shape}")
+    def _calc_image_gradient(image: torch.Tensor) -> torch.Tensor:
+        if image.ndim not in {4, 5}:
+            raise ValueError(
+                f"Expected 4D or 5D tensor, got tensor with shape {image.shape}"
+            )
         if image.shape[1] != 1:
             raise NotImplementedError(
                 "Currently, only single channel images are supported"
             )
-        # this is list of x, y, z grad
-        grad = torch.gradient(image, dim=(2, 3, 4))
-        # stack x, y, z grad back to one single tensor of
-        # shape (batch_size, 3, x_size, y_size, z_size)
+
+        dims = tuple(range(2, image.ndim))
+        # grad is a list of x, y(, z) gradients
+        grad = torch.gradient(image, dim=dims)
+        # stack x, y(, z) gradients back to one single tensor of
+        # shape (batch_size, 2 or 3, x_size, y_size[, z_size])
         return torch.cat(grad, dim=1)
 
-    # first if we need fixed image gradient; if yes calculate or get from cache
     def _get_fixed_image_gradient(self, fixed_image: torch.Tensor) -> torch.Tensor:
         recalculate = False
         if self._fixed_image_gradient is None:
             # no cached gradient, do calculation
             recalculate = True
-        elif self._fixed_image_gradient.shape[-3:] != fixed_image.shape[-3:]:
+        elif self._fixed_image_gradient.shape[2:] != fixed_image.shape[2:]:
             # spatial size mismatch, most likely due to multi level registration
             recalculate = True
 
         if recalculate:
-            grad_fixed = self._calc_image_gradient_3d(fixed_image)
+            grad_fixed = self._calc_image_gradient(fixed_image)
             self._fixed_image_gradient = grad_fixed
 
         return self._fixed_image_gradient
@@ -470,7 +565,7 @@ class BaseForces3d(nn.Module):
             grad_fixed = None
 
         if self.method == "active":
-            grad_moving = self._calc_image_gradient_3d(moving_image)
+            grad_moving = self._calc_image_gradient(moving_image)
             # gradient is defined in moving image domain -> use moving mask if given
             if moving_mask is not None:
                 grad_moving = grad_moving * moving_mask
@@ -484,7 +579,7 @@ class BaseForces3d(nn.Module):
 
         elif self.method == "dual":
             # we need both gradient of moving and fixed image
-            grad_moving = self._calc_image_gradient_3d(moving_image)
+            grad_moving = self._calc_image_gradient(moving_image)
 
             # mask both gradients as above; also check that we have both masks
             masks_available = (m is not None for m in (moving_mask, fixed_mask))
@@ -504,8 +599,8 @@ class BaseForces3d(nn.Module):
         return total_grad
 
 
-class DemonForces3d(BaseForces3d):
-    def _calculate_demon_forces_3d(
+class DemonForces(BaseForces):
+    def _calculate_demon_forces(
         self,
         moving_image: torch.Tensor,
         fixed_image: torch.Tensor,
@@ -520,18 +615,7 @@ class DemonForces3d(BaseForces3d):
             union_mask = torch.logical_or(moving_mask, fixed_mask)
             moving_mask, fixed_mask = union_mask, union_mask
 
-        # grad tensors have the shape of (batch_size, 3, x_size, y_size, z_size)
-        # if moving_mask is not None:
-        #     moving_mask = binary_dilation(
-        #         torch.as_tensor(moving_mask, dtype=torch.float32),
-        #         kernel_size=(3, 3, 3)
-        #     )
-        # if fixed_mask is not None:
-        #     fixed_mask = binary_dilation(
-        #         torch.as_tensor(fixed_mask, dtype=torch.float32),
-        #         kernel_size=(3, 3, 3)
-        #     )
-
+        # grad tensors have the shape of (batch_size, 2 or 3, x_size, y_size[, z_size])
         total_grad = self._compute_total_grad(
             moving_image, fixed_image, moving_mask, fixed_mask
         )
@@ -539,6 +623,7 @@ class DemonForces3d(BaseForces3d):
         #     (sum(i**2 for i in original_image_spacing)) / len(original_image_spacing)
         # )
         gamma = 1
+
         # calculcate squared L2 of grad, i.e., || grad ||^2
         l2_grad = total_grad.pow(2).sum(dim=1, keepdim=True)
         epsilon = 1e-6  # to prevent division by zero
@@ -556,7 +641,7 @@ class DemonForces3d(BaseForces3d):
         fixed_mask: torch.Tensor,
         original_image_spacing: FloatTuple3D,
     ):
-        return self._calculate_demon_forces_3d(
+        return self._calculate_demon_forces(
             moving_image=moving_image,
             fixed_image=fixed_image,
             moving_mask=moving_mask,
@@ -566,7 +651,7 @@ class DemonForces3d(BaseForces3d):
         )
 
 
-class NCCForces3d(BaseForces3d):
+class NCCForces(BaseForces):
     def _calculate_ncc_forces_3d(
         self,
         moving_image: torch.Tensor,
@@ -661,7 +746,7 @@ class NCCForces3d(BaseForces3d):
         )
 
 
-class NGFForces3d(BaseForces3d):
+class NGFForces(BaseForces):
     def _grad_param(self, method, axis):
         kernel = gradient_kernel_3d(method, axis)
 

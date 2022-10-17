@@ -1,34 +1,52 @@
 from __future__ import annotations
 
+import pprint
 import time
+from math import ceil, log10
 from typing import Any, List, Literal, Optional, Tuple, Union
 
+import matplotlib.colors as colors
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# import matplotlib
+# matplotlib.use('Agg')
+from PIL import Image
+
 from vroc.animation import Camera
 from vroc.blocks import (
     ConvBlock,
     DecoderBlock,
-    DemonForces3d,
+    DemonForces,
     DownBlock,
     EncoderBlock,
+    GaussianSmoothing2d,
     GaussianSmoothing3d,
-    NCCForces3d,
-    NGFForces3d,
+    NCCForces,
+    NGFForces,
     SpatialTransformer,
     UpBlock,
 )
 from vroc.checks import are_of_same_length, is_tuple, is_tuple_of_tuples
-from vroc.common_types import FloatTuple, FloatTuple3D, IntTuple, IntTuple3D
+from vroc.common_types import (
+    FloatTuple,
+    FloatTuple2D,
+    FloatTuple3D,
+    IntTuple,
+    IntTuple2D,
+    IntTuple3D,
+    MaybeSequence,
+)
 from vroc.decay import exponential_decay
 from vroc.decorators import timing
 from vroc.helper import get_bounding_box
 from vroc.interpolation import resize
 from vroc.logger import LoggerMixin
+from vroc.plot import TiledArrayPlotter
+from vroc.preprocessing import crop_or_pad, pad
 
 
 # TODO: channel bug with skip_connections=False
@@ -47,6 +65,7 @@ class FlexUNet(nn.Module):
         convolution_kwargs=None,
         downsampling_kwargs=None,
         upsampling_kwargs=None,
+        return_bottleneck: bool = True,
     ):
         super().__init__()
 
@@ -68,6 +87,8 @@ class FlexUNet(nn.Module):
         }
         self.downsampling_kwargs = downsampling_kwargs or {"kernel_size": 2}
         self.upsampling_kwargs = upsampling_kwargs or {"scale_factor": 2}
+
+        self.return_bottleneck = return_bottleneck
 
         self._build_layers()
 
@@ -157,7 +178,10 @@ class FlexUNet(nn.Module):
 
         inputs = self.final_conv(inputs)
 
-        return inputs, outputs[-1]
+        if self.return_bottleneck:
+            return inputs, outputs[-1]
+        else:
+            return inputs
 
 
 class LungCTSegmentationUnet3d(FlexUNet):
@@ -302,58 +326,61 @@ class ParamNet(nn.Module):
         return out_dict
 
 
-class VarReg3d(nn.Module, LoggerMixin):
+class VarReg(nn.Module, LoggerMixin):
     _INTERPOLATION_MODES = {
-        3: "linear",
-        4: "bilinear",
-        5: "trilinear",
+        2: "bilinear",
+        3: "trilinear",
     }
+
+    _GAUSSIAN_SMOOTHING = {2: GaussianSmoothing2d, 3: GaussianSmoothing3d}
 
     def __init__(
         self,
-        scale_factors: FloatTuple | float = (1.0,),
-        iterations: IntTuple | int = 100,
-        tau: FloatTuple | float = 1.0,
+        scale_factors: MaybeSequence[float] = (1.0,),
+        iterations: MaybeSequence[int] = 100,
+        tau: MaybeSequence[float] = 1.0,
         tau_level_decay: float = 0.0,
         tau_iteration_decay: float = 0.0,
         force_type: Literal["demons", "ncc", "ngf"] = "demons",
         gradient_type: Literal["active", "passive", "dual"] = "dual",
-        regularization_sigma: FloatTuple3D
-        | Tuple[FloatTuple3D, ...] = (
+        regularization_sigma: MaybeSequence[FloatTuple2D | FloatTuple3D] = (
             1.0,
             1.0,
             1.0,
         ),
-        regularization_radius: IntTuple3D | Tuple[IntTuple3D, ...] | None = None,
+        regularization_radius: MaybeSequence[IntTuple2D | IntTuple3D] | None = None,
         sigma_level_decay: float = 0.0,
         sigma_iteration_decay: float = 0.0,
-        original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+        original_image_spacing: FloatTuple2D | FloatTuple3D = (1.0, 1.0, 1.0),
         use_image_spacing: bool = False,
         restrict_to_mask_bbox: bool = False,
         early_stopping_delta: float = 0.0,
         early_stopping_window: int | None = 20,
         boosting_model: nn.Module | None = None,
         debug: bool = False,
+        debug_step_size: int = 10,
     ):
         super().__init__()
+
+        n_spatial_dims = len(original_image_spacing)
 
         if not is_tuple(scale_factors, min_length=1):
             scale_factors = (scale_factors,)
         self.scale_factors = scale_factors
 
         self.scale_factors = scale_factors  # this also defines "n_levels"
-        self.iterations = VarReg3d._expand_to_level_tuple(
+        self.iterations = VarReg._expand_to_level_tuple(
             iterations, n_levels=self.n_levels
         )
 
-        self.tau = VarReg3d._expand_to_level_tuple(tau, n_levels=self.n_levels)
+        self.tau = VarReg._expand_to_level_tuple(tau, n_levels=self.n_levels)
         self.tau_level_decay = tau_level_decay
         self.tau_iteration_decay = tau_iteration_decay
 
-        self.regularization_sigma = VarReg3d._expand_to_level_tuple(
+        self.regularization_sigma = VarReg._expand_to_level_tuple(
             regularization_sigma, n_levels=self.n_levels, is_tuple=True
         )
-        self.regularization_radius = VarReg3d._expand_to_level_tuple(
+        self.regularization_radius = VarReg._expand_to_level_tuple(
             regularization_radius, n_levels=self.n_levels, is_tuple=True
         )
         self.sigma_level_decay = sigma_level_decay
@@ -364,14 +391,15 @@ class VarReg3d(nn.Module, LoggerMixin):
         self.forces = gradient_type
 
         self.restrict_to_mask_bbox = restrict_to_mask_bbox
-        self.early_stopping_delta = VarReg3d._expand_to_level_tuple(
+        self.early_stopping_delta = VarReg._expand_to_level_tuple(
             early_stopping_delta, n_levels=self.n_levels
         )
-        self.early_stopping_window = VarReg3d._expand_to_level_tuple(
+        self.early_stopping_window = VarReg._expand_to_level_tuple(
             early_stopping_window, n_levels=self.n_levels, expand_none=True
         )
         self.boosting_model = boosting_model
         self.debug = debug
+        self.debug_step_size = debug_step_size
 
         # check if params are passed with/converted to consistent length
         # (== self.n_levels)
@@ -390,39 +418,45 @@ class VarReg3d(nn.Module, LoggerMixin):
         self._full_size_spatial_transformer = None
 
         if force_type == "demons":
-            self._forces_layer = DemonForces3d(method=self.forces)
+            self._forces_layer = DemonForces(method=self.forces)
         elif force_type == "ncc":
-            self._forces_layer = NCCForces3d(method=self.forces)
+            self._forces_layer = NCCForces(method=self.forces)
         elif force_type == "ngf":
-            self._forces_layer = NGFForces3d()
+            self._forces_layer = NGFForces()
         else:
             raise NotImplementedError(
                 f"Registration variant {force_type} is not implemented"
             )
 
-        for i_level, sigma in enumerate(self.regularization_sigma):
-            if self.regularization_radius:
-                self.add_module(
-                    name=f"regularization_layer_level_{i_level}",
-                    module=GaussianSmoothing3d(
-                        sigma=sigma,
-                        sigma_cutoff=None,
-                        radius=self.regularization_radius[i_level],
-                        spacing=self.original_image_spacing,
-                        use_image_spacing=self.use_image_spacing,
-                    ),
-                )
-            else:
-                self.add_module(
-                    name=f"regularization_layer_level_{i_level}",
-                    module=GaussianSmoothing3d(
-                        sigma=sigma,
-                        sigma_cutoff=(2.0, 2.0, 2.0),
-                        force_same_size=True,
-                        spacing=self.original_image_spacing,
-                        use_image_spacing=self.use_image_spacing,
-                    ),
-                )
+        # gaussian_smoothing = self._GAUSSIAN_SMOOTHING[n_spatial_dims]
+        #
+        # for i_level, sigma in enumerate(self.regularization_sigma):
+        #     if self.regularization_radius:
+        #         # gaussian smoothing has fixed kernel radius
+        #         self.add_module(
+        #             name=f"regularization_layer_level_{i_level}",
+        #             module=gaussian_smoothing(
+        #                 sigma=sigma,
+        #                 sigma_cutoff=None,
+        #                 radius=self.regularization_radius[i_level],
+        #                 spacing=self.original_image_spacing,
+        #                 use_image_spacing=self.use_image_spacing,
+        #             ),
+        #         )
+        #     else:
+        #         # gaussian smoothing kernel radius is defined by
+        #         # sigma and sigma cutoff (here 2)
+        #         sigma_cutoff = (2, 2, 2)[:n_spatial_dims]
+        #         self.add_module(
+        #             name=f"regularization_layer_level_{i_level}",
+        #             module=gaussian_smoothing(
+        #                 sigma=sigma,
+        #                 sigma_cutoff=sigma_cutoff,
+        #                 force_same_size=True,
+        #                 spacing=self.original_image_spacing,
+        #                 use_image_spacing=self.use_image_spacing,
+        #             ),
+        #         )
 
     @staticmethod
     def _expand_to_level_tuple(
@@ -488,7 +522,7 @@ class VarReg3d(nn.Module, LoggerMixin):
                     image = torch.as_tensor(image, dtype=torch.bool)
                 else:
                     # normal image (moving or fixed)
-                    mode = VarReg3d._INTERPOLATION_MODES[image.ndim]
+                    mode = VarReg._INTERPOLATION_MODES[image.ndim - 2]
                     image = F.interpolate(
                         image, scale_factor=scale_factor, mode=mode, align_corners=True
                     )
@@ -507,7 +541,7 @@ class VarReg3d(nn.Module, LoggerMixin):
             # vector field and image are already the same size
             return vector_field
 
-        mode = VarReg3d._INTERPOLATION_MODES[image.ndim]
+        mode = VarReg._INTERPOLATION_MODES[image.ndim - 2]
         vector_field = F.interpolate(
             vector_field, size=image_shape[2:], mode=mode, align_corners=True
         )
@@ -562,6 +596,133 @@ class VarReg3d(nn.Module, LoggerMixin):
 
         return early_stop
 
+    def _add_debug_snapshot(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        warped_image: torch.Tensor,
+        forces: torch.Tensor,
+        vector_field: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        warped_mask: torch.Tensor,
+        full_spatial_shape: IntTuple2D | IntTuple3D,
+        level: int,
+        iteration: int,
+        debug_metrics: dict,
+    ):
+        def prepare_for_plotting(
+            tensor: torch.Tensor, resampling_order: int = 0
+        ) -> np.ndarray:
+            tensor = resize(
+                tensor, output_shape=full_spatial_shape, order=resampling_order
+            )
+            tensor = tensor.squeeze().detach().cpu().numpy()
+
+            return tensor
+
+        n_spatial_dims = moving_image.ndim - 2
+
+        moving_image = prepare_for_plotting(moving_image)
+        fixed_image = prepare_for_plotting(fixed_image)
+        warped_image = prepare_for_plotting(warped_image)
+        forces = prepare_for_plotting(forces)
+        vector_field = prepare_for_plotting(vector_field)
+        moving_mask = prepare_for_plotting(moving_mask)
+        fixed_mask = prepare_for_plotting(fixed_mask)
+        warped_mask = prepare_for_plotting(warped_mask)
+
+        tile_size = max(full_spatial_shape)
+        tile_shape = (tile_size, tile_size)
+        tiles = (5, 12)
+
+        plot_text = {
+            "level": level,
+            "iteration": iteration,
+            **debug_metrics,
+        }
+        plot_text = pprint.pformat(plot_text, indent=4)
+
+        image_kwargs = {"vmin": -800, "vmax": 200, "cmap": "gray"}
+        vector_field_kwargs = {"vmin": -20, "vmax": 20, "cmap": "seismic"}
+        forces_kwargs = {"vmin": -0.5, "vmax": 0.5, "cmap": "seismic"}
+        mask_kwargs = {"vmin": 0, "vmax": 1, "cmap": "gray"}
+
+        plot = TiledArrayPlotter(tiles=tiles, tile_shape=tile_shape)
+        for i_spatial_axis in range(n_spatial_dims):
+            mid_slice = full_spatial_shape[i_spatial_axis] // 2
+            plot_slicing = tuple(
+                slice(None) if i != i_spatial_axis else mid_slice
+                for i in range(n_spatial_dims)
+            )
+
+            moving_image_slice = moving_image[plot_slicing]
+            fixed_image_slice = fixed_image[plot_slicing]
+            warped_image_slice = warped_image[plot_slicing]
+
+            moving_mask_slice = moving_mask[plot_slicing]
+            fixed_mask_slice = fixed_mask[plot_slicing]
+            warped_mask_slice = warped_mask[plot_slicing]
+
+            vector_field_slice = vector_field[(..., *plot_slicing)]
+            forces_slice = forces[(..., *plot_slicing)]
+
+            # col plot positions
+            plots = {
+                0: {"image": moving_image_slice, "label": "M", **image_kwargs},
+                1: {"image": fixed_image_slice, "label": "F", **image_kwargs},
+                2: {"image": warped_image_slice, "label": "W", **image_kwargs},
+                3: {
+                    "image": vector_field_slice[0],
+                    "label": "VFx",
+                    **vector_field_kwargs,
+                },
+                4: {
+                    "image": vector_field_slice[1],
+                    "label": "VFy",
+                    **vector_field_kwargs,
+                },
+                5: {
+                    "image": vector_field_slice[2],
+                    "label": "VFz",
+                    **vector_field_kwargs,
+                },
+                6: {"image": forces_slice[0], "label": "FRCx", **forces_kwargs},
+                7: {"image": forces_slice[1], "label": "FRCy", **forces_kwargs},
+                8: {"image": forces_slice[2], "label": "FRCz", **forces_kwargs},
+                9: {"image": moving_mask_slice, "label": "M", **mask_kwargs},
+                10: {"image": fixed_mask_slice, "label": "F", **mask_kwargs},
+                11: {"image": warped_mask_slice, "label": "W", **mask_kwargs},
+            }
+
+            for i_col, data in plots.items():
+                plot.add_array(
+                    row=i_spatial_axis,
+                    col=i_col,
+                    array=data["image"],
+                    cmap=data["cmap"],
+                    vmin=data["vmin"],
+                    vmax=data["vmax"],
+                )
+                plot.add_text(
+                    row=i_spatial_axis,
+                    col=i_col,
+                    text=data["label"],
+                    font="FreeMonoBold.ttf",
+                    font_size=0.1,
+                )
+
+        # add debug metrics to plot
+        plot.add_text(row=3, col=0, text=plot_text, font_size=0.05)
+
+        level_zero_padding = ceil(log10(self.n_levels))
+        iterations_zero_padding = ceil(log10(max(self.iterations)))
+
+        output_filepath = f"/datalake/learn2reg/animation/registration_level_{level:0{level_zero_padding}d}_iteration_{iteration:0{iterations_zero_padding}d}.png"
+        plot.save(output_filepath)
+
+        self.logger.debug(f"Created snapshot of registration at {level=}, {iteration=}")
+
     def run_registration(
         self,
         moving_image: torch.Tensor,
@@ -576,8 +737,10 @@ class VarReg3d(nn.Module, LoggerMixin):
             raise RuntimeError("Dimension mismatch betwen moving and fixed image")
         # define dimensionalities and shapes
         n_image_dimensions = moving_image.ndim
-        n_vector_field_components = n_image_dimensions - 2  # -1 batch dim, -1 color dim
+        n_spatial_dims = n_image_dimensions - 2  # -1 batch dim, -1 color dim
+
         full_uncropped_shape = tuple(fixed_image.shape)
+
         original_moving_image = moving_image
         original_moving_mask = moving_mask
 
@@ -602,7 +765,7 @@ class VarReg3d(nn.Module, LoggerMixin):
                 fixed_mask = fixed_mask[bbox]
             if initial_vector_field is not None:
                 original_initial_vector_field = initial_vector_field
-                initial_vector_field = initial_vector_field[(..., *bbox[-3:])]
+                initial_vector_field = initial_vector_field[(..., *bbox[2:])]
         else:
             bbox = ...
 
@@ -618,6 +781,7 @@ class VarReg3d(nn.Module, LoggerMixin):
 
         full_size_moving = moving_image
         full_cropped_shape = tuple(fixed_image.shape)
+        full_cropped_spatial_shape = full_cropped_shape[2:]
 
         # for tracking level-wise metrics (used for early stopping, if enabled)
         metrics = []
@@ -626,12 +790,6 @@ class VarReg3d(nn.Module, LoggerMixin):
         metric_before = self._calculate_metric(
             moving_image=moving_image, fixed_image=fixed_image, fixed_mask=fixed_mask
         )
-
-        if self.debug:
-            # disable interactive plotting
-            plt.ioff()
-            fig, ax = plt.subplots(4, 3, sharex=True, sharey=True, squeeze=False)
-            camera = Camera(fig)
 
         for i_level, (scale_factor, iterations) in enumerate(
             zip(self.scale_factors, self.iterations)
@@ -655,7 +813,7 @@ class VarReg3d(nn.Module, LoggerMixin):
                 # create an empty (all zero) vector field
                 vector_field = torch.zeros(
                     scaled_fixed_image.shape[:1]
-                    + (n_vector_field_components,)
+                    + (n_spatial_dims,)
                     + scaled_fixed_image.shape[2:],
                     device=moving_image.device,
                 )
@@ -737,9 +895,11 @@ class VarReg3d(nn.Module, LoggerMixin):
                     )
                     for s in self.regularization_sigma[i_level]
                 )
-                _regularization_layer = GaussianSmoothing3d(
+                sigma_cutoff = (2.0, 2.0, 2.0)[:n_spatial_dims]
+                gaussian_smoothing = self._GAUSSIAN_SMOOTHING[n_spatial_dims]
+                _regularization_layer = gaussian_smoothing(
                     sigma=decayed_sigma,
-                    sigma_cutoff=(2.0, 2.0, 2.0),
+                    sigma_cutoff=sigma_cutoff,
                     force_same_size=True,
                     spacing=self.original_image_spacing,
                     use_image_spacing=self.use_image_spacing,
@@ -763,142 +923,41 @@ class VarReg3d(nn.Module, LoggerMixin):
                 self.logger.debug(log)
 
                 # here we do the debug stuff
-                if self.debug:
-                    image_clim = (-800, 200)
-                    image_cmap = "gray"
-                    forces_clim = (-1, 1)
-                    forces_cmap = "seismic"
-                    vector_field_clim = (-20, 20)
-                    vector_field_cmap = "seismic"
+                if self.debug and i_iteration % self.debug_step_size == 0:
+                    debug_metrics = {
+                        "tau": decayed_tau,
+                        "metric": level_metrics[-1],
+                        "level_image_shape": tuple(scaled_moving_image.shape),
+                        "vector_field": {},
+                    }
 
-                    mid_slice = scaled_fixed_image.shape[-2] // 2
-                    _moving_image = (
-                        scaled_moving_image[0, 0, :, mid_slice, :]
-                        .detach()
-                        .cpu()
-                        .numpy()
+                    dim_names = ("x", "y", "z")
+                    for i_dim in range(n_spatial_dims):
+                        debug_metrics["vector_field"][dim_names[i_dim]] = {
+                            "min": float(torch.min(vector_field[:, i_dim])),
+                            "Q0.05": float(
+                                torch.quantile(vector_field[:, i_dim], 0.05)
+                            ),
+                            "mean": float(torch.mean(vector_field[:, i_dim])),
+                            "Q0.95": float(
+                                torch.quantile(vector_field[:, i_dim], 0.95)
+                            ),
+                            "max": float(torch.max(vector_field[:, i_dim])),
+                        }
+                    self._add_debug_snapshot(
+                        moving_image=scaled_moving_image,
+                        fixed_image=scaled_fixed_image,
+                        warped_image=warped_moving,
+                        forces=forces,
+                        vector_field=vector_field,
+                        moving_mask=scaled_moving_mask,
+                        fixed_mask=scaled_fixed_mask,
+                        warped_mask=warped_scaled_moving_mask,
+                        full_spatial_shape=full_cropped_spatial_shape,
+                        level=i_level,
+                        iteration=i_iteration,
+                        debug_metrics=debug_metrics,
                     )
-                    _fixed_image = (
-                        scaled_fixed_image[0, 0, :, mid_slice, :].detach().cpu().numpy()
-                    )
-                    _warped_image = (
-                        warped_moving[0, 0, :, mid_slice, :].detach().cpu().numpy()
-                    )
-                    _forces = forces[0, ..., mid_slice, :].detach().cpu().numpy()
-                    _vector_field = (
-                        vector_field[0, ..., mid_slice, :].detach().cpu().numpy()
-                    )
-
-                    _moving_mask = (
-                        scaled_moving_mask[0, 0, :, mid_slice, :].detach().cpu().numpy()
-                    )
-                    _fixed_mask = (
-                        scaled_fixed_mask[0, 0, :, mid_slice, :].detach().cpu().numpy()
-                    )
-                    _warped_mask = (
-                        warped_scaled_moving_mask[0, 0, :, mid_slice, :]
-                        .detach()
-                        .cpu()
-                        .numpy()
-                    )
-
-                    _moving_image = resize(
-                        image=_moving_image,
-                        output_shape=full_cropped_shape[2::2],
-                        order=0,
-                    )
-
-                    _fixed_image = resize(
-                        image=_fixed_image,
-                        output_shape=full_cropped_shape[2::2],
-                        order=0,
-                    )
-
-                    _warped_image = resize(
-                        image=_warped_image,
-                        output_shape=full_cropped_shape[2::2],
-                        order=0,
-                    )
-
-                    _forces = resize(
-                        image=_forces * self.tau[i_level],
-                        output_shape=(3,) + full_cropped_shape[2::2],
-                        order=0,
-                    )
-
-                    _vector_field = (
-                        resize(
-                            image=_vector_field,
-                            output_shape=(3,) + full_cropped_shape[2::2],
-                            order=0,
-                        )
-                        / scale_factor
-                    )
-
-                    _moving_mask = resize(
-                        image=_moving_mask,
-                        output_shape=full_cropped_shape[2::2],
-                        order=0,
-                    )
-                    _fixed_mask = resize(
-                        image=_fixed_mask,
-                        output_shape=full_cropped_shape[2::2],
-                        order=0,
-                    )
-                    _warped_mask = resize(
-                        image=_warped_mask,
-                        output_shape=full_cropped_shape[2::2],
-                        order=0,
-                    )
-
-                    # images
-                    ax[0, 0].imshow(_moving_image, cmap=image_cmap, clim=image_clim)
-                    ax[0, 0].set_title("moving image")
-                    ax[0, 1].imshow(_fixed_image, cmap=image_cmap, clim=image_clim)
-                    ax[0, 1].set_title("fixed image")
-                    ax[0, 2].imshow(_warped_image, cmap=image_cmap, clim=image_clim)
-                    ax[0, 2].set_title("warped image")
-
-                    # forces
-                    ax[1, 0].imshow(_forces[0], cmap=forces_cmap, clim=forces_clim)
-                    ax[1, 0].set_title("forces (x)")
-                    ax[1, 1].imshow(_forces[1], cmap=forces_cmap, clim=forces_clim)
-                    ax[1, 1].set_title("forces (y)")
-                    ax[1, 2].imshow(_forces[2], cmap=forces_cmap, clim=forces_clim)
-                    ax[1, 2].set_title("forces(z)")
-
-                    # vector field
-                    ax[2, 0].imshow(
-                        _vector_field[0], cmap=vector_field_cmap, clim=vector_field_clim
-                    )
-                    ax[2, 0].set_title("vector field (x)")
-                    ax[2, 1].imshow(
-                        _vector_field[1], cmap=vector_field_cmap, clim=vector_field_clim
-                    )
-                    ax[2, 1].set_title("vector field (y)")
-                    ax[2, 2].imshow(
-                        _vector_field[2], cmap=vector_field_cmap, clim=vector_field_clim
-                    )
-                    ax[2, 2].set_title("vector field (z)")
-
-                    ax[0, 1].text(
-                        0.5,
-                        1.3,
-                        f"level={i_level}, iteration={i_iteration}",
-                        size=plt.rcParams["axes.titlesize"],
-                        ha="center",
-                        transform=ax[0, 1].transAxes,
-                    )
-
-                    # masks
-                    ax[3, 0].imshow(_moving_mask, cmap=image_cmap, clim=(0, 1))
-                    ax[3, 0].set_title("moving mask")
-                    ax[3, 1].imshow(_fixed_mask, cmap=image_cmap, clim=(0, 1))
-                    ax[3, 1].set_title("fixed mask")
-                    ax[3, 2].imshow(_warped_mask, cmap=image_cmap, clim=(0, 1))
-                    ax[3, 2].set_title("warped mask")
-
-                    camera.snap()
 
             metrics.append(level_metrics)
 
@@ -907,7 +966,7 @@ class VarReg3d(nn.Module, LoggerMixin):
         if self.restrict_to_mask_bbox:
             # undo restriction to mask, i.e. insert results into full size data
             _vector_field = torch.zeros(
-                vector_field.shape[:-3] + original_moving_image.shape[-3:],
+                vector_field.shape[:2] + original_moving_image.shape[2:],
                 device=vector_field.device,
             )
             _vector_field[(...,) + bbox[2:]] = vector_field
@@ -934,12 +993,30 @@ class VarReg3d(nn.Module, LoggerMixin):
         warped_moving_image = spatial_transformer(
             original_moving_image, composed_vector_field
         )
-        if (original_moving_mask is not None) & (initial_vector_field is not None):
-            affine_warped_moving_mask = spatial_transformer(
-                original_moving_mask, original_initial_vector_field
+        warped_moving_image = spatial_transformer(
+            original_moving_image, composed_vector_field
+        )
+        if original_moving_mask is not None:
+            warped_moving_mask = spatial_transformer(
+                original_moving_mask, composed_vector_field
             )
         else:
-            affine_warped_moving_mask = None
+            warped_moving_mask = None
+
+        if initial_vector_field is not None:
+            warped_affine_moving_image = spatial_transformer(
+                original_moving_image, original_initial_vector_field
+            )
+
+            if original_moving_mask is not None:
+                warped_affine_moving_mask = spatial_transformer(
+                    original_moving_mask, original_initial_vector_field
+                )
+            else:
+                warped_affine_moving_mask = None
+        else:
+            warped_affine_moving_image = None
+            warped_affine_moving_mask = None
 
         metric_after = self._calculate_metric(
             moving_image=warped_moving_image[bbox],
@@ -952,14 +1029,15 @@ class VarReg3d(nn.Module, LoggerMixin):
                 "metric_before": metric_before,
                 "metric_after": metric_after,
                 "level_metrics": metrics,
-                "animation": camera.animate(),
             }
 
         else:
             debug_info = None
         result["debug_info"] = debug_info
         result["warped_moving_image"] = warped_moving_image
-        result["affine_warped_moving_mask"] = affine_warped_moving_mask
+        result["warped_moving_mask"] = warped_moving_mask
+        result["warped_affine_moving_mask"] = warped_affine_moving_mask
+        result["warped_affine_moving_image"] = warped_affine_moving_image
 
         return result
 
@@ -986,7 +1064,7 @@ class DemonsVectorFieldBooster(nn.Module):
         super().__init__()
         self.shape = shape
         self.n_iterations = n_iterations
-        self.forces = DemonForces3d(method="dual")
+        self.forces = DemonForces(method="dual")
 
         regularization_1 = [
             nn.Conv3d(
@@ -1106,5 +1184,109 @@ class DemonsVectorFieldBooster(nn.Module):
                     dim=1,
                 )
             )
+
+        return vector_field_boost
+
+
+class DemonsVectorFieldArtifactBooster(nn.Module):
+    def __init__(self, shape: Tuple[int, int, int]):
+        super().__init__()
+        self.shape = shape
+
+        boost_layers_1 = [
+            nn.Conv3d(
+                in_channels=4,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        boost_layers_2 = [
+            nn.Conv3d(
+                in_channels=4,
+                out_channels=16,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        fuse_layers = [
+            nn.Conv3d(
+                in_channels=2 * 32,
+                out_channels=16,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        self.boost_1 = nn.Sequential(*boost_layers_1)
+        self.boost_2 = nn.Sequential(*boost_layers_2)
+        self.fuse = nn.Sequential(*fuse_layers)
+        self.spatial_transformer = SpatialTransformer(shape=self.shape)
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        fixed_artifact_mask: torch.Tensor,
+        vector_field: torch.Tensor,
+        image_spacing: torch.Tensor,
+    ) -> torch.Tensor:
+        spatial_image_shape = moving_image.shape[-3:]
+        vector_field_boost = torch.zeros(
+            (1, 3) + spatial_image_shape, device=moving_image.device
+        )
+
+        # composed_vector_field = vector_field_boost + self.spatial_transformer(
+        #     vector_field, vector_field_boost
+        # )
+        # moving_image = self.spatial_transformer(moving_image, composed_vector_field)
+        #
+        # diff = (moving_image - fixed_image) / (fixed_image + 1e-6)
+        # diff = F.softsign(diff)
+
+        input_images = torch.concat((vector_field, fixed_artifact_mask), dim=1)
+
+        vector_field_boost_1 = self.boost_1(input_images)
+        vector_field_boost_2 = self.boost_2(input_images)
+        vector_field_boost = self.fuse(
+            torch.concat((vector_field_boost_1, vector_field_boost_2), dim=1)
+        )
 
         return vector_field_boost

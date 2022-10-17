@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 import threading
-from collections import MutableSequence
+from collections.abc import MutableSequence
 from math import ceil
 from multiprocessing import Queue
 from pathlib import Path
@@ -13,9 +14,10 @@ import SimpleITK as sitk
 import torch
 import torch.nn.functional as F
 from scipy.ndimage import map_coordinates
-from torch.utils.data import default_collate
 
 from vroc.common_types import FloatTuple3D, Function, IntTuple3D, PathLike
+
+logger = logging.getLogger(__name__)
 
 
 class BackgroundGenerator(threading.Thread):
@@ -109,14 +111,24 @@ def compute_tre_numpy(
     vector_field: np.ndarray | None = None,
     image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
     snap_to_voxel: bool = False,
-) -> np.ndarray:
+    fixed_bounding_box: Tuple[slice, slice, slice] | None = None,
+) -> np.ndarray | None:
+    if fixed_bounding_box:
+        _, keypoint_mask = mask_keypoints(
+            keypoints=fixed_landmarks, bounding_box=fixed_bounding_box
+        )
+        if not keypoint_mask.any():
+            logger.warning("No landmarks inside given fixed bounding box")
+
+        fixed_landmarks = fixed_landmarks[keypoint_mask]
+        moving_landmarks = moving_landmarks[keypoint_mask]
+
     if vector_field is not None:
-        displacement_x = map_coordinates(vector_field[0], fixed_landmarks.transpose())
-        displacement_y = map_coordinates(vector_field[1], fixed_landmarks.transpose())
-        displacement_z = map_coordinates(vector_field[2], fixed_landmarks.transpose())
-        displacement = np.array(
-            (displacement_x, displacement_y, displacement_z)
-        ).transpose()
+        # order 1: linear interpolation if vector field at fixed landmarks
+        displacement_x = map_coordinates(vector_field[0], fixed_landmarks.T, order=1)
+        displacement_y = map_coordinates(vector_field[1], fixed_landmarks.T, order=1)
+        displacement_z = map_coordinates(vector_field[2], fixed_landmarks.T, order=1)
+        displacement = np.array((displacement_x, displacement_y, displacement_z)).T
         fixed_landmarks_warped = fixed_landmarks + displacement
     else:
         fixed_landmarks_warped = fixed_landmarks
@@ -188,11 +200,14 @@ def compute_tre_sitk(
 def rescale_range(
     values: np.ndarray, input_range: Tuple, output_range: Tuple, clip: bool = True
 ):
+    is_tensor = isinstance(values, torch.Tensor)
     in_min, in_max = input_range
     out_min, out_max = output_range
     rescaled = (((values - in_min) * (out_max - out_min)) / (in_max - in_min)) + out_min
     if clip:
-        return np.clip(rescaled, out_min, out_max)
+        clip_func = torch.clip if is_tensor else np.clip
+        rescaled = clip_func(rescaled, out_min, out_max)
+
     return rescaled
 
 
@@ -230,6 +245,28 @@ def scale_vf(vf, spacing):
     return vf
 
 
+def get_robust_bounding_box_3d(
+    image: np.ndarray, bbox_range: Tuple[float, float] = (0.01, 0.99), padding: int = 0
+) -> Tuple[slice, slice, slice]:
+    x = np.cumsum(image.sum(axis=(1, 2)))
+    y = np.cumsum(image.sum(axis=(0, 2)))
+    z = np.cumsum(image.sum(axis=(0, 1)))
+
+    x = x / x[-1]
+    y = y / y[-1]
+    z = z / z[-1]
+
+    x_min, x_max = np.searchsorted(x, bbox_range[0]), np.searchsorted(x, bbox_range[1])
+    y_min, y_max = np.searchsorted(y, bbox_range[0]), np.searchsorted(y, bbox_range[1])
+    z_min, z_max = np.searchsorted(z, bbox_range[0]), np.searchsorted(z, bbox_range[1])
+
+    x_min, x_max = max(x_min - padding, 0), min(x_max + padding, image.shape[0])
+    y_min, y_max = max(y_min - padding, 0), min(y_max + padding, image.shape[1])
+    z_min, z_max = max(z_min - padding, 0), min(z_max + padding, image.shape[2])
+
+    return np.index_exp[x_min : x_max + 1, y_min : y_max + 1, z_min : z_max + 1]
+
+
 def get_bounding_box(mask: torch.Tensor, padding: int = 0):
     def get_axis_bbox(mask, axis: int, padding: int = 0):
         mask_shape = mask.shape
@@ -252,6 +289,34 @@ def get_bounding_box(mask: torch.Tensor, padding: int = 0):
     return tuple(get_axis_bbox(mask, axis=i, padding=padding) for i in range(mask.ndim))
 
 
+def mask_keypoints(
+    keypoints: torch.Tensor | np.ndarray, bounding_box: Tuple[slice, ...]
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # keypoints has shape (1, n_keypoints, n_dim)
+    # check dimensions
+    if len(bounding_box) != keypoints.shape[-1]:
+        raise ValueError("Dimension mismatch")
+    total_mask = None
+    for i_axis, axis_bbox in enumerate(bounding_box):
+        axis_mask = (keypoints[..., i_axis] >= axis_bbox.start) & (
+            keypoints[..., i_axis] < axis_bbox.stop
+        )
+
+        if total_mask is None:
+            total_mask = axis_mask
+        else:
+            total_mask &= axis_mask
+
+    # remove 1 from shape in case of tensor
+    if len(total_mask.shape) == 2:
+        total_mask = total_mask[0]
+        masked_keypoints = keypoints[:, total_mask]
+    else:
+        masked_keypoints = keypoints[total_mask]
+
+    return masked_keypoints, total_mask
+
+
 def remove_suffixes(path: Path) -> Path:
     while path != (without_suffix := path.with_suffix("")):
         path = without_suffix
@@ -260,15 +325,96 @@ def remove_suffixes(path: Path) -> Path:
 
 
 def nearest_factor_pow_2(
-    value: int, factors: Tuple[int, ...] = (2, 3, 5, 6, 7, 9)
+    value: int,
+    factors: Tuple[int, ...] = (2, 3, 5, 6, 7, 9),
+    min_exponent: int | None = None,
+    max_value: int | None = None,
+    allow_smaller_value: bool = False,
 ) -> int:
     factors = np.array(factors)
-    exponents = np.ceil(np.log2(value / factors))
-    nearest = factors * 2**exponents - value
+    upper_exponents = np.ceil(np.log2(value / factors))
+    lower_exponents = upper_exponents - 1
 
-    nearest_factor = factors[np.argmin(nearest)]
-    nearest_exponent = exponents[np.argmin(nearest)]
+    if min_exponent:
+        upper_exponents = upper_exponents[upper_exponents >= min_exponent]
+        lower_exponents = lower_exponents[lower_exponents >= min_exponent]
+
+    def get_distances(
+        factors: Tuple[int, ...], exponents: Tuple[int, ...], max_value: int
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        pow2_values = factors * 2**exponents
+        if max_value:
+            mask = pow2_values <= max_value
+            pow2_values = pow2_values[mask]
+            factors = factors[mask]
+            exponents = exponents[mask]
+
+        return np.abs(pow2_values - value), factors, exponents
+
+    distances, _factors, _exponents = get_distances(
+        factors=factors, exponents=upper_exponents, max_value=max_value
+    )
+    if len(distances) == 0:
+        if allow_smaller_value:
+            distances, _factors, _exponents = get_distances(
+                factors=factors, exponents=lower_exponents, max_value=max_value
+            )
+        else:
+            raise RuntimeError("Could not find a value")
+
+    if len(distances):
+        nearest_factor = _factors[np.argmin(distances)]
+        nearest_exponent = _exponents[np.argmin(distances)]
+    else:
+        # nothing found
+        pass
+
     return int(nearest_factor * 2**nearest_exponent)
+
+
+def pad_bounding_box_to_pow_2(
+    bounding_box: Tuple[slice, ...],
+    factors: Tuple[int, ...] = (2, 3, 5, 6, 7, 9),
+    reference_shape: Tuple[int, ...] | None = None,
+) -> tuple[slice, ...]:
+    if any([b.step and b.step > 1 for b in bounding_box]):
+        raise NotImplementedError("Only step size of 1 for now")
+
+    n_dim = len(bounding_box)
+    bbox_shape = tuple(b.stop - b.start for b in bounding_box)
+    if reference_shape:
+        print(bounding_box)
+        print(bbox_shape, reference_shape)
+        padding = tuple(
+            nearest_factor_pow_2(
+                s, factors=factors, max_value=r, allow_smaller_value=True
+            )
+            - s
+            for s, r in zip(bbox_shape, reference_shape)
+        )
+    else:
+        padding = tuple(
+            nearest_factor_pow_2(s, factors=factors) - s for s in bbox_shape
+        )
+
+    padded_bbox = []
+    for i_axis in range(n_dim):
+        padding_left = padding[i_axis] // 2
+        padding_right = padding[i_axis] - padding_left
+
+        padded_slice = slice(
+            bounding_box[i_axis].start - padding_left,
+            bounding_box[i_axis].stop + padding_right,
+        )
+
+        if padded_slice.start < 0:
+            padded_slice = slice(
+                0,
+                padded_slice.stop - padded_slice.start,
+            )
+
+        padded_bbox.append(padded_slice)
+    return tuple(padded_bbox)
 
 
 def merge_segmentation_labels(
@@ -284,6 +430,8 @@ def merge_segmentation_labels(
 
 
 def dict_collate(batch, noop_keys: Sequence[Any]) -> dict:
+    from torch.utils.data import default_collate
+
     batch_torch = [
         {key: value for (key, value) in b.items() if key not in noop_keys}
         for b in batch
@@ -332,27 +480,20 @@ def binary_dilation(mask: torch.Tensor, kernel_size: IntTuple3D) -> torch.Tensor
     return torch.clip(dilated, 0, 1)
 
 
-def compose_vector_fields(
-    vector_field_1: torch.Tensor,
-    vector_field_2: torch.Tensor,
-    spatial_transformer: "SpatialTransformer" | None = None,
-) -> torch.Tensor:
-    if (n_dimensions := vector_field_1.ndim) != vector_field_2.ndim != 5:
-        raise NotImplementedError(
-            "Currently only imlemented for 3D images, i.e. 5D input tensors"
-        )
+def optimizer_to(optim, device):
+    for param in optim.state.values():
+        # Not sure if there are any global tensors in the state dict
+        if isinstance(param, torch.Tensor):
+            param.data = param.data.to(device)
+            if param._grad is not None:
+                param._grad.data = param._grad.data.to(device)
+        elif isinstance(param, dict):
+            for subparam in param.values():
+                if isinstance(subparam, torch.Tensor):
+                    subparam.data = subparam.data.to(device)
+                    if subparam._grad is not None:
+                        subparam._grad.data = subparam._grad.data.to(device)
 
-    if (shape := vector_field_1.shape) != vector_field_2.shape:
-        raise RuntimeError(
-            f"Shape mismatch between vector fields: "
-            f"{vector_field_1.shape} vs. {vector_field_2.shape}"
-        )
 
-    n_spatial_dimensions = n_dimensions.ndim - 2
-
-    if not spatial_transformer:
-        spatial_transformer = SpatialTransformer(
-            shape=shape[-n_spatial_dimensions:], mode="bilinear"
-        )
-
-    return vector_field_2 + spatial_transformer(vector_field_1, vector_field_2)
+if __name__ == "__main__":
+    v = nearest_factor_pow_2(130, max_value=156, allow_smaller_value=True)

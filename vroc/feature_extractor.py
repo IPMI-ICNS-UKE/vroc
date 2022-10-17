@@ -14,7 +14,7 @@ from vroc.common_types import FloatTuple3D, TorchDevice
 from vroc.convert import as_tensor
 from vroc.interpolation import resize_spacing
 from vroc.logger import LoggerMixin
-from vroc.models import AutoEncoder, VarReg3d
+from vroc.models import AutoEncoder, VarReg
 from vroc.oriented_histogram import OrientedHistogram
 from vroc.registration import VrocRegistration
 
