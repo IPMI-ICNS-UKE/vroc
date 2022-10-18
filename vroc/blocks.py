@@ -452,7 +452,7 @@ class SpatialTransformer(nn.Module):
         warped = F.grid_sample(image, grid, align_corners=True, mode=mode)
 
         if is_mask:
-            warped = torch.as_tensor(warped, dtype=image_dtype)
+            warped = torch.as_tensor(warped > 0.5, dtype=image_dtype)
 
         return warped
 

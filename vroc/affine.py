@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, Tuple
 
@@ -9,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.ndimage import binary_dilation
-from torch.optim import SGD, Adam, NAdam
+from torch.optim import SGD, Adam, NAdam, RAdam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from vroc.blocks import SpatialTransformer
@@ -150,15 +151,18 @@ def run_affine_registration(
     loss_function: Callable | None = None,
     n_iterations: int = 300,
     step_size: float = 1e-3,
+    step_size_reduce_factor: float = 0.5,
+    min_step_size: float = 1e-5,
+    retry_threshold: float | None = 0.1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if n_iterations < 1:
-        raise ValueError("Number of iterations must be >= 1")
     device = moving_image.device
     spatial_image_shape = moving_image.shape[2:]
 
+    initial_step_size = step_size
+
     if moving_mask is not None and fixed_mask is not None:
         # ROI is union mask
-        roi = moving_mask | fixed_mask
+        # roi = moving_mask | fixed_mask
         roi = fixed_mask
         print("Using fixed mask")
     else:
@@ -168,40 +172,83 @@ def run_affine_registration(
     if not loss_function:
         loss_function = mse_loss
 
-    affine_transform = AffineTransform3d().to(device)
-    spatial_transformer = SpatialTransformer(shape=spatial_image_shape).to(device)
+    initial_loss = float(loss_function(moving_image, fixed_image, roi))
 
-    optimizer = NAdam(affine_transform.parameters(), lr=step_size)
-    scheduler = ReduceLROnPlateau(
-        optimizer=optimizer,
-        mode="min",
-        factor=0.5,
-        patience=10,
-        threshold=0.0001,
-        min_lr=1e-5,
+    # initialize with moving image so that warped image is defined if n_iterations == 0
+    warped_image = moving_image
+    while True:
+        try:
+            affine_transform = AffineTransform3d().to(device)
+            spatial_transformer = SpatialTransformer(shape=spatial_image_shape).to(
+                device
+            )
+            optimizer = Adam(affine_transform.parameters(), lr=step_size)
+
+            scheduler = ReduceLROnPlateau(
+                optimizer=optimizer,
+                mode="min",
+                factor=step_size_reduce_factor,
+                patience=10,
+                threshold=0.001,
+                min_lr=min_step_size,
+            )
+
+            losses = []
+            params = {
+                "iterations": n_iterations,
+                "loss_function": loss_function.__name__,
+                "step_size": step_size,
+            }
+            logger.info(f"Start affine registration with parameters {params}")
+            for i in range(n_iterations):
+                optimizer.zero_grad()
+                affine_matrix = affine_transform.forward()
+                warped_image = spatial_transformer.forward(
+                    moving_image, affine_matrix[None]
+                )
+
+                loss = loss_function(warped_image, fixed_image, roi)
+
+                loss.backward()
+                optimizer.step()
+                scheduler.step(loss)
+
+                loss = float(loss)
+                losses.append(loss)
+
+                log = {
+                    "stage": "affine",
+                    "iteration": i,
+                    "loss": loss,
+                    "current_step_size": optimizer.param_groups[0]["lr"],
+                }
+                logger.debug(log)
+
+                relative_change = (loss - initial_loss) / abs(initial_loss)
+                if retry_threshold is not None and relative_change > retry_threshold:
+                    logger.warning(f"Step size of {step_size} seems to be too large")
+                    raise StopIteration
+            else:
+                # all iterations passed, break while True loop
+                break
+
+        except StopIteration:
+            # raised if affine registration is aborted due to divergent loss
+            # decrease step_size and try again
+            step_size = step_size * step_size_reduce_factor
+            if step_size < min_step_size:
+                # break while True loop
+                raise RuntimeError(
+                    f"Could not find any step size in range "
+                    f"[{initial_step_size}, {min_step_size}] that decreases loss"
+                )
+
+            logger.warning(f"Retry with smaller step size of {step_size}")
+    logger.info(
+        f"Finished affine registration. "
+        f"Loss {loss_function.__name__} before/after: "
+        f"{initial_loss:.6f}/{losses[-1]:.6f}"
     )
-
-    losses = []
-    for i in range(n_iterations):
-        optimizer.zero_grad()
-        affine_matrix = affine_transform.forward()
-        warped_image = spatial_transformer.forward(moving_image, affine_matrix[None])
-
-        loss = loss_function(warped_image, fixed_image, roi)
-
-        loss.backward()
-        optimizer.step()
-        scheduler.step(loss)
-
-        losses.append(float(loss))
-
-        log = {
-            "stage": "affine",
-            "iteration": i,
-            "loss": losses[-1],
-            "current_step_size": optimizer.param_groups[0]["lr"],
-        }
-        logger.debug(log)
 
     return warped_image, affine_transform.get_vector_field(moving_image)
 
