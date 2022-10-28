@@ -9,7 +9,7 @@ import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
 
-from vroc.common_types import IntTuple, IntTuple3D, Number
+from vroc.common_types import ArrayOrTensor, IntTuple, IntTuple3D, Number
 from vroc.metrics import root_mean_squared_error
 
 
@@ -203,6 +203,12 @@ def crop_background_wrapper(input_dir: os.path, output_dir: os.path):
         img = sitk.ReadImage(img_filepath)
         cropped_img = crop_background(img, print_summary=True)
         sitk.WriteImage(cropped_img, os.path.join(output_dir, "Cropped_" + file))
+
+
+def get_non_ct_background_mask(
+    image: ArrayOrTensor, threshold: int = -1000
+) -> ArrayOrTensor:
+    return image > threshold
 
 
 def affine_registration(

@@ -15,7 +15,13 @@ import torch
 import torch.nn.functional as F
 from scipy.ndimage import map_coordinates
 
-from vroc.common_types import FloatTuple3D, Function, IntTuple3D, PathLike
+from vroc.common_types import (
+    ArrayOrTensor,
+    FloatTuple3D,
+    Function,
+    IntTuple3D,
+    PathLike,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +105,22 @@ class LazyLoadableList(MutableSequence):
         return repr(self.items)
 
 
-def read_landmarks(filepath: PathLike, sep: str = ",") -> np.ndarray:
+def read_landmarks(filepath: PathLike, sep: str | None = None) -> np.ndarray:
+    possible_seps = (" ", "\t", ",")
     with open(filepath, "rt") as f:
-        lines = [tuple(map(float, line.strip().split(sep))) for line in f]
+        lines = [line for line in f]
+
+    if not sep:
+        # guesstimate separator
+        for sep in possible_seps:
+            if sep in lines[0]:
+                break
+        else:
+            raise RuntimeError(
+                "Could not guesstimate separator. Please specify separator."
+            )
+
+    lines = [tuple(map(float, line.strip().split(sep))) for line in lines]
     return np.array(lines, dtype=np.float32)
 
 
@@ -198,17 +217,45 @@ def compute_tre_sitk(
 
 
 def rescale_range(
-    values: np.ndarray, input_range: Tuple, output_range: Tuple, clip: bool = True
+    values: ArrayOrTensor, input_range: Tuple, output_range: Tuple, clip: bool = True
 ):
-    is_tensor = isinstance(values, torch.Tensor)
-    in_min, in_max = input_range
-    out_min, out_max = output_range
-    rescaled = (((values - in_min) * (out_max - out_min)) / (in_max - in_min)) + out_min
-    if clip:
-        clip_func = torch.clip if is_tensor else np.clip
-        rescaled = clip_func(rescaled, out_min, out_max)
+    if input_range and output_range:
+        is_tensor = isinstance(values, torch.Tensor)
+        in_min, in_max = input_range
+        out_min, out_max = output_range
+        values = (
+            ((values - in_min) * (out_max - out_min)) / (in_max - in_min)
+        ) + out_min
+        if clip:
+            clip_func = torch.clip if is_tensor else np.clip
+            values = clip_func(values, out_min, out_max)
 
-    return rescaled
+    return values
+
+
+def to_one_hot(
+    labels: torch.Tensor,
+    n_classes: int | None = None,
+    dtype: torch.dtype = torch.float32,
+    dim: int = 1,
+) -> torch.Tensor:
+    labels_shape = list(labels.shape)
+
+    if labels_shape[dim] != 1:
+        raise ValueError(
+            f"Labels should be single channel, "
+            f"got {labels_shape[dim]} channels instead"
+        )
+
+    if n_classes is None:
+        # guess number of classes
+        n_classes = labels.max()
+    labels_shape[dim] = n_classes
+
+    labels_one_hot = torch.zeros(size=labels_shape, dtype=dtype, device=labels.device)
+    labels_one_hot.scatter_(dim=dim, index=labels.long(), value=1)
+
+    return labels_one_hot
 
 
 def torch_prepare(image: np.ndarray) -> torch.tensor:
@@ -495,5 +542,37 @@ def optimizer_to(optim, device):
                         subparam._grad.data = subparam._grad.data.to(device)
 
 
+from collections import Sequence
+
+
+def convert_dict_values(d: dict, types, converter):
+    types = tuple(types)
+
+    if isinstance(d, (list, tuple, set)):
+        seq_type: type = type(d)
+        return seq_type(
+            [convert_dict_values(_d, types=types, converter=converter) for _d in d]
+        )
+
+    elif isinstance(d, types):
+        return converter(d)
+
+    elif isinstance(d, dict):
+        # copy dict so we do not modify the original dict
+        d = d.copy()
+        for key, _d in d.items():
+            d[key] = convert_dict_values(_d, types=types, converter=converter)
+
+        return d
+
+    else:
+        return d
+
+
 if __name__ == "__main__":
-    v = nearest_factor_pow_2(130, max_value=156, allow_smaller_value=True)
+    labels = torch.ones((1, 1, 10))
+    labels[..., 0:3] = 0
+    labels[..., 3:6] = 1
+    labels[..., 6:] = 2
+
+    l = to_one_hot(labels, n_classes=3)

@@ -72,6 +72,9 @@ class BaseTrainer(ABC, LoggerMixin):
             top_k=3,
         )
 
+        # dict for metric history (for, e.g., calculating running means)
+        self._metric_history = {}
+
         # training step and epoch tracking
         self.i_step = 0
         self.i_epoch = 0
@@ -97,6 +100,7 @@ class BaseTrainer(ABC, LoggerMixin):
         return repo
 
     def _prefixed_log(self, message, context: str, level: int):
+        context = context.upper()
         prefix = f"[Step {self.i_step:<6} | {context:>6}]"
         self.logger.log(level=level, msg=f"{prefix} {message}", stacklevel=3)
 
@@ -115,8 +119,20 @@ class BaseTrainer(ABC, LoggerMixin):
                 and len(metic_value) > 0
                 and isinstance(metic_value[0], (int, float))
             ):
-                metric_name = f"mean_{metric_name}"
+                metric_name = f"mean_batch_{metric_name}"
                 metic_value = np.mean(metic_value)
+
+            if isinstance(metic_value, (int, float)):
+                subset = context["subset"]
+                self._metric_history.setdefault(subset, {})
+                history = self._metric_history[subset].setdefault(
+                    metric_name, deque(maxlen=100)
+                )
+                history.append(metic_value)
+                self.log_info(
+                    f"Running mean of {metric_name}: {np.mean(history):.6f}",
+                    context=subset,
+                )
 
             self.aim_run.track(
                 metic_value,
@@ -192,7 +208,7 @@ class BaseTrainer(ABC, LoggerMixin):
             for batch_metrics in self.train_one_epoch():
                 if (
                     self.i_step > 0
-                    and self.val_loader
+                    and self.val_loader is not None
                     and self.i_step % validation_interval == 0
                 ):
                     # run validation at given intervals (if validation loader is given)

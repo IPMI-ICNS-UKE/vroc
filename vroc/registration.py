@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List, Literal, Sequence, Tuple
 
 import numpy as np
@@ -8,22 +9,27 @@ import SimpleITK as sitk
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from monai.losses import DiceLoss
 
 from vroc.affine import run_affine_registration
 from vroc.common_types import (
     ArrayOrTensor,
     FloatTuple2D,
     FloatTuple3D,
+    MaybeSequence,
     Number,
+    PathLike,
     TorchDevice,
 )
 from vroc.convert import as_tensor
-from vroc.decorators import timing
+from vroc.decorators import convert, timing
 from vroc.guesser import ParameterGuesser
-from vroc.logger import LoggerMixin
-from vroc.loss import TRELoss, smooth_vector_field_loss
+from vroc.helper import to_one_hot
+from vroc.logger import LoggerMixin, RegistrationLogEntry
+from vroc.loss import TRELoss, WarpedMSELoss, smooth_vector_field_loss
 from vroc.metrics import root_mean_squared_error
 from vroc.models import DemonsVectorFieldBooster, VarReg
+from vroc.plot import RegistrationProgressPlotter
 
 
 @dataclass
@@ -75,6 +81,7 @@ class RegistrationResult:
 
 
 class VrocRegistration(LoggerMixin):
+
     DEFAULT_REGISTRATION_PARAMETERS = {
         "iterations": 800,
         "tau": 2.25,
@@ -140,12 +147,14 @@ class VrocRegistration(LoggerMixin):
         return tuple(image.clip(lower, upper) for image in images)
 
     @timing()
+    @convert("debug_output_folder", converter=Path)
     def register(
         self,
         moving_image: ArrayOrTensor,
         fixed_image: ArrayOrTensor,
         moving_mask: ArrayOrTensor | None = None,
         fixed_mask: ArrayOrTensor | None = None,
+        use_masks: MaybeSequence[bool] = True,
         image_spacing: FloatTuple2D | FloatTuple3D = (1.0, 1.0, 1.0),
         register_affine: bool = True,
         affine_loss_function: Callable | None = None,
@@ -153,15 +162,21 @@ class VrocRegistration(LoggerMixin):
         affine_step_size: float = 1e-3,
         force_type: Literal["demons", "ncc", "ngf"] = "demons",
         gradient_type: Literal["active", "passive", "dual"] = "dual",
-        segment_roi: bool = True,
+        segment_roi: bool = False,
         valid_value_range: Tuple[Number, Number] | None = None,
         early_stopping_delta: float = 0.0,
         early_stopping_window: int | None = None,
         default_parameters: dict | None = None,
         return_as_tensor: bool = False,
         debug: bool = False,
+        debug_output_folder: PathLike | None = None,
         debug_step_size: int = 10,
     ) -> RegistrationResult:
+        # typing for converted args/kwargs
+        debug_output_folder: Path
+        if debug_output_folder:
+            debug_output_folder.mkdir(exist_ok=True, parents=True)
+
         # n_spatial_dims is defined by length of image_spacing
         n_spatial_dims = len(image_spacing)
         # n_total_dims = n_spatial_dims + batch dim + color dim
@@ -201,7 +216,16 @@ class VrocRegistration(LoggerMixin):
                 lower=valid_value_range[0],
                 upper=valid_value_range[1],
             )
-            self.logger.info(f"Clip image values to {valid_value_range}")
+            self.logger.info(
+                f"Clip image values to given value range {valid_value_range}"
+            )
+        else:
+            # we set valid value range to (min, max) of the image value range and use
+            # min value as default value for resampling (spatial transformer)
+            valid_value_range = (
+                min(moving_image.min(), fixed_image.min()),
+                max(moving_image.max(), fixed_image.max()),
+            )
 
         if register_affine:
             (
@@ -221,6 +245,10 @@ class VrocRegistration(LoggerMixin):
 
         # handle ROIs
         # passed masks overwrite ROI segmenter
+        # check if roi_segmenter is given if segment_roi
+        if segment_roi and not self.roi_segmenter:
+            raise RuntimeError("Please pass a ROI segmenter")
+
         if moving_mask is None and segment_roi:
             moving_mask = self._segment_roi(moving_image)
         elif moving_mask is None and not segment_roi:
@@ -283,6 +311,7 @@ class VrocRegistration(LoggerMixin):
         varreg = VarReg(
             iterations=parameters["iterations"],
             scale_factors=scale_factors,
+            use_masks=use_masks,
             force_type=force_type,
             gradient_type=gradient_type,
             tau_level_decay=parameters["tau_level_decay"],
@@ -295,6 +324,7 @@ class VrocRegistration(LoggerMixin):
             early_stopping_delta=early_stopping_delta,
             early_stopping_window=early_stopping_window,
             debug=debug,
+            debug_output_folder=debug_output_folder,
             debug_step_size=debug_step_size,
         ).to(self.device)
 
@@ -330,36 +360,74 @@ class VrocRegistration(LoggerMixin):
     @timing()
     def register_and_train_boosting(
         self,
+        # boosting specific args/kwargs
         model: nn.Module,
         optimizer: optim.Optimizer,
         n_iterations: int,
-        moving_keypoints: torch.Tensor,
-        fixed_keypoints: torch.Tensor,
-        moving_image: np.ndarray | torch.Tensor,
-        fixed_image: np.ndarray | torch.Tensor,
-        moving_mask: np.ndarray | torch.Tensor | None = None,
-        fixed_mask: np.ndarray | torch.Tensor | None = None,
-        image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+        moving_image: ArrayOrTensor,
+        fixed_image: ArrayOrTensor,
+        moving_keypoints: torch.Tensor | None = None,
+        fixed_keypoints: torch.Tensor | None = None,
+        moving_labels: torch.Tensor | None = None,
+        fixed_labels: torch.Tensor | None = None,
+        n_label_classes: int | None = None,
+        image_loss_function: Literal["mse"] | None = None,
+        keypoint_loss_weight: float = 1.0,
+        label_loss_weight: float = 1.0,
+        image_loss_weight: float = 1.0,
+        smoothness_loss_weight: float = 1.0,
+        # registration kwargs as in register(...)
+        moving_mask: ArrayOrTensor | None = None,
+        fixed_mask: ArrayOrTensor | None = None,
+        use_masks: MaybeSequence[bool] = True,
+        image_spacing: FloatTuple2D | FloatTuple3D = (1.0, 1.0, 1.0),
         register_affine: bool = True,
-        affine_loss_fn: Callable | None = None,
+        affine_loss_function: Callable | None = None,
+        affine_iterations: int = 300,
+        affine_step_size: float = 1e-3,
         force_type: Literal["demons", "ncc", "ngf"] = "demons",
         gradient_type: Literal["active", "passive", "dual"] = "dual",
-        segment_roi: bool = True,
+        segment_roi: bool = False,
         valid_value_range: Tuple[Number, Number] | None = None,
         early_stopping_delta: float = 0.0,
         early_stopping_window: int | None = None,
         default_parameters: dict | None = None,
         return_as_tensor: bool = False,
         debug: bool = False,
+        debug_output_folder: PathLike | None = None,
+        debug_step_size: int = 10,
     ) -> RegistrationResult:
+        # TODO: duplicate code fragment
+        # TODO: preprocessing, checks and as_tensor as separate function
+        # n_spatial_dims is defined by length of image_spacing
+        n_spatial_dims = len(image_spacing)
+        # n_total_dims = n_spatial_dims + batch dim + color dim
+        n_total_dims = n_spatial_dims + 2
+
+        # check if any optimization target is passed (i.e., either keypoints or labels)
+        possible_targets = (
+            moving_keypoints,
+            fixed_keypoints,
+            moving_labels,
+            fixed_labels,
+        )
+        if not any(target is not None for target in possible_targets):
+            raise ValueError(
+                "Please pass at least one moving and fixed "
+                "target (keypoints or labels)"
+            )
+
         registration_result = self.register(
             moving_image=moving_image,
             fixed_image=fixed_image,
             moving_mask=moving_mask,
             fixed_mask=fixed_mask,
+            use_masks=use_masks,
             image_spacing=image_spacing,
             register_affine=register_affine,
-            affine_loss_function=affine_loss_fn,
+            affine_loss_function=affine_loss_function,
+            affine_iterations=affine_iterations,
+            affine_step_size=affine_step_size,
             force_type=force_type,
             gradient_type=gradient_type,
             segment_roi=segment_roi,
@@ -367,8 +435,10 @@ class VrocRegistration(LoggerMixin):
             early_stopping_delta=early_stopping_delta,
             early_stopping_window=early_stopping_window,
             default_parameters=default_parameters,
-            return_as_tensor=True,  # we need tensors for training
+            return_as_tensor=True,  # we need tensors for boosting
             debug=debug,
+            debug_output_folder=debug_output_folder,
+            debug_step_size=debug_step_size,
         )
 
         model = model.to(self.device)
@@ -376,6 +446,7 @@ class VrocRegistration(LoggerMixin):
         moving_image = torch.clone(registration_result.moving_image)
         fixed_image = torch.clone(registration_result.fixed_image)
 
+        # transform and clip images to value range [0, 1]
         moving_image = (moving_image - valid_value_range[0]) / (
             valid_value_range[1] - valid_value_range[0]
         )
@@ -392,24 +463,102 @@ class VrocRegistration(LoggerMixin):
         composed_vector_field = torch.clone(registration_result.composed_vector_field)
         image_spacing = torch.as_tensor(image_spacing, device=self.device)
 
+        # init loss layers and values (even if not used)
+
         tre_loss = TRELoss(apply_sqrt=False, reduction=None)
+        dice_loss = DiceLoss(include_background=True, reduction="mean")
+
+        # setup and initialize losses and loss weights
+        requested_losses = set()
+        loss_weights = {}
+        if (
+            keypoint_loss_weight != 0
+            and moving_keypoints is not None
+            and fixed_keypoints is not None
+        ):
+            # we have to compute keypoint loss
+            requested_losses.add("keypoint")
+            loss_weights["keypoint"] = keypoint_loss_weight
+            # calculate loss before boosting
+            tre_loss_before_boosting = tre_loss(
+                composed_vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing,
+            )
+            tre_metric_before_boosting = tre_loss_before_boosting.sqrt().mean()
+
+        if smoothness_loss_weight != 0:
+            # we have to compute smoothness loss
+            requested_losses.add("smoothness")
+            loss_weights["smoothness"] = smoothness_loss_weight
+            # calculate loss before boosting
+            smoothness_before_boosting = smooth_vector_field_loss(
+                vector_field=composed_vector_field, mask=fixed_mask, l2r_variant=True
+            )
+        if image_loss_weight != 0 and image_loss_function:
+            # we have to compute image loss
+            if image_loss_function == "mse":
+                image_loss = WarpedMSELoss()
+            else:
+                raise NotImplementedError
+
+            requested_losses.add("image")
+            loss_weights["image"] = image_loss_weight
+            # calculate loss before boosting
+            image_loss_before_boosting = image_loss(
+                moving_image=moving_image,
+                vector_field=composed_vector_field,
+                fixed_image=fixed_image,
+                fixed_mask=fixed_mask,
+            )
+        if (
+            label_loss_weight != 0
+            and moving_labels is not None
+            and fixed_labels is not None
+        ):
+            # convert to tensors
+            moving_labels = as_tensor(
+                moving_labels, n_dim=n_total_dims, dtype=torch.uint8, device=self.device
+            )
+            fixed_labels = as_tensor(
+                fixed_labels, n_dim=n_total_dims, dtype=torch.uint8, device=self.device
+            )
+
+            # convert to one hot if not already
+            # We use float32 here, as there are no gradients with NN interpolation.
+            # This must be a bug in PyTorch
+            if moving_labels.shape[1] == 1:
+                moving_labels = to_one_hot(
+                    moving_labels, n_classes=n_label_classes, dtype=torch.float32
+                )
+            if fixed_labels.shape[1] == 1:
+                fixed_labels = to_one_hot(
+                    fixed_labels, n_classes=n_label_classes, dtype=torch.float32
+                )
+
+            # we have to compute label loss
+            requested_losses.add("label")
+            loss_weights["label"] = label_loss_weight
+            # calculate loss before boosting
+            warped_labels = model.spatial_transformer(
+                image=moving_labels,
+                transformation=composed_vector_field,
+                default_value=0,
+                mode="nearest",
+            )
+            dice_loss_before_boosting = dice_loss(warped_labels, fixed_labels)
+
         gradient_scaler = torch.cuda.amp.GradScaler()
 
-        tre_loss_before_boosting = tre_loss(
-            composed_vector_field,
-            moving_keypoints,
-            fixed_keypoints,
-            image_spacing,
-        )
-        tre_metric_before_boosting = tre_loss_before_boosting.sqrt().mean()
-
-        smoothness_before_boosting = smooth_vector_field_loss(
-            vector_field=composed_vector_field, mask=fixed_mask, l2r_variant=True
-        )
-
+        plotter = RegistrationProgressPlotter(output_folder=debug_output_folder)
         max_iteration_length = len(str(n_iterations))
-        for i_iteration in range(n_iterations):
 
+        # initial values in case of 0 iterations
+        composed_boosted_vector_field = composed_vector_field
+        vector_field_boost = torch.zeros_like(composed_boosted_vector_field)
+
+        for i_iteration in range(n_iterations):
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
                 vector_field_boost = model(
@@ -429,6 +578,15 @@ class VrocRegistration(LoggerMixin):
                     )
                 )
 
+            # initialize log entry
+            log = RegistrationLogEntry(
+                stage="boosting",
+                iteration=i_iteration,
+            )
+
+            # compute specified losses (keypoints, smoothness and labels)
+            losses = {}
+            if "keypoint" in requested_losses:
                 tre_loss_after_boosting = tre_loss(
                     composed_boosted_vector_field,
                     moving_keypoints,
@@ -437,9 +595,15 @@ class VrocRegistration(LoggerMixin):
                 )
 
                 tre_metric_after_boosting = tre_loss_after_boosting.sqrt().mean()
-                # tre_difference_loss = tre_metric_after_boosting - tre_metric_before_boosting
                 tre_ratio_loss = tre_metric_after_boosting / tre_metric_before_boosting
 
+                losses["keypoint"] = tre_ratio_loss
+
+                # add to log
+                log.tre_metric_before_boosting = tre_metric_before_boosting
+                log.tre_metric_after_boosting = tre_metric_after_boosting
+
+            if "smoothness" in requested_losses:
                 smoothness_after_boosting = smooth_vector_field_loss(
                     vector_field=composed_boosted_vector_field,
                     mask=fixed_mask,
@@ -449,34 +613,153 @@ class VrocRegistration(LoggerMixin):
                 smoothness_ratio_loss = (
                     smoothness_after_boosting / smoothness_before_boosting
                 )
+
+                losses["smoothness"] = smoothness_ratio_loss
+
+                # add to log
+                log.smoothness_before_boosting = smoothness_before_boosting
+                log.smoothness_after_boosting = smoothness_after_boosting
+
                 # ratio < 1: better, ratio > 1 worse
                 # only penalize worsening of smoothness
-                if smoothness_ratio_loss < 1:
-                    smoothness_ratio_loss = 0.5 * smoothness_ratio_loss + 0.5
+                # if smoothness_ratio_loss < 1:
+                #     smoothness_ratio_loss = 0.5 * smoothness_ratio_loss + 0.5
                 # smoothness_ratio_loss = torch.maximum(
                 #     smoothness_ratio_loss, torch.as_tensor(1.0)
                 # )
 
-                losses = {
-                    "tre": tre_ratio_loss,
-                    "smooth": smoothness_ratio_loss,
-                }
+            if "image" in requested_losses:
+                image_loss_after_boosting = image_loss(
+                    moving_image=moving_image,
+                    vector_field=composed_boosted_vector_field,
+                    fixed_image=fixed_image,
+                    fixed_mask=fixed_mask,
+                )
 
-                loss = 1.0 * losses["tre"] + 1.0 * losses["smooth"]
+                image_ratio_loss = (
+                    image_loss_after_boosting / image_loss_before_boosting
+                )
+
+                losses["image"] = image_ratio_loss
+
+                # add to log
+                log.image_loss_before_boosting = image_loss_before_boosting
+                log.image_loss_after_boosting = image_loss_after_boosting
+
+            if "label" in requested_losses:
+                warped_labels = model.spatial_transformer(
+                    moving_labels,
+                    composed_boosted_vector_field,
+                    default_value=0,
+                    mode="bilinear",
+                )
+
+                dice_loss_after_boosting = dice_loss(warped_labels, fixed_labels)
+
+                dice_ratio_loss = dice_loss_after_boosting / dice_loss_before_boosting
+                losses["label"] = dice_ratio_loss
+
+                # add to log
+                log.dice_loss_before_boosting = dice_loss_before_boosting
+                log.dice_loss_after_boosting = dice_loss_after_boosting
+
+            # reduce losses to scalar
+            loss = 0.0
+            weight_sum = 0.0
+            for loss_name, loss_value in losses.items():
+                loss += loss_weights[loss_name] * loss_value
+                weight_sum += loss_weights[loss_name]
+            loss /= weight_sum
+
+            # add loss info to log
+            log.loss = loss
+            log.losses = losses
+            log.loss_weights = loss_weights
+
+            self.logger.debug(log)
 
             gradient_scaler.scale(loss).backward()
             gradient_scaler.step(optimizer)
             gradient_scaler.update()
 
-            self.logger.info(
-                f"Train boosting, iteration {i_iteration:0{max_iteration_length}d} / "
-                f"loss: {loss:.4f}, tre: {losses['tre']:.4f}, smooth: {losses['smooth']:.4f}) / "
-                f"TRE before: {tre_metric_before_boosting} / "
-                f"TRE after: {tre_metric_after_boosting}"
-            )
+            # self.logger.debug(
+            #     f"Train boosting, iteration {i_iteration:0{max_iteration_length}d} / "
+            #     f"loss: {loss:.4f}, tre: {losses['tre']:.4f}, smooth: {losses['smooth']:.4f}) / "
+            #     f"TRE before: {tre_metric_before_boosting} / "
+            #     f"TRE after: {tre_metric_after_boosting}"
+            # )
+
+            # here we do the debug stuff
+            if debug and i_iteration % debug_step_size == 0:
+                spatial_shape = moving_image.shape[2:]
+                n_spatial_dims = len(spatial_shape)
+
+                with torch.inference_mode():
+                    # vector field without affine
+                    boosted_vector_field_without_affine = (
+                        vector_field_boost
+                        + model.spatial_transformer(
+                            registration_result.vector_fields[-1], vector_field_boost
+                        )
+                    )
+
+                    # warp moving image and mask
+                    warped_moving_image = model.spatial_transformer(
+                        moving_image, composed_boosted_vector_field
+                    )
+                    warped_moving_mask = model.spatial_transformer(
+                        moving_mask, composed_boosted_vector_field
+                    )
+
+                debug_metrics = {"vector_field": {}}
+
+                dim_names = ("x", "y", "z")
+                for i_dim in range(n_spatial_dims):
+                    debug_metrics["vector_field"][dim_names[i_dim]] = {
+                        "min": float(
+                            torch.min(boosted_vector_field_without_affine[:, i_dim])
+                        ),
+                        "Q0.05": float(
+                            torch.quantile(
+                                boosted_vector_field_without_affine[:, i_dim], 0.05
+                            )
+                        ),
+                        "mean": float(
+                            torch.mean(boosted_vector_field_without_affine[:, i_dim])
+                        ),
+                        "Q0.95": float(
+                            torch.quantile(
+                                boosted_vector_field_without_affine[:, i_dim], 0.95
+                            )
+                        ),
+                        "max": float(
+                            torch.max(boosted_vector_field_without_affine[:, i_dim])
+                        ),
+                    }
+                i_level = 0
+                stage = "boosting"
+                plotter.save_snapshot(
+                    moving_image=moving_image,
+                    fixed_image=fixed_image,
+                    warped_image=warped_moving_image,
+                    forces=None,
+                    vector_field=boosted_vector_field_without_affine,
+                    moving_mask=moving_mask,
+                    fixed_mask=fixed_mask,
+                    warped_mask=warped_moving_mask,
+                    full_spatial_shape=spatial_shape,
+                    stage="boosting",
+                    level=i_level,
+                    iteration=i_iteration,
+                    metrics=debug_metrics,
+                    output_folder=debug_output_folder,
+                )
+                self.logger.debug(
+                    f"Created snapshot of registration stage={stage} at iteration={i_iteration}"
+                )
 
         registration_result.composed_vector_field = composed_boosted_vector_field
-        # warp moving image with composed boosed vector field
+        # warp moving image with composed boosted vector field
         warped_moving_image = model.spatial_transformer(
             moving_image, composed_boosted_vector_field
         )

@@ -18,6 +18,7 @@ from vroc.common_types import (
     IntTuple,
     IntTuple2D,
     IntTuple3D,
+    Number,
 )
 from vroc.helper import binary_dilation
 from vroc.kernels import gradient_kernel_3d
@@ -416,13 +417,11 @@ class SpatialTransformer(nn.Module):
 
     def __init__(
         self,
-        shape: IntTuple | None,
-        mode: str = "bilinear",
+        shape: IntTuple | None = None,
     ):
         super().__init__()
 
         self.shape = shape
-        self.mode = mode
 
         # create sampling grid if shape is given
         if self.shape:
@@ -442,21 +441,51 @@ class SpatialTransformer(nn.Module):
 
         return grid
 
-    def _warp(self, image: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-        if is_mask := ((image_dtype := image.dtype) in (torch.bool, torch.uint8)):
-            image = torch.as_tensor(image, dtype=torch.float32)
+    def _warp(
+        self,
+        image: torch.Tensor,
+        grid: torch.Tensor,
+        default_value: Number = 0,
+        mode: str = "bilinear",
+    ) -> torch.Tensor:
+        # save initial dtype
+        image_dtype = image.dtype
+        if not torch.is_floating_point(image):
+            # everything like bool, uint8, ...
             mode = "nearest"
-        else:
-            mode = self.mode
+            # warning: No gradients with nearest interpolation. Unsure why.
 
-        warped = F.grid_sample(image, grid, align_corners=True, mode=mode)
+        # convert to float32 as needed for grid_sample
+        image = torch.as_tensor(image, dtype=torch.float32)
 
-        if is_mask:
-            warped = torch.as_tensor(warped > 0.5, dtype=image_dtype)
+        if default_value:  # we can skip this if default_value == 0
+            # is default_value is given, we set the minimum value to 1, since
+            # PyTorch uses 0 for out-of-bounds voxels
+            shift = image.min() - 1
+            image = image - shift  # valid image values are now >= 1
+
+        warped = F.grid_sample(
+            image, grid, align_corners=True, mode=mode, padding_mode="zeros"
+        )
+
+        if default_value:
+            out_of_bounds = warped == 0
+            warped[out_of_bounds] = default_value
+            # undo value shift
+            warped[~out_of_bounds] = warped[~out_of_bounds] + shift
+
+        # convert back to initial dtype
+        warped = torch.as_tensor(warped, dtype=image_dtype)
 
         return warped
 
-    def forward(self, image, transformation: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        image,
+        transformation: torch.Tensor,
+        default_value: Number = 0,
+        mode: str = "bilinear",
+    ) -> torch.Tensor:
         # transformation can be an affine 4x4 matrix or a dense vector field:
         # shape affine matrix: (batch, 4, 4)
         # shape dense vector field: (batch, 3, x_size, y_size, z_size)
@@ -469,6 +498,7 @@ class SpatialTransformer(nn.Module):
             identity_grid = self.create_identity_grid(
                 image_spatial_shape, device=image.device
             )
+            self.identity_grid = identity_grid
         else:
             identity_grid = self.identity_grid
 
@@ -496,7 +526,9 @@ class SpatialTransformer(nn.Module):
                 grid = grid.permute(0, 2, 3, 4, 1)
                 grid = grid[..., [2, 1, 0]]
 
-        return self._warp(image=image, grid=grid)
+        return self._warp(
+            image=image, grid=grid, default_value=default_value, mode=mode
+        )
 
     def compose_vector_fields(
         self, vector_field_1: torch.Tensor, vector_field_2: torch.Tensor
@@ -558,6 +590,7 @@ class BaseForces(nn.Module):
         fixed_image: torch.Tensor,
         moving_mask: torch.Tensor,
         fixed_mask: torch.Tensor,
+        use_masks: bool = True,
     ):
         if self.method in ("passive", "dual"):
             grad_fixed = self._get_fixed_image_gradient(fixed_image)
@@ -567,13 +600,13 @@ class BaseForces(nn.Module):
         if self.method == "active":
             grad_moving = self._calc_image_gradient(moving_image)
             # gradient is defined in moving image domain -> use moving mask if given
-            if moving_mask is not None:
+            if use_masks and moving_mask is not None:
                 grad_moving = grad_moving * moving_mask
             total_grad = grad_moving
 
         elif self.method == "passive":
             # gradient is defined in fixed image domain -> use fixed mask if given
-            if fixed_mask is not None:
+            if use_masks and fixed_mask is not None:
                 grad_fixed = grad_fixed * fixed_mask
             total_grad = grad_fixed
 
@@ -581,16 +614,18 @@ class BaseForces(nn.Module):
             # we need both gradient of moving and fixed image
             grad_moving = self._calc_image_gradient(moving_image)
 
-            # mask both gradients as above; also check that we have both masks
-            masks_available = (m is not None for m in (moving_mask, fixed_mask))
-            if not all(masks_available) and any(masks_available):
-                # we only have one mask
-                raise RuntimeError("Dual forces need both moving and fixed mask")
+            if use_masks:
+                # mask both gradients as above; also check that we have both masks
+                masks_available = (m is not None for m in (moving_mask, fixed_mask))
+                if not all(masks_available) and any(masks_available):
+                    # we only have one mask
+                    raise RuntimeError("Dual forces need both moving and fixed mask")
 
-            if moving_mask is not None:
-                grad_moving = grad_moving * moving_mask
-            if fixed_mask is not None:
-                grad_fixed = grad_fixed * fixed_mask
+                if moving_mask is not None:
+                    grad_moving = grad_moving * moving_mask
+                if fixed_mask is not None:
+                    grad_fixed = grad_fixed * fixed_mask
+
             total_grad = grad_moving + grad_fixed
 
         else:
@@ -609,6 +644,7 @@ class DemonForces(BaseForces):
         method: Literal["active", "passive", "dual"] = "dual",
         fixed_image_gradient: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
+        use_masks: bool = True,
     ):
         # if method == 'dual' use union of moving and fixed mask
         if self.method == "dual":
@@ -617,7 +653,11 @@ class DemonForces(BaseForces):
 
         # grad tensors have the shape of (batch_size, 2 or 3, x_size, y_size[, z_size])
         total_grad = self._compute_total_grad(
-            moving_image, fixed_image, moving_mask, fixed_mask
+            moving_image=moving_image,
+            fixed_image=fixed_image,
+            moving_mask=moving_mask,
+            fixed_mask=fixed_mask,
+            use_masks=use_masks,
         )
         # gamma = 1 / (
         #     (sum(i**2 for i in original_image_spacing)) / len(original_image_spacing)
@@ -640,6 +680,7 @@ class DemonForces(BaseForces):
         moving_mask: torch.Tensor,
         fixed_mask: torch.Tensor,
         original_image_spacing: FloatTuple3D,
+        use_masks: bool = True,
     ):
         return self._calculate_demon_forces(
             moving_image=moving_image,
@@ -648,6 +689,7 @@ class DemonForces(BaseForces):
             fixed_mask=fixed_mask,
             method=self.method,
             original_image_spacing=original_image_spacing,
+            use_masks=use_masks,
         )
 
 
@@ -848,6 +890,7 @@ class NGFForces(BaseForces):
 
 
 if __name__ == "__main__":
+
     import time
 
     d1 = GaussianSmoothing3d(

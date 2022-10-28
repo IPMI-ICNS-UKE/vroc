@@ -44,7 +44,7 @@ ROOT_DIR = (
     Path("/datalake/learn2reg"),
 )
 ROOT_DIR = next(p for p in ROOT_DIR if p.exists())
-FOLDER = "LungCT"
+FOLDER = "OASIS"
 
 OUTPUT_FOLDER = Path(f"{ROOT_DIR}/{FOLDER}/output")
 OUTPUT_FOLDER.mkdir(exist_ok=True)
@@ -71,11 +71,15 @@ def load(
     fixed_image_filepath,
     moving_mask_filepath,
     fixed_mask_filepath,
+    moving_labels_filepath,
+    fixed_labels_filepath,
 ):
     moving_image = sitk.ReadImage(moving_image_filepath)
     fixed_image = sitk.ReadImage(fixed_image_filepath)
     moving_mask = sitk.ReadImage(moving_mask_filepath)
     fixed_mask = sitk.ReadImage(fixed_mask_filepath)
+    moving_labels = sitk.ReadImage(moving_labels_filepath)
+    fixed_labels = sitk.ReadImage(fixed_labels_filepath)
 
     reference_image = fixed_image
 
@@ -85,17 +89,23 @@ def load(
     fixed_image = sitk.GetArrayFromImage(fixed_image)
     moving_mask = sitk.GetArrayFromImage(moving_mask).astype(bool)
     fixed_mask = sitk.GetArrayFromImage(fixed_mask).astype(bool)
+    moving_labels = sitk.GetArrayFromImage(moving_labels).astype(np.uint8)
+    fixed_labels = sitk.GetArrayFromImage(fixed_labels).astype(np.uint8)
 
     moving_image = np.swapaxes(moving_image, 0, 2)
     fixed_image = np.swapaxes(fixed_image, 0, 2)
     moving_mask = np.swapaxes(moving_mask, 0, 2)
     fixed_mask = np.swapaxes(fixed_mask, 0, 2)
+    moving_labels = np.swapaxes(moving_labels, 0, 2)
+    fixed_labels = np.swapaxes(fixed_labels, 0, 2)
 
     return (
         moving_image,
         fixed_image,
         moving_mask,
         fixed_mask,
+        moving_labels,
+        fixed_labels,
         image_spacing,
         reference_image,
     )
@@ -146,28 +156,26 @@ smoothnesses = []
 t_start = time.time()
 
 
-for case in range(1, 2):
-    fixed_landmarks = read_landmarks(
-        f"{ROOT_DIR}/{FOLDER}/keypointsTr/LungCT_{case:04d}_0000.csv",
-        sep=",",
-    )
-    moving_landmarks = read_landmarks(
-        f"{ROOT_DIR}/{FOLDER}/keypointsTr/LungCT_{case:04d}_0001.csv",
-        sep=",",
-    )
+for case in range(1, 414):
+    moving_case = case
+    fixed_case = case + 1
 
     (
         moving_image,
         fixed_image,
         moving_mask,
         fixed_mask,
+        moving_labels,
+        fixed_labels,
         image_spacing,
         reference_image,
     ) = load(
-        moving_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/LungCT_{case:04d}_0001.nii.gz",
-        fixed_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/LungCT_{case:04d}_0000.nii.gz",
-        moving_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/LungCT_{case:04d}_0001.nii.gz",
-        fixed_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/LungCT_{case:04d}_0000.nii.gz",
+        moving_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/{FOLDER}_{moving_case:04d}_0000.nii.gz",
+        fixed_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/{FOLDER}_{fixed_case:04d}_0000.nii.gz",
+        moving_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/{FOLDER}_{moving_case:04d}_0000.nii.gz",
+        fixed_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/{FOLDER}_{fixed_case:04d}_0000.nii.gz",
+        moving_labels_filepath=f"{ROOT_DIR}/{FOLDER}/labelsTr/{FOLDER}_{moving_case:04d}_0000.nii.gz",
+        fixed_labels_filepath=f"{ROOT_DIR}/{FOLDER}/labelsTr/{FOLDER}_{fixed_case:04d}_0000.nii.gz",
     )
 
     # moving_mask = binary_dilation(moving_mask.astype(np.uint8), iterations=1).astype(
@@ -178,9 +186,6 @@ for case in range(1, 2):
     # fixed_mask = fixed_mask.astype(bool)
 
     # union_mask = moving_mask | fixed_mask
-
-    moving_keypoints = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
-    fixed_keypoints = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
 
     # registration_result = registration.register(
     #     moving_image=moving_image,
@@ -194,12 +199,13 @@ for case in range(1, 2):
     #     affine_iterations=300,
     #     force_type="demons",
     #     gradient_type="dual",
-    #     valid_value_range=(-1024, 3071),
+    #     # valid_value_range=(-1024, 3071),
     #     early_stopping_delta=0.00001,
     #     early_stopping_window=None,
     #     default_parameters=params,
     #     debug=True,
-    #     debug_step_size=1,
+    #     debug_output_folder=OUTPUT_FOLDER / 'debug',
+    #     debug_step_size=10,
     #     return_as_tensor=False,
     # )
 
@@ -213,9 +219,17 @@ for case in range(1, 2):
         # boosting specific kwargs
         model=model,
         optimizer=optimizer,
-        n_iterations=0,
-        moving_keypoints=moving_keypoints,
-        fixed_keypoints=fixed_keypoints,
+        n_iterations=400,
+        moving_keypoints=None,
+        fixed_keypoints=None,
+        moving_labels=moving_labels,
+        fixed_labels=fixed_labels,
+        n_label_classes=36,
+        image_loss_function="mse",
+        # loss weights
+        label_loss_weight=1.0,
+        smoothness_loss_weight=1.0,
+        image_loss_weight=1.0,
         # registration specific kwargs
         moving_image=moving_image,
         fixed_image=fixed_image,
@@ -229,7 +243,7 @@ for case in range(1, 2):
         affine_iterations=300,
         force_type="demons",
         gradient_type="passive",
-        valid_value_range=(-1024, 3071),
+        valid_value_range=(0, 1),
         early_stopping_delta=0.00001,
         early_stopping_window=None,
         default_parameters=params,
@@ -248,8 +262,11 @@ for case in range(1, 2):
     warped_moving_image = sitk.GetImageFromArray(warped_moving_image)
     warped_moving_image.CopyInformation(reference_image)
     sitk.WriteImage(
-        warped_moving_image, str(OUTPUT_FOLDER / f"warped_image_{case}_{case}.nii")
+        warped_moving_image,
+        str(OUTPUT_FOLDER / f"{FOLDER}_{moving_case:04d}_0000_warped_boosting.nii"),
     )
+
+    break
     #
     # write_nlst_vector_field(
     #     vector_field,
@@ -257,46 +274,46 @@ for case in range(1, 2):
     #     output_folder=OUTPUT_FOLDER,
     # )
 
-    tre_before = compute_tre_numpy(
-        moving_landmarks=moving_landmarks,
-        fixed_landmarks=fixed_landmarks,
-        vector_field=None,
-        image_spacing=image_spacing,
-    )
-    tre_affine = compute_tre_numpy(
-        moving_landmarks=moving_landmarks,
-        fixed_landmarks=fixed_landmarks,
-        vector_field=registration_result.vector_fields[0],
-        image_spacing=image_spacing,
-    )
-    tre_vroc = compute_tre_numpy(
-        moving_landmarks=moving_landmarks,
-        fixed_landmarks=fixed_landmarks,
-        vector_field=registration_result.composed_vector_field,
-        image_spacing=image_spacing,
-    )
-
-    if any(tre > tre_before.mean() for tre in (tre_affine.mean(), tre_vroc.mean())):
-        level = logging.ERROR
-    else:
-        level = logging.INFO
-
-    logger.log(
-        level,
-        f"NLST_0{case}: "
-        f"TRE: "
-        f"before={tre_before.mean():.3f} / "
-        f"affine={tre_affine.mean():.3f} / "
-        f"vroc={tre_vroc.mean():.3f}, "
-        f"smoothness={smoothness:.3f}",
-    )
-
-    tres_before.append(tre_before.mean())
-    tres_after.append(tre_vroc.mean())
-
-
-print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")
-print(f"after: mean TRE={np.mean(tres_after)}, std TRE={np.std(tres_after)}")
-print(f"after: mean smoothness={np.mean(smoothnesses)}, std TRE={np.std(smoothnesses)}")
-
-print(f"run took {time.time() - t_start}")
+#     tre_before = compute_tre_numpy(
+#         moving_landmarks=moving_landmarks,
+#         fixed_landmarks=fixed_landmarks,
+#         vector_field=None,
+#         image_spacing=image_spacing,
+#     )
+#     tre_affine = compute_tre_numpy(
+#         moving_landmarks=moving_landmarks,
+#         fixed_landmarks=fixed_landmarks,
+#         vector_field=registration_result.vector_fields[0],
+#         image_spacing=image_spacing,
+#     )
+#     tre_vroc = compute_tre_numpy(
+#         moving_landmarks=moving_landmarks,
+#         fixed_landmarks=fixed_landmarks,
+#         vector_field=registration_result.composed_vector_field,
+#         image_spacing=image_spacing,
+#     )
+#
+#     if any(tre > tre_before.mean() for tre in (tre_affine.mean(), tre_vroc.mean())):
+#         level = logging.ERROR
+#     else:
+#         level = logging.INFO
+#
+#     logger.log(
+#         level,
+#         f"NLST_0{case}: "
+#         f"TRE: "
+#         f"before={tre_before.mean():.3f} / "
+#         f"affine={tre_affine.mean():.3f} / "
+#         f"vroc={tre_vroc.mean():.3f}, "
+#         f"smoothness={smoothness:.3f}",
+#     )
+#
+#     tres_before.append(tre_before.mean())
+#     tres_after.append(tre_vroc.mean())
+#
+#
+# print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")
+# print(f"after: mean TRE={np.mean(tres_after)}, std TRE={np.std(tres_after)}")
+# print(f"after: mean smoothness={np.mean(smoothnesses)}, std TRE={np.std(smoothnesses)}")
+#
+# print(f"run took {time.time() - t_start}")

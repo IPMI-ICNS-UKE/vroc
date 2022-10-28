@@ -141,7 +141,7 @@ for case in range(8, 11):
         fixed_mask=fixed_mask,
         image_spacing=image_spacing,
         register_affine=True,
-        affine_loss_fn=ncc_loss,
+        affine_loss_function=ncc_loss,
         force_type="demons",
         gradient_type="dual",
         valid_value_range=(-1024, 3071),

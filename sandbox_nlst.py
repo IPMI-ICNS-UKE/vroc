@@ -21,20 +21,18 @@ from vroc.helper import (
     rescale_range,
 )
 from vroc.l2r_eval import calculate_l2r_smoothness
-from vroc.logger import LogFormatter
+from vroc.logger import init_fancy_logging
 from vroc.loss import TRELoss, mse_loss, ncc_loss, ngf_loss
 from vroc.metrics import jacobian_determinant
 from vroc.models import DemonsVectorFieldBooster
 from vroc.registration import VrocRegistration
 
-handler = logging.StreamHandler()
-handler.setLevel(logging.DEBUG)
-handler.setFormatter(LogFormatter())
-logging.basicConfig(handlers=[handler])
+init_fancy_logging()
 
-logging.getLogger(__name__).setLevel(logging.DEBUG)
-logging.getLogger("vroc").setLevel(logging.DEBUG)
-logging.getLogger("vroc.models.VarReg3d").setLevel(logging.INFO)
+logging.getLogger(__name__).setLevel(logging.INFO)
+logging.getLogger("vroc").setLevel(logging.INFO)
+logging.getLogger("vroc.models.VarReg").setLevel(logging.INFO)
+logging.getLogger("vroc.affine").setLevel(logging.DEBUG)
 
 ROOT_DIR = (
     Path("/home/tsentker/data/learn2reg"),
@@ -46,7 +44,7 @@ FOLDER = "NLST_Validation"
 OUTPUT_FOLDER = Path(f"{ROOT_DIR}/{FOLDER}/predictions/non_boosted")
 OUTPUT_FOLDER.mkdir(exist_ok=True)
 
-DEVICE = "cuda:0"
+DEVICE = "cuda:1"
 
 
 def write_nlst_vector_field(
@@ -100,8 +98,18 @@ def load(
 
 # feature_extractor = OrientedHistogramFeatureExtrator(device=DEVICE)
 # parameter_guesser = ParameterGuesser(
-#     database_filepath="/datalake/learn2reg/param_sampling.sqlite",
-#     parameters_to_guess=("tau", "sigma_x", "sigma_y", "sigma_z", "n_levels"),
+#     database_filepath="/datalake/learn2reg/param_sampling_v2.sqlite",
+#     parameters_to_guess=(
+#         # "tau",
+#         "tau_level_decay",
+#         "tau_iteration_decay",
+#         # "sigma_x",
+#         # "sigma_y",
+#         # "sigma_z",
+#         # "sigma_level_decay",
+#         # "sigma_iteration_decay",
+#         # "n_levels",
+#     ),
 # )
 # parameter_guesser.fit()
 
@@ -169,11 +177,101 @@ for case in range(101, 111):
     moving_keypoints = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
     fixed_keypoints = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
 
-    # registration_result = registration.register(
+    registration_result = registration.register(
+        moving_image=moving_image,
+        fixed_image=fixed_image,
+        moving_mask=moving_mask,
+        fixed_mask=fixed_mask,
+        image_spacing=image_spacing,
+        register_affine=True,
+        affine_loss_function=ncc_loss,
+        affine_step_size=0.1,
+        affine_iterations=300,
+        force_type="demons",
+        gradient_type="passive",
+        valid_value_range=(-1024, 3071),
+        early_stopping_delta=0.00001,
+        early_stopping_window=None,
+        default_parameters=params,
+        debug=False,
+        debug_step_size=1,
+        return_as_tensor=True,
+    )
+
+    from vroc.keypoints import corrfield
+
+    alpha: float = (1.0,)
+    max_search_radius: str = ("16x8",)
+    cube_length: str = ("6x3",)
+    step_size_quantizazion: str = ("2x1",)
+    patch_similarity_radius: str = ("3x2",)
+    patch_similarity_skipping: str = ("2x1",)
+    foerster_sigma: float = (1.4,)
+
+    {
+        "alpha": 2.5,
+        "beta": 150,
+        "gamma": 5,
+        "delta": 1,
+        "lambda": 0,
+        "sigma": 1.4,
+        "sigma1": 0.8,
+        "search_radius": [16, 8],
+        "length": [6, 3],
+        "quantisation": [2, 1],
+        "patch_radius": [3, 2],
+        "transform": ["n", "n"],
+    }
+
+    # alpha = float(args['alpha'])
+    # beta = float(args['beta'])
+    # gamma = float(args['gamma'])
+    # delta = int(args['delta'])
+    # lambd = float(args['lambda'])
+    # sigma = float(args['sigma'])
+    # sigma1 = float(args['sigma1'])
+    #
+    # L = [int(l) for l in args['search_radius']]
+    # N = [int(n) for n in args['length']]
+    # Q = [int(q) for q in args['quantisation']]
+    # R = [int(r) for r in args['patch_radius']]
+    # T = [str(t) for t in args['transform']]
+
+    km, kf = corrfield(
+        img_fix=registration_result.fixed_image,
+        mask_fix=registration_result.fixed_mask,
+        img_mov=registration_result.moving_image,
+        alpha=2.5,
+        beta=150,
+        gamma=5,
+        delta=1,
+        sigma=1.4,
+        sigma1=0.8,
+        L=[16, 8],
+        N=[6, 3],
+        Q=[2, 1],
+        R=[3, 2],
+        T=["n", "n"],
+    )
+
+    pass
+
+    # model = DemonsVectorFieldBooster(shape=(224, 192, 224), n_iterations=4).to(DEVICE)
+    # optimizer = Adam(model.parameters(), lr=5e-4)
+    #
+    # registration_result = registration.register_and_train_boosting(
+    #     # boosting specific kwargs
+    #     model=model,
+    #     optimizer=optimizer,
+    #     n_iterations=400,
+    #     moving_keypoints=moving_keypoints,
+    #     fixed_keypoints=fixed_keypoints,
+    #     # registration specific kwargs
     #     moving_image=moving_image,
     #     fixed_image=fixed_image,
     #     moving_mask=moving_mask,
     #     fixed_mask=fixed_mask,
+    #     image_spacing=image_spacing,
     #     register_affine=True,
     #     affine_loss_fn=ncc_loss,
     #     force_type="demons",
@@ -183,38 +281,10 @@ for case in range(101, 111):
     #     early_stopping_window=None,
     #     default_parameters=params,
     #     debug=False,
-    #     return_as_tensor=False,
     # )
-
-    model = DemonsVectorFieldBooster(shape=(224, 192, 224), n_iterations=4).to(DEVICE)
-    optimizer = Adam(model.parameters(), lr=5e-4)
-
-    registration_result = registration.register_and_train_boosting(
-        # boosting specific kwargs
-        model=model,
-        optimizer=optimizer,
-        n_iterations=200,
-        moving_keypoints=moving_keypoints,
-        fixed_keypoints=fixed_keypoints,
-        # registration specific kwargs
-        moving_image=moving_image,
-        fixed_image=fixed_image,
-        moving_mask=moving_mask,
-        fixed_mask=fixed_mask,
-        image_spacing=image_spacing,
-        register_affine=True,
-        affine_loss_fn=ncc_loss,
-        force_type="demons",
-        gradient_type="active",
-        valid_value_range=(-1024, 3071),
-        early_stopping_delta=0.00001,
-        early_stopping_window=400,
-        default_parameters=params,
-        debug=False,
-    )
     vector_field = registration_result.composed_vector_field
 
-    smoothness = calculate_l2r_smoothness(vector_field, fixed_mask)
+    smoothness = calculate_l2r_smoothness(vector_field, mask=fixed_mask)
     smoothnesses.append(smoothness)
 
     # warped_moving_image = registration_result.warped_moving_image.swapaxes(0, 2)
@@ -252,10 +322,10 @@ for case in range(101, 111):
     tres_before.append(np.mean(loss_before))
     tres_after.append(np.mean(loss_after))
 
-    if debug_info := registration_result.debug_info:
-        animation = debug_info["animation"]
-        writer = FFMpegWriter(fps=1)
-        animation.save("registration.mp4", writer=writer)
+    # if debug_info := registration_result.debug_info:
+    #     animation = debug_info["animation"]
+    #     writer = FFMpegWriter(fps=1)
+    #     animation.save("/datalake/learn2reg/registration.mp4", writer=writer)
 
 
 print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")

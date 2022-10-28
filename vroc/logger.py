@@ -4,6 +4,10 @@ import logging
 import sys
 from typing import Dict, Tuple
 
+import torch
+
+from vroc.helper import convert_dict_values
+
 
 class LoggerMixin:
     @property
@@ -145,6 +149,52 @@ def init_fancy_logging(
     logging.basicConfig(handlers=[handler])
 
 
+class RegistrationLogEntry:
+    def __init__(
+        self,
+        stage: str,
+        level: int | None = None,
+        iteration: int | None = None,
+        **kwargs,
+    ):
+
+        self.stage = stage
+        self.level = level
+        self.iteration = iteration
+
+        # set optional/custom log content
+        self.__dict__.update(kwargs)
+
+    @staticmethod
+    def format_logging_dict(
+        d: dict, convert_tensors: bool = True, decimal_places: int = 6
+    ) -> dict:
+        def convert_float(f: float) -> str:
+            return f"{float(f):.{decimal_places}f}"
+
+        types = [float]
+        if convert_tensors:
+            types.append(torch.Tensor)
+        return convert_dict_values(d, types=types, converter=convert_float)
+
+    def __str__(self) -> str:
+        d = self.__dict__.copy()
+
+        log = {
+            "stage": d.pop("stage"),
+        }
+        if level := d.pop("level"):
+            log["level"] = level
+        if iteration := d.pop("iteration"):
+            log["iteration"] = iteration
+
+        log.update(d)
+
+        log = self.format_logging_dict(log, convert_tensors=True, decimal_places=6)
+
+        return str(log)
+
+
 if __name__ == "__main__":
 
     init_fancy_logging()
@@ -157,3 +207,10 @@ if __name__ == "__main__":
     logger.warning("warning")
     logger.error("error")
     logger.critical("critical")
+
+    import torch
+
+    loss = torch.tensor(0.1337)
+
+    log = RegistrationLogEntry(stage="vroc", level=1, iteration=100, loss=loss)
+    str(log)

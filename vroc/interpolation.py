@@ -7,7 +7,7 @@ import scipy.ndimage as ndi
 import torch
 import torch.nn.functional as F
 
-from vroc.common_types import FloatTuple3D
+from vroc.common_types import ArrayOrTensor, FloatTuple3D
 from vroc.convert import as_tensor
 
 
@@ -40,7 +40,7 @@ def _resize_torch(
         align_corners=None if mode == "nearest" else False,
     )
 
-    return torch.as_tensor(resized, dtype=dtype)
+    return resized
 
 
 def _resize_numpy(
@@ -64,18 +64,37 @@ def _resize_numpy(
 def resize(
     image: np.ndarray | torch.Tensor, output_shape: Tuple[int, ...], order: int = 1
 ) -> np.ndarray | torch.Tensor:
-    if isinstance(image, np.ndarray):
+    dtype = image.dtype
+    is_mask = dtype in (bool, torch.bool)
+    is_numpy = isinstance(image, np.ndarray)
+
+    if is_numpy:
         resize_function = _resize_numpy
-    elif isinstance(image, torch.Tensor):
-        resize_function = _resize_torch
     else:
-        raise NotImplementedError("Cannot resize given image")
+        resize_function = _resize_torch
 
-    return resize_function(image=image, output_shape=output_shape, order=order)
+    image = resize_function(image=image, output_shape=output_shape, order=order)
+
+    if is_mask:
+        image = image > 0.5
+
+    if is_numpy:
+        image = image.astype(dtype)
+    else:
+        image = image.to(dtype)
+
+    return image
 
 
-def rescale(image: np.ndarray, factor: float, order: int = 1):
-    rescaled_shape = tuple(s / factor for s in image.shape)
+def rescale(image: ArrayOrTensor, factor: float, order: int = 1):
+    is_numpy = isinstance(image, np.ndarray)
+
+    if is_numpy:
+        spatial_image_shape = image.shape
+    else:
+        spatial_image_shape = image.shape[2:]
+
+    rescaled_shape = tuple(int(round(s * factor)) for s in spatial_image_shape)
     return resize(image=image, output_shape=rescaled_shape, order=order)
 
 

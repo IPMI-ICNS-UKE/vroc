@@ -80,7 +80,7 @@ class TRELoss(nn.Module):
 
 
 class WarpedMSELoss(nn.Module):
-    def __init__(self, shape: IntTuple3D | None):
+    def __init__(self, shape: IntTuple3D | None = None):
         super().__init__()
         self.spatial_transformer = SpatialTransformer(shape=shape)
 
@@ -89,11 +89,13 @@ class WarpedMSELoss(nn.Module):
         moving_image: torch.Tensor,
         vector_field: torch.Tensor,
         fixed_image: torch.Tensor,
-        fixed_image_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
     ) -> torch.Tensor:
-        warped_image = self.spatial_transformer(moving_image, vector_field)
+        warped_image = self.spatial_transformer(
+            image=moving_image, transformation=vector_field, mode="bilinear"
+        )
 
-        return F.mse_loss(warped_image[fixed_image_mask], fixed_image[fixed_image_mask])
+        return F.mse_loss(warped_image[fixed_mask], fixed_image[fixed_mask])
 
 
 def mse_loss(

@@ -21,7 +21,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, IterableDataset
 from tqdm import tqdm
 
-from vroc.common_types import FloatTuple3D, IntTuple3D, PathLike, SlicingTuple3D
+from vroc.common_types import FloatTuple3D, IntTuple3D, Number, PathLike, SlicingTuple3D
 from vroc.decorators import convert
 from vroc.hashing import hash_path
 from vroc.helper import (
@@ -77,7 +77,7 @@ class LungCTRegistrationDataset(DatasetMixin):
         self._image_pairs.append(image_pair)
 
 
-class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
+class SegmentationDataset(DatasetMixin, IterableDataset):
     def __init__(
         self,
         image_filepaths: List[PathLike],
@@ -88,13 +88,15 @@ class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
         random_rotation: bool = True,
         patches_per_image: int | float = 1,
         center_crop: bool = False,
+        input_value_range: Tuple[Number, Number] | None = None,
+        output_value_range: Tuple[Number, Number] | None = None,
     ):
         self.images = LazyLoadableList(
-            image_filepaths, loader=LungCTSegmentationDataset.load_and_preprocess
+            image_filepaths, loader=SegmentationDataset.load_and_preprocess
         )
         self.masks = LazyLoadableList(
             mask_filepaths,
-            loader=partial(LungCTSegmentationDataset.load_and_preprocess, is_mask=True),
+            loader=partial(SegmentationDataset.load_and_preprocess, is_mask=True),
         )
 
         self.mask_labels = mask_labels or [None] * len(self.masks)
@@ -104,6 +106,8 @@ class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
         self.random_rotation = random_rotation
         self.patches_per_image = patches_per_image
         self.center_crop = center_crop
+        self.input_value_range = input_value_range
+        self.output_value_range = output_value_range
 
         if (
             self.center_crop
@@ -190,7 +194,7 @@ class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
                     float(np.random.uniform(*spacing_range))
                     for spacing_range in self.image_spacing_range
                 )
-                image, mask = LungCTSegmentationDataset._resample_image_spacing(
+                image, mask = SegmentationDataset._resample_image_spacing(
                     image, mask, image_spacing=image_spacing
                 )
 
@@ -230,7 +234,7 @@ class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
                     image_arr,
                     mask_arr,
                     image_spacing,
-                ) = LungCTSegmentationDataset.random_rotate_image_and_mask(
+                ) = SegmentationDataset.random_rotate_image_and_mask(
                     image_arr, mask=mask_arr, spacing=image_spacing
                 )
 
@@ -250,7 +254,7 @@ class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
             )
 
             for i_patch in range(patches_per_image):
-                patch_slicing = LungCTSegmentationDataset.sample_random_patch_3d(
+                patch_slicing = SegmentationDataset.sample_random_patch_3d(
                     patch_shape=self.patch_shape, image_shape=image_arr.shape
                 )
 
@@ -260,13 +264,14 @@ class LungCTSegmentationDataset(DatasetMixin, IterableDataset):
 
                 image_arr_patch = rescale_range(
                     image_arr_patch,
-                    input_range=(-1024, 3071),
-                    output_range=(0, 1),
+                    input_range=self.input_value_range,
+                    output_range=self.output_value_range,
                     clip=True,
                 )
 
                 data = {
                     "id": hash_path(image_filepath)[:7],
+                    "image_filename": image_filepath.name,
                     "image": image_arr_patch[np.newaxis],
                     "mask": mask_arr_patch[np.newaxis],
                     "image_spacing": image_spacing,
