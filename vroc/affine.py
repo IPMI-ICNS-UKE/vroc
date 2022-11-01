@@ -15,6 +15,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from vroc.blocks import SpatialTransformer
 from vroc.helper import compute_tre_numpy, read_landmarks
+from vroc.logger import RegistrationLogEntry
 from vroc.loss import mse_loss, ncc_loss
 
 logger = logging.getLogger(__name__)
@@ -216,12 +217,12 @@ def run_affine_registration(
                 loss = float(loss)
                 losses.append(loss)
 
-                log = {
-                    "stage": "affine",
-                    "iteration": i,
-                    "loss": loss,
-                    "current_step_size": optimizer.param_groups[0]["lr"],
-                }
+                log = RegistrationLogEntry(
+                    stage="affine",
+                    iteration=i,
+                    loss=loss,
+                    current_step_size=optimizer.param_groups[0]["lr"],
+                )
                 logger.debug(log)
 
                 relative_change = (loss - initial_loss) / abs(initial_loss)

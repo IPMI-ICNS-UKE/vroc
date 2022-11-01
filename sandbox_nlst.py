@@ -141,7 +141,7 @@ smoothnesses = []
 t_start = time.time()
 
 
-for case in range(101, 111):
+for case in range(101, 102):
     fixed_landmarks = read_landmarks(
         f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
         sep=" ",
@@ -198,60 +198,23 @@ for case in range(101, 111):
         return_as_tensor=True,
     )
 
-    from vroc.keypoints import corrfield
+    from vroc.keypoints import extract_keypoints
 
-    alpha: float = (1.0,)
-    max_search_radius: str = ("16x8",)
-    cube_length: str = ("6x3",)
-    step_size_quantizazion: str = ("2x1",)
-    patch_similarity_radius: str = ("3x2",)
-    patch_similarity_skipping: str = ("2x1",)
-    foerster_sigma: float = (1.4,)
-
-    {
-        "alpha": 2.5,
-        "beta": 150,
-        "gamma": 5,
-        "delta": 1,
-        "lambda": 0,
-        "sigma": 1.4,
-        "sigma1": 0.8,
-        "search_radius": [16, 8],
-        "length": [6, 3],
-        "quantisation": [2, 1],
-        "patch_radius": [3, 2],
-        "transform": ["n", "n"],
-    }
-
-    # alpha = float(args['alpha'])
-    # beta = float(args['beta'])
-    # gamma = float(args['gamma'])
-    # delta = int(args['delta'])
-    # lambd = float(args['lambda'])
-    # sigma = float(args['sigma'])
-    # sigma1 = float(args['sigma1'])
-    #
-    # L = [int(l) for l in args['search_radius']]
-    # N = [int(n) for n in args['length']]
-    # Q = [int(q) for q in args['quantisation']]
-    # R = [int(r) for r in args['patch_radius']]
-    # T = [str(t) for t in args['transform']]
-
-    km, kf = corrfield(
-        img_fix=registration_result.fixed_image,
-        mask_fix=registration_result.fixed_mask,
-        img_mov=registration_result.moving_image,
+    moving_keypointss, fixed_keypointss = extract_keypoints(
+        moving_image=registration_result.moving_image,
+        fixed_image=registration_result.fixed_image,
+        fixed_mask=registration_result.fixed_mask,
         alpha=2.5,
         beta=150,
         gamma=5,
         delta=1,
-        sigma=1.4,
-        sigma1=0.8,
-        L=[16, 8],
-        N=[6, 3],
-        Q=[2, 1],
-        R=[3, 2],
-        T=["n", "n"],
+        sigma_foerstner=1.4,
+        sigma_mind=0.8,
+        search_radius=[16, 8],
+        length=[6, 3],
+        quantization=[2, 1],
+        patch_radius=[3, 2],
+        transform=["dense", "dense"],
     )
 
     pass
@@ -284,7 +247,9 @@ for case in range(101, 111):
     # )
     vector_field = registration_result.composed_vector_field
 
-    smoothness = calculate_l2r_smoothness(vector_field, mask=fixed_mask)
+    smoothness = calculate_l2r_smoothness(
+        vector_field.cpu().detach().numpy().squeeze(), mask=fixed_mask
+    )
     smoothnesses.append(smoothness)
 
     # warped_moving_image = registration_result.warped_moving_image.swapaxes(0, 2)
@@ -300,17 +265,23 @@ for case in range(101, 111):
     #     output_folder=OUTPUT_FOLDER,
     # )
 
-    vf = torch.as_tensor(vector_field[np.newaxis], device=DEVICE)
+    if not isinstance(vector_field, torch.Tensor):
+        vector_field = torch.as_tensor(vector_field[np.newaxis], device=DEVICE)
 
     tre_loss = TRELoss(apply_sqrt=True).to(DEVICE)
     image_spacing = torch.as_tensor(image_spacing).to(DEVICE)
     loss_before = float(
         tre_loss(
-            vf * 0.0, moving_keypoints, fixed_keypoints, image_spacing=image_spacing
+            vector_field * 0.0,
+            moving_keypoints,
+            fixed_keypoints,
+            image_spacing=image_spacing,
         )
     )
     loss_after = float(
-        tre_loss(vf, moving_keypoints, fixed_keypoints, image_spacing=image_spacing)
+        tre_loss(
+            vector_field, moving_keypoints, fixed_keypoints, image_spacing=image_spacing
+        )
     )
 
     print(

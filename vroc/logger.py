@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Sequence, Tuple
 
 import torch
 
@@ -150,20 +150,37 @@ def init_fancy_logging(
 
 
 class RegistrationLogEntry:
+    DEFAULT_ORDERING = ("stage", "level", "iteration", "loss")
+
     def __init__(
         self,
         stage: str,
         level: int | None = None,
         iteration: int | None = None,
+        ordering: Sequence["str"] | None = None,
         **kwargs,
     ):
 
         self.stage = stage
         self.level = level
         self.iteration = iteration
+        self._ordering = ordering or RegistrationLogEntry.DEFAULT_ORDERING
 
         # set optional/custom log content
         self.__dict__.update(kwargs)
+
+    def _order_entries(self, log: dict):
+        priorities = {word: index for (index, word) in enumerate(self._ordering)}
+
+        def sorting_key(string: str) -> Tuple[int, str]:
+            prio = len(priorities)
+            for word, prioritiy in priorities.items():
+                if string.startswith(word):
+                    prio = prioritiy
+
+            return (prio, string)
+
+        return {key: log[key] for key in sorted(log.keys(), key=sorting_key)}
 
     @staticmethod
     def format_logging_dict(
@@ -178,7 +195,12 @@ class RegistrationLogEntry:
         return convert_dict_values(d, types=types, converter=convert_float)
 
     def __str__(self) -> str:
-        d = self.__dict__.copy()
+        # drop all private variables
+        d = {
+            key: value
+            for (key, value) in self.__dict__.items()
+            if not key.startswith("_")
+        }
 
         log = {
             "stage": d.pop("stage"),
@@ -190,6 +212,7 @@ class RegistrationLogEntry:
 
         log.update(d)
 
+        log = self._order_entries(log)
         log = self.format_logging_dict(log, convert_tensors=True, decimal_places=6)
 
         return str(log)
@@ -208,9 +231,11 @@ if __name__ == "__main__":
     logger.error("error")
     logger.critical("critical")
 
-    import torch
-
-    loss = torch.tensor(0.1337)
-
-    log = RegistrationLogEntry(stage="vroc", level=1, iteration=100, loss=loss)
+    log = RegistrationLogEntry(
+        mem=1,
+        stage="vroc",
+        level=1,
+        iteration=100,
+        loss=1,
+    )
     str(log)
