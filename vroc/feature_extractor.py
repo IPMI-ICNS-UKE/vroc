@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-import os
-import re
 from abc import ABC, abstractmethod
-from pathlib import Path
 
 import numpy as np
 import torch
-from tqdm import tqdm
 
-from vroc.affine import run_affine_registration
 from vroc.common_types import FloatTuple3D, TorchDevice
 from vroc.convert import as_tensor
 from vroc.interpolation import resize_spacing
 from vroc.logger import LoggerMixin
-from vroc.models import AutoEncoder, VarReg
 from vroc.oriented_histogram import OrientedHistogram
 from vroc.registration import VrocRegistration
 

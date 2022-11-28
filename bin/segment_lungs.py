@@ -3,7 +3,6 @@ import re
 from pathlib import Path
 from typing import List
 
-import click
 import numpy as np
 import SimpleITK as sitk
 

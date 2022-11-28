@@ -5,19 +5,16 @@ from typing import Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-import plotly.express as px
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from aim import Figure, Image
+from aim import Image
 from monai import losses
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
 from vroc.dataset import SegmentationDataset
 from vroc.helper import dict_collate
-from vroc.logger import FancyFormatter, init_fancy_logging
-from vroc.metrics import dice_coefficient
+from vroc.logger import init_fancy_logging
 from vroc.models import Unet3d
 from vroc.trainer import BaseTrainer, MetricType
 
@@ -150,8 +147,8 @@ logging.getLogger("vroc").setLevel(logging.INFO)
 
 train_dataset = SegmentationDataset(
     image_filepaths=train_dataset["images"],
-    mask_filepaths=train_dataset["masks"],
-    mask_labels=train_dataset["labels"],
+    segmentation_filepaths=train_dataset["masks"],
+    segmentation_labels=train_dataset["labels"],
     patch_shape=(128, 128, 128),
     image_spacing_range=((0.5, 4.0), (0.5, 4.0), (0.5, 4.0)),
     patches_per_image=1.0,
@@ -160,8 +157,8 @@ train_dataset = SegmentationDataset(
 )
 val_dataset = SegmentationDataset(
     image_filepaths=test_dataset["images"],
-    mask_filepaths=test_dataset["masks"],
-    mask_labels=test_dataset["labels"],
+    segmentation_filepaths=test_dataset["masks"],
+    segmentation_labels=test_dataset["labels"],
     patch_shape=(192, 160, 192),
     image_spacing_range=None,
     patches_per_image=1,

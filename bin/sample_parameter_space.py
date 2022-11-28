@@ -6,7 +6,6 @@ from typing import Optional
 
 import nevergrad as ng
 import numpy as np
-import typer
 from scipy.ndimage import binary_dilation
 
 import vroc.database.models as orm
@@ -15,7 +14,7 @@ from vroc.decay import half_life_to_lambda
 from vroc.helper import compute_tre_numpy
 from vroc.hyperopt_database.client import DatabaseClient
 from vroc.logger import LogFormatter
-from vroc.loss import mse_loss, ncc_loss
+from vroc.loss import ncc_loss
 from vroc.metrics import root_mean_squared_error
 from vroc.registration import VrocRegistration
 

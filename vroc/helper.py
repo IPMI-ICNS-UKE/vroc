@@ -8,7 +8,6 @@ from multiprocessing import Queue
 from pathlib import Path
 from typing import Any, Sequence, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 import torch
@@ -250,7 +249,7 @@ def to_one_hot(
     if n_classes is None:
         # guess number of classes
         n_classes = labels.max()
-    labels_shape[dim] = n_classes
+    labels_shape[dim] = int(n_classes)
 
     labels_one_hot = torch.zeros(size=labels_shape, dtype=dtype, device=labels.device)
     labels_one_hot.scatter_(dim=dim, index=labels.long(), value=1)
@@ -542,9 +541,6 @@ def optimizer_to(optim, device):
                         subparam._grad.data = subparam._grad.data.to(device)
 
 
-from collections import Sequence
-
-
 def convert_dict_values(d: dict, types, converter):
     types = tuple(types)
 
@@ -567,6 +563,24 @@ def convert_dict_values(d: dict, types, converter):
 
     else:
         return d
+
+
+def check_mask_validity(
+    moving_image: np.ndarray,
+    fixed_image: np.ndarray,
+    moving_mask: np.ndarray,
+    fixed_mask: np.ndarray,
+):
+    moving_mask = moving_mask.astype(bool)
+    fixed_mask = fixed_mask.astype(bool)
+
+    # fixed image where moving_mask but not fixed_mask
+    fixed_image[moving_mask & ~fixed_mask].std() == 0
+
+    # moving image where fixed_mask but not moving_mask
+    moving_image[fixed_mask & ~moving_mask].std() == 0
+
+    return
 
 
 if __name__ == "__main__":

@@ -65,8 +65,6 @@ class OrientedHistogram:
 
 
 if __name__ == "__main__":
-    import torch
-
     a = np.random.random(100)
     b = np.random.random(100)
     w = np.random.random(100)

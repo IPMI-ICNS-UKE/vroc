@@ -2,20 +2,14 @@ import logging
 import time
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import nibabel as nib
 import numpy as np
 import SimpleITK as sitk
-import torch
 from matplotlib.animation import FFMpegWriter
 from scipy.ndimage.morphology import binary_dilation
 
-from vroc.common_types import PathLike
-from vroc.feature_extractor import OrientedHistogramFeatureExtrator
-from vroc.guesser import ParameterGuesser
-from vroc.helper import compute_tre_numpy, compute_tre_sitk, read_landmarks
+from vroc.helper import compute_tre_numpy, read_landmarks
 from vroc.logger import LogFormatter
-from vroc.loss import TRELoss, local_ncc_loss, mind_loss, mse_loss, ncc_loss, ngf_loss
+from vroc.loss import ncc_loss
 from vroc.registration import VrocRegistration
 
 handler = logging.StreamHandler()

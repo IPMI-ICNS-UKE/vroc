@@ -3,23 +3,14 @@ from __future__ import annotations
 import logging
 import pickle
 from pathlib import Path
-from typing import Optional
 
 import nevergrad as ng
 import numpy as np
-import torch
-import typer
 from scipy.ndimage import binary_dilation
-from torch.optim import Adam
 
-import vroc.database.models as orm
 from vroc.dataset import NLSTDataset
 from vroc.helper import compute_tre_numpy
-from vroc.hyperopt_database.client import DatabaseClient
 from vroc.logger import LogFormatter
-from vroc.loss import TRELoss
-from vroc.metrics import root_mean_squared_error
-from vroc.models import VectorFieldBooster
 from vroc.registration import VrocRegistration
 
 logger = logging.getLogger(__name__)

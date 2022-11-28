@@ -73,8 +73,6 @@ def build_matrix(runs: pd.DataFrame, features: dict, mode: str = "concat"):
 
 
 if __name__ == "__main__":
-    import matplotlib
-    import seaborn as sns
 
     PARAM_NAMES = ["n_levels", "iterations", "tau", "sigma_x", "sigma_y", "sigma_z"]
 

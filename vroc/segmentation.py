@@ -152,6 +152,7 @@ class BaseSegmenter(ABC):
             segmentation = torch.sigmoid(logits) > binary_threshold
         else:
             segmentation = torch.softmax(logits, dim=1)
+            return segmentation
             segmentation = torch.argmax(segmentation, dim=1, keepdim=True)
 
         return segmentation
@@ -168,14 +169,15 @@ class BaseSegmenter(ABC):
     ) -> ArrayOrTensor:
         spatial_image_shape = image.shape[-self.spatial_dims :]
 
-        image = self._cast_to_tensor(image)
-        logits = self._forward(image=image)
+        image = self._prepare_image(image)
+        with torch.inference_mode():
+            logits = self._forward(image=image)
 
-        logits = self._unpad_image(logits, target_shape=spatial_image_shape)
+            logits = self._unpad_image(logits, target_shape=spatial_image_shape)
 
-        segmentation = self._logits_to_segmentation(
-            logits=logits, binary_threshold=binary_threshold
-        )
+            segmentation = self._logits_to_segmentation(
+                logits=logits, binary_threshold=binary_threshold
+            )
 
         if clear_cuda_cache:
             torch.cuda.empty_cache()
@@ -193,6 +195,10 @@ class Segmenter3d(BaseSegmenter):
 
     def _forward(self, image: torch.Tensor) -> torch.Tensor:
         return self.model(image)
+
+
+class MultiClassSegmenter3d(Segmenter3d):
+    pass
 
 
 class Segmenter2D(ABC):
@@ -311,39 +317,69 @@ class LungSegmenter3D:
             image=prediction, mask=None, target_shape=unpadded_shape
         )
 
-        prediction = image = resize(prediction, output_shape=original_shape)
+        prediction = resize(prediction, output_shape=original_shape)
         prediction = prediction > 0.5
 
         return prediction
 
 
 if __name__ == "__main__":
-    # test OASIS segmentation
-    import matplotlib.pyplot as plt
+    # # test OASIS segmentation
+    # import matplotlib.pyplot as plt
+    # import SimpleITK as sitk
+    #
+    # image = sitk.ReadImage("/datalake/learn2reg/OASIS/imagesTr/OASIS_0001_0000.nii.gz")
+    # labels = sitk.ReadImage("/datalake/learn2reg/OASIS/labelsTr/OASIS_0001_0000.nii.gz")
+    #
+    # image = np.swapaxes(sitk.GetArrayFromImage(image), 0, 2)
+    # labels = np.swapaxes(sitk.GetArrayFromImage(labels), 0, 2)
+    #
+    # model = Unet3d(n_channels=1, n_classes=36, n_levels=4, filter_base=16)
+    # state = torch.load(
+    #     "/datalake/learn2reg/runs/models_0973f24c4a564338ab3920e4/step_93000.pth"
+    # )
+    # model.load_state_dict(state["model"])
+    #
+    # segmenter = Segmenter3d(
+    #     model=model,
+    #     input_value_range=(0, 1),
+    #     output_value_range=(0, 1),
+    #     device="cuda:0",
+    #     return_as_tensor=False,
+    # )
+    #
+    # prediction = segmenter.segment(image)
+    #
+    # fig, ax = plt.subplots(2, 1, sharex=True, sharey=True)
+    # ax[0].imshow(prediction[:, 112, :])
+    # ax[1].imshow(labels[:, 112, :])
+
+    # test total segmentator
     import SimpleITK as sitk
 
-    image = sitk.ReadImage("/datalake/learn2reg/OASIS/imagesTr/OASIS_0001_0000.nii.gz")
-    labels = sitk.ReadImage("/datalake/learn2reg/OASIS/labelsTr/OASIS_0001_0000.nii.gz")
+    image = sitk.ReadImage("/datalake/totalsegmentator/s0000/ct.nii.gz")
+    reference_image = image
 
     image = np.swapaxes(sitk.GetArrayFromImage(image), 0, 2)
-    labels = np.swapaxes(sitk.GetArrayFromImage(labels), 0, 2)
 
-    model = Unet3d(n_channels=1, n_classes=36, n_levels=4, filter_base=16)
+    model = Unet3d(n_classes=59, n_levels=4, filter_base=24)
     state = torch.load(
-        "/datalake/learn2reg/runs/models_0973f24c4a564338ab3920e4/step_93000.pth"
+        "/datalake/learn2reg/runs/models_86cd845411c44db1a4318db1/validation/step_357000.pth"
     )
     model.load_state_dict(state["model"])
 
-    segmenter = Segmenter3d(
+    segmenter = MultiClassSegmenter3d(
         model=model,
-        input_value_range=(0, 1),
+        input_value_range=(-1024, 3071),
         output_value_range=(0, 1),
         device="cuda:0",
+        pad_to_pow_2=True,
         return_as_tensor=False,
     )
 
-    prediction = segmenter.segment(image)
-
-    fig, ax = plt.subplots(2, 1, sharex=True, sharey=True)
-    ax[0].imshow(prediction[:, 112, :])
-    ax[1].imshow(labels[:, 112, :])
+    prediction = segmenter.segment(image).astype(np.float32)
+    prediction = prediction.transpose((3, 2, 1, 0))
+    prediction = prediction.argmax(axis=-1).astype(np.uint8)
+    prediction = sitk.GetImageFromArray(prediction)
+    prediction.CopyInformation(reference_image)
+    sitk.WriteImage(prediction, "/datalake/totalsegmentator/s0000/pred2.nii.gz")

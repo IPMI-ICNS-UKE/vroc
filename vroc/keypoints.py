@@ -541,8 +541,6 @@ def find_rigid_3d(x, y):
 
 
 def compute_rigid_transform(kpts_fixed, kpts_moving, iter=5):
-    import time
-
     device = kpts_fixed.device
     kpts_fixed = torch.cat(
         (kpts_fixed, torch.ones(1, kpts_fixed.shape[1], 1, device=device)), 2
@@ -637,27 +635,23 @@ def thin_plate_dense(x1, y1, shape, step, lambd=0.0, unroll_step_size=2**12):
     return y2
 
 
-{
-    "alpha": 2.5,
-    "beta": 150,
-    "gamma": 5,
-    "delta": 1,
-    "lambda": 0,
-    "sigma": 1.4,
-    "sigma1": 0.8,
-    "search_radius": [16, 8],
-    "length": [6, 3],
-    "quantisation": [2, 1],
-    "patch_radius": [3, 2],
-    "transform": ["n", "n"],
-}
-
-
 def extract_keypoints(
     moving_image: torch.Tensor,
     fixed_image: torch.Tensor,
     fixed_mask: torch.Tensor,
-    alpha: Number = 2.5,
+    # alpha: Number = 2.5,
+    # beta: Number = 150,
+    # gamma: Number = 5,
+    # delta: Number = 1,
+    # lambd: Number = 0,
+    # sigma_foerstner: Number = 1.4,
+    # sigma_mind: Number = 0.8,
+    # search_radius: Sequence[float] = (16, 8),
+    # length: Sequence[float] = (6, 3),
+    # quantization: Sequence[float] = (2, 1),
+    # patch_radius: Sequence[float] = (3, 2),
+    # transform: Sequence[Literal["rigid", "dense"]] = ("dense", "dense"),
+    alpha: Number = 1.0,
     beta: Number = 150,
     gamma: Number = 5,
     delta: Number = 1,
@@ -674,46 +668,46 @@ def extract_keypoints(
     device = fixed_image.device
     _, _, D, H, W = fixed_image.shape
 
-    print("Compute fixed MIND features ...", end=" ")
+    # print("Compute fixed MIND features ...", end=" ")
     torch.cuda.synchronize()
     t0 = time.time()
     mind_fix = mindssc(fixed_image, delta, sigma_mind)
     torch.cuda.synchronize()
     t1 = time.time()
-    print("finished ({:.2f} s).".format(t1 - t0))
+    # print("finished ({:.2f} s).".format(t1 - t0))
 
     dense_flow = torch.zeros((1, D, H, W, 3), device=device)
     img_mov_warped = moving_image
     for i in range(len(search_radius)):
-        print("Stage {}/{}".format(i + 1, len(search_radius)))
-        print("    search radius: {}".format(search_radius[i]))
-        print("      cube length: {}".format(length[i]))
-        print("     quantisation: {}".format(quantization[i]))
-        print("     patch radius: {}".format(patch_radius[i]))
-        print("        transform: {}".format(transform[i]))
+        # print("Stage {}/{}".format(i + 1, len(search_radius)))
+        # print("    search radius: {}".format(search_radius[i]))
+        # print("      cube length: {}".format(length[i]))
+        # print("     quantisation: {}".format(quantization[i]))
+        # print("     patch radius: {}".format(patch_radius[i]))
+        # print("        transform: {}".format(transform[i]))
 
         disp = get_disp(quantization[i], search_radius[i], (D, H, W), device=device)
 
-        print("    Compute moving MIND features ...", end=" ")
+        # print("    Compute moving MIND features ...", end=" ")
         torch.cuda.synchronize()
         t0 = time.time()
         mind_mov = mindssc(img_mov_warped, delta, sigma_mind)
         torch.cuda.synchronize()
         t1 = time.time()
-        print("finished ({:.2f} s).".format(t1 - t0))
+        # print("finished ({:.2f} s).".format(t1 - t0))
 
         torch.cuda.synchronize()
         t0 = time.time()
         kpts_fix = foerstner_kpts(fixed_image, fixed_mask, sigma_foerstner, length[i])
         torch.cuda.synchronize()
         t1 = time.time()
-        print(
-            "    {} fixed keypoints extracted ({:.2f} s).".format(
-                kpts_fix.shape[1], t1 - t0
-            )
-        )
+        # print(
+        #     "    {} fixed keypoints extracted ({:.2f} s).".format(
+        #         kpts_fix.shape[1], t1 - t0
+        #     )
+        # )
 
-        print("    Compute forward marginals ...", end=" ")
+        # print("    Compute forward marginals ...", end=" ")
         torch.cuda.synchronize()
         t0 = time.time()
         marginalsf = compute_marginals(
@@ -729,7 +723,7 @@ def extract_keypoints(
         )
         torch.cuda.synchronize()
         t1 = time.time()
-        print("finished ({:.2f} s).".format(t1 - t0))
+        # print("finished ({:.2f} s).".format(t1 - t0))
 
         flow = (
             F.softmax(-gamma * marginalsf.view(1, kpts_fix.shape[1], -1, 1), dim=2)
@@ -738,7 +732,7 @@ def extract_keypoints(
 
         kpts_mov = kpts_fix + flow
 
-        print("    Compute symmetric backward marginals ...", end=" ")
+        # print("    Compute symmetric backward marginals ...", end=" ")
         torch.cuda.synchronize()
         t0 = time.time()
         marginalsb = compute_marginals(
@@ -754,7 +748,7 @@ def extract_keypoints(
         )
         torch.cuda.synchronize()
         t1 = time.time()
-        print("finished ({:.2f} s).".format(t1 - t0))
+        # print("finished ({:.2f} s).".format(t1 - t0))
 
         marginals = 0.5 * (
             marginalsf.view(1, kpts_fix.shape[1], -1)
@@ -769,7 +763,7 @@ def extract_keypoints(
         torch.cuda.synchronize()
         t0 = time.time()
         if transform[i] == "rigid":
-            print("    Find rigid transform ...", end=" ")
+            # print("    Find rigid transform ...", end=" ")
             rigid = compute_rigid_transform(kpts_fix, kpts_fix + flow)
             dense_flow_ = F.affine_grid(
                 rigid[:, :3, :] - torch.eye(3, 4, device=device).unsqueeze(0),
@@ -777,11 +771,11 @@ def extract_keypoints(
                 align_corners=True,
             )
         elif transform[i] == "dense":
-            print("    Dense thin plate spline interpolation ...", end=" ")
+            # print("    Dense thin plate spline interpolation ...", end=" ")
             dense_flow_ = thin_plate_dense(kpts_fix, flow, (D, H, W), 3, lambd)
         torch.cuda.synchronize()
         t1 = time.time()
-        print("finished ({:.2f} s).".format(t1 - t0))
+        # print("finished ({:.2f} s).".format(t1 - t0))
 
         dense_flow += dense_flow_
 

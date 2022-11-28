@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Literal, Sequence, Tuple
 
 import numpy as np
-import SimpleITK as sitk
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from monai.losses import DiceLoss
 
 from vroc.affine import run_affine_registration
 from vroc.common_types import (
@@ -26,10 +25,8 @@ from vroc.decorators import convert, timing
 from vroc.guesser import ParameterGuesser
 from vroc.helper import to_one_hot
 from vroc.logger import LoggerMixin, RegistrationLogEntry
-from vroc.loss import TRELoss, WarpedMSELoss, smooth_vector_field_loss
-from vroc.metrics import root_mean_squared_error
-from vroc.models import DemonsVectorFieldBooster, VarReg
-from vroc.plot import RegistrationProgressPlotter
+from vroc.loss import DiceLoss, TRELoss, WarpedMSELoss, smooth_vector_field_loss
+from vroc.models import VarReg
 
 
 @dataclass
@@ -49,10 +46,33 @@ class RegistrationResult:
 
     warped_affine_moving_image: np.ndarray | torch.Tensor | None = None
     warped_affine_moving_mask: np.ndarray | torch.Tensor | None = None
+
+    # keypoints
+    moving_keypoints: np.ndarray | torch.Tensor | None = None
+    fixed_keypoints: np.ndarray | torch.Tensor | None = None
+
     debug_info: dict | None = None
 
+    def _cast(self, cast_function: Callable):
+        self.moving_image = cast_function(self.moving_image)
+        self.fixed_image = cast_function(self.fixed_image)
+
+        self.warped_moving_image = cast_function(self.warped_moving_image)
+        self.composed_vector_field = cast_function(self.composed_vector_field)
+        self.vector_fields = cast_function(self.vector_fields)
+
+        self.moving_mask = cast_function(self.moving_mask)
+        self.warped_moving_mask = cast_function(self.warped_moving_mask)
+        self.fixed_mask = cast_function(self.fixed_mask)
+
+        self.warped_affine_moving_image = cast_function(self.warped_affine_moving_image)
+        self.warped_affine_moving_mask = cast_function(self.warped_affine_moving_mask)
+
+        self.moving_keypoints = cast_function(self.moving_keypoints)
+        self.fixed_keypoints = cast_function(self.fixed_keypoints)
+
     def to_numpy(self):
-        def cast(
+        def cast_function(
             tensor: torch.Tensor | Sequence[torch.Tensor],
         ) -> np.ndarray | List[np.ndarray] | None:
             def _cast_tensor(tensor: torch.Tensor) -> np.ndarray:
@@ -65,19 +85,21 @@ class RegistrationResult:
             else:
                 return _cast_tensor(tensor)
 
-        self.moving_image = cast(self.moving_image)
-        self.fixed_image = cast(self.fixed_image)
+        self._cast(cast_function)
 
-        self.warped_moving_image = cast(self.warped_moving_image)
-        self.composed_vector_field = cast(self.composed_vector_field)
-        self.vector_fields = cast(self.vector_fields)
+    def to(self, device: TorchDevice):
+        def cast_function(
+            tensor: torch.Tensor | Sequence[torch.Tensor],
+        ) -> torch.Tensor | List[torch.Tensor] | None:
+            def _cast_tensor(tensor: torch.Tensor) -> torch.Tensor:
+                return tensor.to(device)
 
-        self.moving_mask = cast(self.moving_mask)
-        self.warped_moving_mask = cast(self.warped_moving_mask)
-        self.fixed_mask = cast(self.fixed_mask)
+            if isinstance(tensor, (tuple, list)):
+                return [_cast_tensor(t) for t in tensor]
+            else:
+                return _cast_tensor(tensor)
 
-        self.warped_affine_moving_image = cast(self.warped_affine_moving_image)
-        self.warped_affine_moving_mask = cast(self.warped_affine_moving_mask)
+        self._cast(cast_function)
 
 
 class VrocRegistration(LoggerMixin):
@@ -328,7 +350,7 @@ class VrocRegistration(LoggerMixin):
             debug_step_size=debug_step_size,
         ).to(self.device)
 
-        with torch.inference_mode():
+        with torch.autocast(device_type="cuda", enabled=True), torch.inference_mode():
             varreg_result = varreg.run_registration(
                 moving_image=moving_image,
                 fixed_image=fixed_image,
@@ -551,7 +573,13 @@ class VrocRegistration(LoggerMixin):
 
         gradient_scaler = torch.cuda.amp.GradScaler()
 
-        plotter = RegistrationProgressPlotter(output_folder=debug_output_folder)
+        if debug:
+            from vroc.plot import RegistrationProgressPlotter
+
+            plotter = RegistrationProgressPlotter(output_folder=debug_output_folder)
+        else:
+            plotter = None
+
         max_iteration_length = len(str(n_iterations))
 
         # initial values in case of 0 iterations
@@ -559,135 +587,159 @@ class VrocRegistration(LoggerMixin):
         vector_field_boost = torch.zeros_like(composed_boosted_vector_field)
 
         for i_iteration in range(n_iterations):
-            optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
-                vector_field_boost = model(
-                    moving_image,
-                    fixed_image,
-                    moving_mask,
-                    fixed_mask,
-                    composed_vector_field,
-                    image_spacing,
-                )
+            # reset after 20 iterations
+            # if i_iteration % 20 == 0:
+            #     print(f'reset at {i_iteration = }')
+            #     composed_boosted_vector_field = composed_vector_field
 
-                # compose initial vector field with vector field boost
-                composed_boosted_vector_field = (
-                    vector_field_boost
-                    + model.spatial_transformer(
-                        composed_vector_field, vector_field_boost
+            # is_train = i_iteration < n_iterations
+            is_train = True
+            maybe_enabled_grad = nullcontext() if is_train else torch.inference_mode()
+
+            with maybe_enabled_grad:
+                optimizer.zero_grad()
+                # composed_boosted_vector_field = composed_boosted_vector_field.detach()
+                with torch.autocast(device_type="cuda", enabled=True):
+
+                    vector_field_boost = model(
+                        moving_image,
+                        fixed_image,
+                        moving_mask,
+                        fixed_mask,
+                        composed_vector_field,
+                        image_spacing,
+                        n_iterations=None if is_train else 100,
                     )
-                )
 
-            # initialize log entry
-            log = RegistrationLogEntry(
-                stage="boosting",
-                iteration=i_iteration,
-            )
+                    # start from scratch
+                    composed_boosted_vector_field = (
+                        vector_field_boost
+                        + model.spatial_transformer(
+                            composed_vector_field, vector_field_boost
+                        )
+                    )
 
-            # compute specified losses (keypoints, smoothness and labels)
-            losses = {}
-            if "keypoint" in requested_losses:
-                tre_loss_after_boosting = tre_loss(
-                    composed_boosted_vector_field,
-                    moving_keypoints,
-                    fixed_keypoints,
-                    image_spacing,
-                )
+                    # # continue with boosted result
+                    # composed_boosted_vector_field = (
+                    #     vector_field_boost
+                    #     + model.spatial_transformer(
+                    #         composed_boosted_vector_field, vector_field_boost
+                    #     )
+                    # )
 
-                tre_metric_after_boosting = tre_loss_after_boosting.sqrt().mean()
-                tre_ratio_loss = tre_metric_after_boosting / tre_metric_before_boosting
+                    # initialize log entry
+                    log = RegistrationLogEntry(
+                        stage="boosting",
+                        iteration=i_iteration,
+                    )
 
-                losses["keypoint"] = tre_ratio_loss
+                    # compute specified losses (keypoints, smoothness and labels)
+                    losses = {}
+                    if "keypoint" in requested_losses:
+                        tre_loss_after_boosting = tre_loss(
+                            composed_boosted_vector_field,
+                            moving_keypoints,
+                            fixed_keypoints,
+                            image_spacing,
+                        )
 
-                # add to log
-                log.tre_metric_before_boosting = tre_metric_before_boosting
-                log.tre_metric_after_boosting = tre_metric_after_boosting
+                        tre_metric_after_boosting = (
+                            tre_loss_after_boosting.sqrt().mean()
+                        )
+                        tre_ratio_loss = (
+                            tre_metric_after_boosting / tre_metric_before_boosting
+                        )
 
-            if "smoothness" in requested_losses:
-                smoothness_after_boosting = smooth_vector_field_loss(
-                    vector_field=composed_boosted_vector_field,
-                    mask=fixed_mask,
-                    l2r_variant=True,
-                )
+                        losses["keypoint"] = tre_ratio_loss
 
-                smoothness_ratio_loss = (
-                    smoothness_after_boosting / smoothness_before_boosting
-                )
+                        # add to log
+                        log.tre_metric_before_boosting = tre_metric_before_boosting
+                        log.tre_metric_after_boosting = tre_metric_after_boosting
 
-                losses["smoothness"] = smoothness_ratio_loss
+                    if "smoothness" in requested_losses:
+                        smoothness_after_boosting = smooth_vector_field_loss(
+                            vector_field=composed_boosted_vector_field,
+                            mask=fixed_mask,
+                            l2r_variant=True,
+                        )
 
-                # add to log
-                log.smoothness_before_boosting = smoothness_before_boosting
-                log.smoothness_after_boosting = smoothness_after_boosting
+                        smoothness_ratio_loss = (
+                            smoothness_after_boosting / smoothness_before_boosting
+                        )
 
-                # ratio < 1: better, ratio > 1 worse
-                # only penalize worsening of smoothness
-                # if smoothness_ratio_loss < 1:
-                #     smoothness_ratio_loss = 0.5 * smoothness_ratio_loss + 0.5
-                # smoothness_ratio_loss = torch.maximum(
-                #     smoothness_ratio_loss, torch.as_tensor(1.0)
-                # )
+                        losses["smoothness"] = (
+                            torch.relu(smoothness_ratio_loss - 1) + 1.0
+                        )
 
-            if "image" in requested_losses:
-                image_loss_after_boosting = image_loss(
-                    moving_image=moving_image,
-                    vector_field=composed_boosted_vector_field,
-                    fixed_image=fixed_image,
-                    fixed_mask=fixed_mask,
-                )
+                        # add to log
+                        log.smoothness_before_boosting = smoothness_before_boosting
+                        log.smoothness_after_boosting = smoothness_after_boosting
 
-                image_ratio_loss = (
-                    image_loss_after_boosting / image_loss_before_boosting
-                )
+                        # ratio < 1: better, ratio > 1 worse
+                        # only penalize worsening of smoothness
+                        # if smoothness_ratio_loss < 1:
+                        #     smoothness_ratio_loss = 0.5 * smoothness_ratio_loss + 0.5
+                        # smoothness_ratio_loss = torch.maximum(
+                        #     smoothness_ratio_loss, torch.as_tensor(1.0)
+                        # )
 
-                losses["image"] = image_ratio_loss
+                    if "image" in requested_losses:
+                        image_loss_after_boosting = image_loss(
+                            moving_image=moving_image,
+                            vector_field=composed_boosted_vector_field,
+                            fixed_image=fixed_image,
+                            fixed_mask=fixed_mask,
+                        )
 
-                # add to log
-                log.image_loss_before_boosting = image_loss_before_boosting
-                log.image_loss_after_boosting = image_loss_after_boosting
+                        image_ratio_loss = (
+                            image_loss_after_boosting / image_loss_before_boosting
+                        )
 
-            if "label" in requested_losses:
-                warped_labels = model.spatial_transformer(
-                    moving_labels,
-                    composed_boosted_vector_field,
-                    default_value=0,
-                    mode="bilinear",
-                )
+                        losses["image"] = image_ratio_loss
 
-                dice_loss_after_boosting = dice_loss(warped_labels, fixed_labels)
+                        # add to log
+                        log.image_loss_before_boosting = image_loss_before_boosting
+                        log.image_loss_after_boosting = image_loss_after_boosting
 
-                dice_ratio_loss = dice_loss_after_boosting / dice_loss_before_boosting
-                losses["label"] = dice_ratio_loss
+                    if "label" in requested_losses:
+                        warped_labels = model.spatial_transformer(
+                            moving_labels,
+                            composed_boosted_vector_field,
+                            default_value=0,
+                            mode="bilinear",
+                        )
 
-                # add to log
-                log.dice_loss_before_boosting = dice_loss_before_boosting
-                log.dice_loss_after_boosting = dice_loss_after_boosting
+                        dice_loss_after_boosting = dice_loss(
+                            warped_labels, fixed_labels
+                        )
 
-            # reduce losses to scalar
-            loss = 0.0
-            weight_sum = 0.0
-            for loss_name, loss_value in losses.items():
-                loss += loss_weights[loss_name] * loss_value
-                weight_sum += loss_weights[loss_name]
-            loss /= weight_sum
+                        dice_ratio_loss = (
+                            dice_loss_after_boosting / dice_loss_before_boosting
+                        )
+                        losses["label"] = dice_ratio_loss
 
-            # add loss info to log
-            log.loss = loss
-            log.losses = losses
-            log.loss_weights = loss_weights
+                        # add to log
+                        log.dice_loss_before_boosting = dice_loss_before_boosting
+                        log.dice_loss_after_boosting = dice_loss_after_boosting
 
-            self.logger.debug(log)
+                    # reduce losses to scalar
+                    loss = 0.0
+                    weight_sum = 0.0
+                    for loss_name, loss_value in losses.items():
+                        loss += loss_weights[loss_name] * loss_value
+                        weight_sum += loss_weights[loss_name]
+                    loss /= weight_sum
 
-            gradient_scaler.scale(loss).backward()
-            gradient_scaler.step(optimizer)
-            gradient_scaler.update()
-
-            # self.logger.debug(
-            #     f"Train boosting, iteration {i_iteration:0{max_iteration_length}d} / "
-            #     f"loss: {loss:.4f}, tre: {losses['tre']:.4f}, smooth: {losses['smooth']:.4f}) / "
-            #     f"TRE before: {tre_metric_before_boosting} / "
-            #     f"TRE after: {tre_metric_after_boosting}"
-            # )
+                    # add loss info to log
+                    log.loss = loss
+                    log.losses = losses
+                    log.loss_weights = loss_weights
+                    if i_iteration == 0 or i_iteration >= n_iterations - 1 or True:
+                        self.logger.debug(log)
+            if is_train:
+                gradient_scaler.scale(loss).backward()
+                gradient_scaler.step(optimizer)
+                gradient_scaler.update()
 
             # here we do the debug stuff
             if debug and i_iteration % debug_step_size == 0:

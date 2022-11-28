@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import os
-import time
 from typing import Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
 
 from vroc.common_types import ArrayOrTensor, IntTuple, IntTuple3D, Number
-from vroc.metrics import root_mean_squared_error
 
 
 def pad(image: np.ndarray, target_shape: IntTuple, pad_value: Number = 0.0):
@@ -67,9 +64,10 @@ def crop_or_pad(
                     constant_values=image_pad_value,
                 )
                 if mask is not None:
+                    extra_dims = mask.ndim - image.ndim
                     mask = np.pad(
                         mask,
-                        pad_width,
+                        [(0, 0)] * extra_dims + pad_width,
                         mode="constant",
                         constant_values=mask_pad_value,
                     )
@@ -84,9 +82,13 @@ def crop_or_pad(
                     slice(None, None),
                 ] * image.ndim
                 cropping_slicing[i_axis] = slice(cropping_left, -cropping_right)
-                image = image[tuple(cropping_slicing)]
+                cropping_slicing = tuple(cropping_slicing)
+                image = image[cropping_slicing]
                 if mask is not None:
-                    mask = mask[tuple(cropping_slicing)]
+                    mask_cropping_slicing = cropping_slicing
+                    if mask.ndim > image.ndim:
+                        mask_cropping_slicing = (..., *cropping_slicing)
+                    mask = mask[mask_cropping_slicing]
 
     return image, mask
 

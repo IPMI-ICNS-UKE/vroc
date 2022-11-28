@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 ROOT_DIR = Path("/datalake/learn2reg/NLST")
 OVERWRITE = True
 
-client = DatabaseClient("/datalake/learn2reg/param_sampling.sqlite")
+client = DatabaseClient("/datalake/learn2reg/param_sampling_v2.sqlite")
 
 feature_extractor = OrientedHistogramFeatureExtrator(n_bins=16, device="cuda:0")
 

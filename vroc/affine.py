@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, Tuple
 
@@ -9,14 +8,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy.ndimage import binary_dilation
-from torch.optim import SGD, Adam, NAdam, RAdam
+from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from vroc.blocks import SpatialTransformer
 from vroc.helper import compute_tre_numpy, read_landmarks
 from vroc.logger import RegistrationLogEntry
-from vroc.loss import mse_loss, ncc_loss
+from vroc.loss import mse_loss
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +162,10 @@ def run_affine_registration(
     if moving_mask is not None and fixed_mask is not None:
         # ROI is union mask
         # roi = moving_mask | fixed_mask
+        # print("Using union mask (not for LungCT dataset)")
+
         roi = fixed_mask
-        print("Using fixed mask")
+        logger.info("Using fixed mask for affine registration")
     else:
         # ROI is total image
         roi = torch.ones_like(fixed_image, dtype=torch.bool)

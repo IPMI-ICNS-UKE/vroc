@@ -1,23 +1,14 @@
 from __future__ import annotations
 
-import pprint
 import time
-from math import ceil, log10
 from pathlib import Path
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Any, List, Literal, Optional, Sequence, Tuple
 
-import matplotlib.colors as colors
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# import matplotlib
-# matplotlib.use('Agg')
-from PIL import Image
-
-from vroc.animation import Camera
 from vroc.blocks import (
     ConvBlock,
     DecoderBlock,
@@ -33,22 +24,17 @@ from vroc.blocks import (
 )
 from vroc.checks import are_of_same_length, is_tuple, is_tuple_of_tuples
 from vroc.common_types import (
-    FloatTuple,
     FloatTuple2D,
     FloatTuple3D,
-    IntTuple,
     IntTuple2D,
     IntTuple3D,
     MaybeSequence,
-    PathLike,
 )
 from vroc.decay import exponential_decay
-from vroc.decorators import convert, timing
+from vroc.decorators import timing
 from vroc.helper import get_bounding_box
 from vroc.interpolation import rescale, resize
 from vroc.logger import LoggerMixin
-from vroc.plot import RegistrationProgressPlotter, TiledArrayPlotter
-from vroc.preprocessing import crop_or_pad, pad
 
 
 # TODO: channel bug with skip_connections=False
@@ -58,7 +44,8 @@ class FlexUNet(nn.Module):
         n_channels: int = 1,
         n_classes: int = 1,
         n_levels: int = 6,
-        filter_base: int = 32,
+        filter_base: int | None = None,
+        n_filters: Sequence[int] | None = None,
         convolution_layer=nn.Conv3d,
         downsampling_layer=nn.MaxPool3d,
         upsampling_layer=nn.Upsample,
@@ -74,7 +61,13 @@ class FlexUNet(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.n_levels = n_levels
+
+        # either filter_base or n_filters must be set
         self.filter_base = filter_base
+        self.n_filters = n_filters
+
+        if not any((filter_base, n_filters)) or all((filter_base, n_filters)):
+            raise ValueError("Please set either filter_base or n_filters")
 
         self.convolution_layer = convolution_layer
         self.downsampling_layer = downsampling_layer
@@ -103,25 +96,46 @@ class FlexUNet(nn.Module):
         return DecoderBlock
 
     def _build_layers(self):
+
+        if self.filter_base:
+            n_filters = {
+                "init": self.filter_base,
+                "enc": [
+                    self.filter_base * 2**i_level for i_level in range(self.n_levels)
+                ],
+                "dec": [
+                    self.filter_base * 2**i_level
+                    for i_level in reversed(range(self.n_levels))
+                ],
+                "final": self.filter_base,
+            }
+        else:
+            n_filters = {
+                "init": self.n_filters[0],
+                "enc": self.n_filters[1 : self.n_levels + 1],
+                "dec": self.n_filters[self.n_levels + 1 : -1],
+                "final": self.n_filters[-1],
+            }
+
         enc_out_channels = []
 
         self.init_conv = self.convolution_layer(
             in_channels=self.n_channels,
-            out_channels=self.filter_base,
+            out_channels=n_filters["init"],
             **self.convolution_kwargs,
         )
 
         self.final_conv = self.convolution_layer(
-            in_channels=self.filter_base,
+            in_channels=n_filters["final"],
             out_channels=self.n_classes,
             **self.convolution_kwargs,
         )
 
-        enc_out_channels.append(self.filter_base)
-        previous_out_channels = self.filter_base
+        enc_out_channels.append(n_filters["init"])
+        previous_out_channels = n_filters["init"]
 
         for i_level in range(self.n_levels):
-            out_channels = self.filter_base * 2**i_level
+            out_channels = n_filters["enc"][i_level]
             enc_out_channels.append(out_channels)
             self.add_module(
                 f"enc_{i_level}",
@@ -138,9 +152,10 @@ class FlexUNet(nn.Module):
             )
             previous_out_channels = out_channels
 
-        for i_level in reversed(range(self.n_levels)):
+        for i, i_level in enumerate(reversed(range(self.n_levels))):
 
-            out_channels = self.filter_base * 2**i_level
+            out_channels = n_filters["dec"][i]
+
             if i_level > 0:  # deeper levels
                 if self.skip_connections:
                     in_channels = previous_out_channels + enc_out_channels[i_level]
@@ -148,7 +163,7 @@ class FlexUNet(nn.Module):
                     in_channels = previous_out_channels
             else:
                 if self.skip_connections:
-                    in_channels = previous_out_channels + self.filter_base
+                    in_channels = previous_out_channels + n_filters["init"]
                 else:
                     in_channels = previous_out_channels
 
@@ -192,13 +207,15 @@ class Unet3d(FlexUNet):
         n_channels: int = 1,
         n_classes: int = 1,
         n_levels: int = 6,
-        filter_base: int = 32,
+        filter_base: int | None = None,
+        n_filters: Sequence[int] | None = None,
     ):
         super().__init__(
             n_channels=n_channels,
             n_classes=n_classes,
             n_levels=n_levels,
             filter_base=filter_base,
+            n_filters=n_filters,
             convolution_layer=nn.Conv3d,
             downsampling_layer=nn.MaxPool3d,
             upsampling_layer=nn.Upsample,
@@ -409,9 +426,14 @@ class VarReg(nn.Module, LoggerMixin):
         self.debug_output_folder = debug_output_folder
         self.debug_step_size = debug_step_size
 
-        self._plotter = RegistrationProgressPlotter(
-            output_folder=self.debug_output_folder
-        )
+        if self.debug:
+            from vroc.plot import RegistrationProgressPlotter
+
+            self._plotter = RegistrationProgressPlotter(
+                output_folder=self.debug_output_folder
+            )
+        else:
+            self._plotter = None
 
         # check if params are passed with/converted to consistent length
         # (== self.n_levels)
@@ -1051,6 +1073,7 @@ class DemonsVectorFieldBooster(nn.Module, LoggerMixin):
         fixed_mask: torch.Tensor,
         vector_field: torch.Tensor,
         image_spacing: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
 
         spatial_image_shape = moving_image.shape[2:]
@@ -1062,9 +1085,11 @@ class DemonsVectorFieldBooster(nn.Module, LoggerMixin):
             composed_vector_field = vector_field_boost + self.spatial_transformer(
                 vector_field, vector_field_boost
             )
-            moving_image = self.spatial_transformer(moving_image, composed_vector_field)
+            warped_moving_image = self.spatial_transformer(
+                moving_image, composed_vector_field
+            )
 
-            diff = (moving_image - fixed_image) / (fixed_image + 1e-6)
+            diff = (warped_moving_image - fixed_image) / (fixed_image + 1e-6)
             diff = F.softsign(diff)
 
             forces = self.forces(
@@ -1091,6 +1116,167 @@ class DemonsVectorFieldBooster(nn.Module, LoggerMixin):
             )
 
         return vector_field_boost
+
+
+# class DemonsVectorFieldBooster(nn.Module, LoggerMixin):
+#     def __init__(
+#         self,
+#         n_iterations: int = 10,
+#         filter_base: int = 16,
+#         gradient_type: Literal["active", "passive", "dual"] = "dual",
+#     ):
+#         super().__init__()
+#
+#         self.n_iterations = n_iterations
+#         self.filter_base = filter_base
+#         self.forces = DemonForces(method=gradient_type)
+#
+#         # self.regularization = TrainableRegularization3d(n_levels=4, filter_base=16)
+#         self.regularization = DynamicRegularization3d(filter_base=16)
+#         self.spatial_transformer = SpatialTransformer()
+#
+#
+#         self.factors = (0.125, 0.25, 0.5, 1.0)
+#         self.n_levels = len(self.factors)
+#         self.weighting_net = FlexUNet(
+#             n_channels=2, n_levels=4, n_classes=self.n_levels + 3, filter_base=4, norm_layer=nn.InstanceNorm3d, return_bottleneck=False, skip_connections=True
+#         )
+#
+#
+#
+#     def forward(
+#         self,
+#         moving_image: torch.Tensor,
+#         fixed_image: torch.Tensor,
+#         moving_mask: torch.Tensor,
+#         fixed_mask: torch.Tensor,
+#         vector_field: torch.Tensor,
+#         image_spacing: torch.Tensor,
+#         n_iterations: int | None = None,
+#     ) -> torch.Tensor:
+#
+#         spatial_image_shape = moving_image.shape[2:]
+#         vector_field_boost = torch.zeros(
+#             (1, 3) + spatial_image_shape, device=moving_image.device
+#         )
+#
+#         _n_iterations = n_iterations or self.n_iterations
+#         for _ in range(_n_iterations):
+#             composed_vector_field = self.spatial_transformer.compose_vector_fields(
+#                 vector_field, vector_field_boost
+#             )
+#
+#             # warp image with boosted vector field
+#             warped_moving_image = self.spatial_transformer(
+#                 moving_image, composed_vector_field
+#             )
+#
+#             # diff = (warped_moving_image - fixed_image) / (fixed_image + 1e-6)
+#             # diff = F.softsign(diff)
+#
+#             forces = self.forces(
+#                 warped_moving_image,
+#                 fixed_image,
+#                 moving_mask,
+#                 fixed_mask,
+#                 image_spacing,
+#             )
+#
+#             images = torch.concat((moving_image, fixed_image), dim=1)
+#
+#             output = self.weighting_net(images)
+#             weights = output[:, :self.n_levels]
+#             weights = torch.softmax(weights, dim=1)
+#             taus = output[:, self.n_levels:]
+#             taus = 5 * torch.sigmoid(taus)
+#             print(f'mean tau x/y/z: {taus[:, 0].mean():.2f}, {taus[:, 1].mean():.2f}, {taus[:, 2].mean():.2f}')
+#
+#             vector_field_boost = vector_field_boost + taus * forces
+#             vector_field_boost = self.regularization(
+#                 vector_field=vector_field_boost, moving_image=warped_moving_image, fixed_image=fixed_image, weights=weights
+#             )
+#
+#             # plot weights and tau
+#             m = warped_moving_image.detach().cpu().numpy()
+#             f = fixed_image.detach().cpu().numpy()
+#             diff = (warped_moving_image - fixed_image)
+#             diff = diff.detach().cpu().numpy()
+#             w = weights.detach().cpu().numpy()
+#
+#             m, f = diff, diff
+#             clim = (-1, 1)
+#             cmap = 'seismic'
+#             mid_slice = w.shape[-2] // 2
+#             fig, ax = plt.subplots(1, self.n_levels + 2, sharex=True, sharey=True)
+#             ax[0].imshow(f[0, 0, :, mid_slice, :], clim=clim, cmap=cmap)
+#             ax[1].imshow(m[0, 0, :, mid_slice, :], clim=clim, cmap=cmap)
+#             for i in range(self.n_levels):
+#                 ax[i + 2].imshow(w[0, i, :, mid_slice, :])
+#
+#             t = taus.detach().cpu().numpy()
+#             mid_slice = t.shape[-2] // 2
+#             fig, ax = plt.subplots(1, 3 + 2, sharex=True, sharey=True)
+#             ax[0].imshow(f[0, 0, :, mid_slice, :], clim=clim, cmap=cmap)
+#             ax[1].imshow(m[0, 0, :, mid_slice, :], clim=clim, cmap=cmap)
+#             for i in range(3):
+#                 ax[i + 2].imshow(t[0, i, :, mid_slice, :])
+#
+#         return vector_field_boost
+
+# def forward(
+#     self,
+#     moving_image: torch.Tensor,
+#     fixed_image: torch.Tensor,
+#     moving_mask: torch.Tensor,
+#     fixed_mask: torch.Tensor,
+#     vector_field: torch.Tensor,
+#     image_spacing: torch.Tensor,
+#     n_iterations: int | None = None,
+# ) -> torch.Tensor:
+#
+#     spatial_image_shape = moving_image.shape[2:]
+#     vector_field_boost = torch.zeros(
+#         (1, 3) + spatial_image_shape, device=moving_image.device
+#     )
+#
+#     _n_iterations = n_iterations or self.n_iterations
+#     for _ in range(_n_iterations):
+#         composed_vector_field = self.spatial_transformer.compose_vector_fields(
+#             vector_field, vector_field_boost
+#         )
+#
+#         # warp image with boosted vector field
+#         warped_moving_image = self.spatial_transformer(
+#             moving_image, composed_vector_field
+#         )
+#
+#         diff = (warped_moving_image - fixed_image) / (fixed_image + 1e-6)
+#         diff = F.softsign(diff)
+#
+#         forces = self.forces(
+#             warped_moving_image,
+#             fixed_image,
+#             moving_mask,
+#             fixed_mask,
+#             image_spacing,
+#         )
+#
+#         updated_vector_field_boost = vector_field_boost + forces
+#
+#         updated_vector_field_boost_1 = self.regularization_1(
+#             torch.concat((updated_vector_field_boost, diff), dim=1)
+#         )
+#         updated_vector_field_boost_2 = self.regularization_2(
+#             torch.concat((updated_vector_field_boost, diff), dim=1)
+#         )
+#         vector_field_boost = vector_field_boost + self.fuse(
+#             torch.concat(
+#                 (updated_vector_field_boost_1, updated_vector_field_boost_2),
+#                 dim=1,
+#             )
+#         )
+#
+#     return vector_field_boost
 
 
 class DemonsVectorFieldArtifactBooster(nn.Module):

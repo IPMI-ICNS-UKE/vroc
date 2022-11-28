@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from typing import Literal
+import warnings
+from typing import Callable, List, Literal
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from vroc.blocks import SpatialTransformer
-from vroc.common_types import FloatTuple3D, IntTuple3D
+from vroc.common_types import IntTuple3D
+from vroc.helper import to_one_hot
 
 
 class TRELoss(nn.Module):
@@ -79,10 +80,18 @@ class TRELoss(nn.Module):
         return distances
 
 
+def calculate_gradient_l2(image: torch.tensor, eps: float = 1e-6) -> torch.tensor:
+    x_grad, y_grad, z_grad = torch.gradient(image, dim=(2, 3, 4))
+    l2_grad = torch.sqrt((eps + x_grad**2 + y_grad**2 + z_grad**2))
+
+    return l2_grad
+
+
 class WarpedMSELoss(nn.Module):
-    def __init__(self, shape: IntTuple3D | None = None):
+    def __init__(self, shape: IntTuple3D | None = None, edge_weighting: float = 0.0):
         super().__init__()
         self.spatial_transformer = SpatialTransformer(shape=shape)
+        self.edge_weighting = edge_weighting
 
     def forward(
         self,
@@ -95,7 +104,17 @@ class WarpedMSELoss(nn.Module):
             image=moving_image, transformation=vector_field, mode="bilinear"
         )
 
-        return F.mse_loss(warped_image[fixed_mask], fixed_image[fixed_mask])
+        loss = F.mse_loss(warped_image[fixed_mask], fixed_image[fixed_mask])
+
+        if self.edge_weighting > 0.0:
+            warped_image_l2_grad = calculate_gradient_l2(warped_image)[fixed_mask]
+            fixed_image_l2_grad = calculate_gradient_l2(fixed_image)[fixed_mask]
+
+            loss = loss + self.edge_weighting * F.l1_loss(
+                warped_image_l2_grad, fixed_image_l2_grad
+            )
+
+        return loss
 
 
 def mse_loss(
@@ -209,3 +228,184 @@ def smooth_vector_field_loss(
         det_j = torch.log(det_j)
 
     return det_j[mask].std()
+
+
+class DiceLoss(nn.Module):
+    """Compute average Dice loss between two tensors. It can support both
+    multi-classes and multi-labels tasks. The data `input` (BNHW[D] where N is
+    number of classes) is compared with ground truth `target` (BNHW[D]).
+
+    Note that axis N of `input` is expected to be logits or probabilities for each class, if passing logits as input,
+    must set `sigmoid=True` or `softmax=True`, or specifying `other_act`. And the same axis of `target`
+    can be 1 or N (one-hot format).
+
+    The `smooth_nr` and `smooth_dr` parameters are values added to the intersection and union components of
+    the inter-over-union calculation to smooth results respectively, these values should be small.
+
+    The original paper: Milletari, F. et. al. (2016) V-Net: Fully Convolutional Neural Networks forVolumetric
+    Medical Image Segmentation, 3DV, 2016.
+    """
+
+    def __init__(
+        self,
+        include_background: bool = True,
+        to_onehot_y: bool = False,
+        sigmoid: bool = False,
+        softmax: bool = False,
+        other_act: Callable | None = None,
+        squared_pred: bool = False,
+        jaccard: bool = False,
+        reduction: str | None = "mean",
+        smooth_nr: float = 1e-5,
+        smooth_dr: float = 1e-5,
+        batch: bool = False,
+    ) -> None:
+        """
+        Args:
+            include_background: if False, channel index 0 (background category) is excluded from the calculation.
+                if the non-background segmentations are small compared to the total image size they can get overwhelmed
+                by the signal from the background so excluding it in such cases helps convergence.
+            to_onehot_y: whether to convert `y` into the one-hot format. Defaults to False.
+            sigmoid: if True, apply a sigmoid function to the prediction.
+            softmax: if True, apply a softmax function to the prediction.
+            other_act: if don't want to use `sigmoid` or `softmax`, use other callable function to execute
+                other activation layers, Defaults to ``None``. for example:
+                `other_act = torch.tanh`.
+            squared_pred: use squared versions of targets and predictions in the denominator or not.
+            jaccard: compute Jaccard Index (soft IoU) instead of dice or not.
+            reduction: {``"none"``, ``"mean"``, ``"sum"``}
+                Specifies the reduction to apply to the output. Defaults to ``"mean"``.
+
+                - ``"none"``: no reduction will be applied.
+                - ``"mean"``: the sum of the output will be divided by the number of elements in the output.
+                - ``"sum"``: the output will be summed.
+
+            smooth_nr: a small constant added to the numerator to avoid zero.
+            smooth_dr: a small constant added to the denominator to avoid nan.
+            batch: whether to sum the intersection and union areas over the batch dimension before the dividing.
+                Defaults to False, a Dice loss value is computed independently from each item in the batch
+                before any `reduction`.
+
+        Raises:
+            TypeError: When ``other_act`` is not an ``Optional[Callable]``.
+            ValueError: When more than 1 of [``sigmoid=True``, ``softmax=True``, ``other_act is not None``].
+                Incompatible values.
+
+        """
+        super().__init__()
+        if other_act is not None and not callable(other_act):
+            raise TypeError(
+                f"other_act must be None or callable but is {type(other_act).__name__}."
+            )
+        if int(sigmoid) + int(softmax) + int(other_act is not None) > 1:
+            raise ValueError(
+                "Incompatible values: more than 1 of [sigmoid=True, softmax=True, other_act is not None]."
+            )
+        self.include_background = include_background
+        self.to_onehot_y = to_onehot_y
+        self.sigmoid = sigmoid
+        self.softmax = softmax
+        self.other_act = other_act
+        self.squared_pred = squared_pred
+        self.jaccard = jaccard
+        self.reduction = reduction
+        self.smooth_nr = float(smooth_nr)
+        self.smooth_dr = float(smooth_dr)
+        self.batch = batch
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            input: the shape should be BNH[WD], where N is the number of classes.
+            target: the shape should be BNH[WD] or B1H[WD], where N is the number of classes.
+
+        Raises:
+            AssertionError: When input and target (after one hot transform if set)
+                have different shapes.
+            ValueError: When ``self.reduction`` is not one of ["mean", "sum", "none"].
+
+        Example:
+            >>> from monai.losses.dice import *  # NOQA
+            >>> import torch
+            >>> from monai.losses.dice import DiceLoss
+            >>> B, C, H, W = 7, 5, 3, 2
+            >>> input = torch.rand(B, C, H, W)
+            >>> target_idx = torch.randint(low=0, high=C - 1, size=(B, H, W)).long()
+            >>> target = one_hot(target_idx[:, None, ...], num_classes=C)
+            >>> self = DiceLoss(reduction='none')
+            >>> loss = self(input, target)
+            >>> assert np.broadcast_shapes(loss.shape, input.shape) == input.shape
+        """
+        if self.sigmoid:
+            input = torch.sigmoid(input)
+
+        n_pred_ch = input.shape[1]
+        if self.softmax:
+            if n_pred_ch == 1:
+                warnings.warn("single channel prediction, `softmax=True` ignored.")
+            else:
+                input = torch.softmax(input, 1)
+
+        if self.other_act is not None:
+            input = self.other_act(input)
+
+        if self.to_onehot_y:
+            if n_pred_ch == 1:
+                warnings.warn("single channel prediction, `to_onehot_y=True` ignored.")
+            else:
+                target = to_one_hot(target, n_classes=n_pred_ch)
+
+        if not self.include_background:
+            if n_pred_ch == 1:
+                warnings.warn(
+                    "single channel prediction, `include_background=False` ignored."
+                )
+            else:
+                # if skipping background, removing first channel
+                target = target[:, 1:]
+                input = input[:, 1:]
+
+        if target.shape != input.shape:
+            raise AssertionError(
+                f"ground truth has different shape ({target.shape}) from input ({input.shape})"
+            )
+
+        # reducing only spatial dimensions (not batch nor channels)
+        reduce_axis: List[int] = torch.arange(2, len(input.shape)).tolist()
+        if self.batch:
+            # reducing spatial dimensions and batch
+            reduce_axis = [0] + reduce_axis
+
+        intersection = torch.sum(target * input, dim=reduce_axis)
+
+        if self.squared_pred:
+            target = torch.pow(target, 2)
+            input = torch.pow(input, 2)
+
+        ground_o = torch.sum(target, dim=reduce_axis)
+        pred_o = torch.sum(input, dim=reduce_axis)
+
+        denominator = ground_o + pred_o
+
+        if self.jaccard:
+            denominator = 2.0 * (denominator - intersection)
+
+        f: torch.Tensor = 1.0 - (2.0 * intersection + self.smooth_nr) / (
+            denominator + self.smooth_dr
+        )
+
+        if self.reduction == "mean":
+            f = torch.mean(f)  # the batch and channel average
+        elif self.reduction == "sum":
+            f = torch.sum(f)  # sum over the batch and channel dims
+        elif self.reduction is None:
+            # If we are not computing voxelwise loss components at least
+            # make sure a none reduction maintains a broadcastable shape
+            broadcast_shape = list(f.shape[0:2]) + [1] * (len(input.shape) - 2)
+            f = f.view(broadcast_shape)
+        else:
+            raise ValueError(
+                f'Unsupported reduction: {self.reduction}, available options are ["mean", "sum", "none"].'
+            )
+
+        return f

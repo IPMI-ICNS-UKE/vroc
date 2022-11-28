@@ -1,9 +1,7 @@
 import os
-from collections.abc import Sequence
-from typing import Any, Callable, Tuple, TypeVar, Union
+from typing import Any, Callable, Sequence, Tuple, TypeVar, Union
 
 import numpy as np
-import SimpleITK as sitk
 import torch
 
 T = TypeVar("T")

@@ -16,10 +16,9 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 import yaml
-from scipy.ndimage.morphology import binary_dilation, binary_fill_holes
+from scipy.ndimage.morphology import binary_dilation
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, IterableDataset
-from tqdm import tqdm
 
 from vroc.common_types import FloatTuple3D, IntTuple3D, Number, PathLike, SlicingTuple3D
 from vroc.decorators import convert
@@ -43,12 +42,18 @@ logger = logging.getLogger(__name__)
 
 class DatasetMixin:
     @staticmethod
-    def load_and_preprocess(filepath: PathLike, is_mask: bool = False) -> sitk.Image:
-        filepath = str(filepath)
-        dtype = sitk.sitkUInt8 if is_mask else sitk.sitkFloat32
-        image = sitk.ReadImage(filepath, dtype)
+    def load_and_preprocess(
+        filepath: PathLike | Sequence[PathLike], is_mask: bool = False
+    ) -> sitk.Image:
+        if isinstance(filepath, (tuple, list)):
+            return [
+                DatasetMixin.load_and_preprocess(f, is_mask=is_mask) for f in filepath
+            ]
+        else:
+            filepath = str(filepath)
+            image = sitk.ReadImage(filepath)
 
-        return image
+            return image
 
 
 class LungCTRegistrationDataset(DatasetMixin):
@@ -77,12 +82,13 @@ class LungCTRegistrationDataset(DatasetMixin):
         self._image_pairs.append(image_pair)
 
 
-class SegmentationDataset(DatasetMixin, IterableDataset):
+class SegmentationDataset(IterableDataset, DatasetMixin):
     def __init__(
         self,
         image_filepaths: List[PathLike],
-        mask_filepaths: List[PathLike],
-        mask_labels: List[Sequence[int | None]] | None = None,
+        segmentation_filepaths: List[PathLike] | List[List[PathLike]],
+        segmentation_labels: List[Sequence[int | None]] | None = None,
+        multi_label: bool = False,
         patch_shape: IntTuple3D | None = None,
         image_spacing_range: Tuple | None = None,
         random_rotation: bool = True,
@@ -94,13 +100,15 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
         self.images = LazyLoadableList(
             image_filepaths, loader=SegmentationDataset.load_and_preprocess
         )
-        self.masks = LazyLoadableList(
-            mask_filepaths,
+        self.segmentations = LazyLoadableList(
+            segmentation_filepaths,
             loader=partial(SegmentationDataset.load_and_preprocess, is_mask=True),
         )
 
-        self.mask_labels = mask_labels or [None] * len(self.masks)
-
+        self.segmentation_labels = segmentation_labels or [None] * len(
+            self.segmentations
+        )
+        self.multi_label = multi_label
         self.patch_shape = patch_shape
         self.image_spacing_range = image_spacing_range
         self.random_rotation = random_rotation
@@ -118,19 +126,19 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
 
     @staticmethod
     def _resample_image_spacing(
-        image: sitk.Image, mask: sitk.Image, image_spacing: FloatTuple3D
+        image: sitk.Image, segmentation: sitk.Image, image_spacing: FloatTuple3D
     ) -> Tuple[sitk.Image, sitk.Image]:
         image = resample_image_spacing(
             image, new_spacing=image_spacing, default_voxel_value=-1000
         )
-        mask = resample_image_spacing(
-            mask,
+        segmentation = resample_image_spacing(
+            segmentation,
             new_spacing=image_spacing,
             resampler=sitk.sitkNearestNeighbor,
             default_voxel_value=0,
         )
 
-        return image, mask
+        return image, segmentation
 
     @staticmethod
     def sample_random_patch_3d(
@@ -147,17 +155,18 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
         )
 
     @staticmethod
-    def random_rotate_image_and_mask(
+    def random_rotate_image_and_segmentation(
         image: np.ndarray,
-        mask: np.ndarray | None = None,
+        segmentation: np.ndarray | None = None,
         spacing: Tuple[int, ...] | None = None,
     ):
-        rotation_plane = random.choice(list(combinations(range(image.ndim), 2)))
+        rotation_plane = random.choice(list(combinations(range(-image.ndim, 0), 2)))
+
         n_rotations = random.randint(0, 3)
 
         image = np.rot90(image, k=n_rotations, axes=rotation_plane)
-        if mask is not None:
-            mask = np.rot90(mask, k=n_rotations, axes=rotation_plane)
+        if segmentation is not None:
+            segmentation = np.rot90(segmentation, k=n_rotations, axes=rotation_plane)
 
         if spacing:
             spacing = list(spacing)
@@ -168,7 +177,7 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
                 )
             spacing = tuple(spacing)
 
-        return image, mask, spacing
+        return image, segmentation, spacing
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -177,32 +186,37 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
             num_workers = worker_info.num_workers
 
             self.images.items = self.images.items[worker_id::num_workers]
-            self.masks.items = self.masks.items[worker_id::num_workers]
-            self.mask_labels = self.mask_labels[worker_id::num_workers]
+            self.segmentations.items = self.segmentations.items[worker_id::num_workers]
+            self.segmentation_labels = self.segmentation_labels[worker_id::num_workers]
 
-        for image, image_filepath, mask, mask_filepath, mask_labels in zip(
+        for (
+            image,
+            image_filepath,
+            segmentation,
+            segmentation_filepath,
+            segmentation_labels,
+        ) in zip(
             self.images,
             self.images.items,
-            self.masks,
-            self.masks.items,
-            self.mask_labels,
+            self.segmentations,
+            self.segmentations.items,
+            self.segmentation_labels,
         ):
-
             if self.image_spacing_range is not None:
                 # resample to random image spacing
                 image_spacing = tuple(
                     float(np.random.uniform(*spacing_range))
                     for spacing_range in self.image_spacing_range
                 )
-                image, mask = SegmentationDataset._resample_image_spacing(
-                    image, mask, image_spacing=image_spacing
+                image, segmentation = SegmentationDataset._resample_image_spacing(
+                    image, segmentation, image_spacing=image_spacing
                 )
 
             else:
                 image_spacing = image.GetSpacing()
 
             image_arr = sitk.GetArrayFromImage(image)
-            mask_arr = sitk.GetArrayFromImage(mask)
+            segmentation_arr = sitk.GetArrayFromImage(segmentation)
 
             if (
                 isinstance(self.patches_per_image, float)
@@ -221,21 +235,27 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
             else:
                 patches_per_image = self.patches_per_image
 
-            if mask_labels is not None:
-                mask_arr = np.isin(mask_arr, mask_labels).astype(np.uint8)
+            if segmentation_labels is not None:
+                segmentation_arr = np.isin(
+                    segmentation_arr, segmentation_labels
+                ).astype(np.uint8)
 
-            image_arr, mask_arr = image_arr.swapaxes(0, 2), mask_arr.swapaxes(0, 2)
-
-            if image_arr.shape != mask_arr.shape:
-                raise RuntimeError("Shape mismatch")
+            # segmentation_arr has shape of (z, y, x, n_labels)
+            image_arr = image_arr.transpose((2, 1, 0))
+            if segmentation_arr.ndim == 4:
+                segmentation_arr = segmentation_arr.transpose((3, 2, 1, 0))
+            elif segmentation_arr.ndim == 3:
+                segmentation_arr = segmentation_arr.transpose((2, 1, 0))
+            else:
+                raise NotImplementedError
 
             if self.random_rotation:
                 (
                     image_arr,
-                    mask_arr,
+                    segmentation_arr,
                     image_spacing,
-                ) = SegmentationDataset.random_rotate_image_and_mask(
-                    image_arr, mask=mask_arr, spacing=image_spacing
+                ) = SegmentationDataset.random_rotate_image_and_segmentation(
+                    image_arr, segmentation=segmentation_arr, spacing=image_spacing
                 )
 
             if not self.patch_shape:
@@ -246,9 +266,9 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
 
             # pad if (rotated) image shape < patch shape
             # also performs center cropping if specified
-            image_arr, mask_arr = crop_or_pad(
+            image_arr, segmentation_arr = crop_or_pad(
                 image=image_arr,
-                mask=mask_arr,
+                mask=segmentation_arr,
                 target_shape=self.patch_shape,
                 no_crop=not self.center_crop,
             )
@@ -260,7 +280,13 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
 
                 # copy for PyTorch (negative strides are not currently supported)
                 image_arr_patch = image_arr[patch_slicing].astype(np.float32, order="C")
-                mask_arr_patch = mask_arr[patch_slicing].astype(np.float32, order="C")
+
+                segmentation_patch_slicing = patch_slicing
+                if segmentation_arr.ndim > image_arr.ndim:
+                    segmentation_patch_slicing = (..., *segmentation_patch_slicing)
+                mask_arr_patch = segmentation_arr[segmentation_patch_slicing].astype(
+                    np.float32, order="C"
+                )
 
                 image_arr_patch = rescale_range(
                     image_arr_patch,
@@ -269,11 +295,16 @@ class SegmentationDataset(DatasetMixin, IterableDataset):
                     clip=True,
                 )
 
+                image_arr_patch = image_arr_patch[np.newaxis]
+                if segmentation_arr.ndim < image_arr_patch.ndim:
+                    mask_arr_patch = mask_arr_patch[np.newaxis]
+
                 data = {
                     "id": hash_path(image_filepath)[:7],
+                    "image_filepath": str(image_filepath),
                     "image_filename": image_filepath.name,
-                    "image": image_arr_patch[np.newaxis],
-                    "mask": mask_arr_patch[np.newaxis],
+                    "image": image_arr_patch,
+                    "segmentation": mask_arr_patch,
                     "image_spacing": image_spacing,
                     "full_image_shape": image_arr.shape,
                     "i_patch": i_patch,
@@ -386,6 +417,8 @@ class Lung4DRegistrationDataset(DatasetMixin, Dataset):
         self,
         patient_folders: List[Path],
         phases: Tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        input_value_range: Tuple[float, float] | None = (-1024.0, 3071.0),
+        output_value_range: Tuple[float, float] | None = (0.0, 1.0),
         i_worker: Optional[int] = None,
         n_worker: Optional[int] = None,
         is_train: bool = True,
@@ -395,6 +428,8 @@ class Lung4DRegistrationDataset(DatasetMixin, Dataset):
         self.patient_folders = patient_folders
         self.phases = phases
         self.filepaths = self.collect_filepaths(self.patient_folders)
+        self.input_value_range = input_value_range
+        self.output_value_range = output_value_range
 
         # filepaths = []
         # for files in collected_files:
@@ -444,7 +479,8 @@ class Lung4DRegistrationDataset(DatasetMixin, Dataset):
         collected = []
         for folder in folders:
             _collected = {
-                "patient_folder": folder,
+                "patient": folder.name,
+                "folder": folder,
                 "images": {},
                 "masks": {},
                 "keypoints": {},
@@ -472,11 +508,17 @@ class Lung4DRegistrationDataset(DatasetMixin, Dataset):
                 if moving_phase == fixed_phase:
                     # skip identity
                     continue
+
+                _collected["keypoints"][(moving_phase, fixed_phase)] = []
+
                 for moving_or_fixed in ("moving", "fixed"):
                     keypoints_name = f"{moving_or_fixed}_keypoints_{moving_phase:02d}_to_{fixed_phase:02d}"
-                    _collected["keypoints"][keypoints_name] = _assert_exists(
-                        keypoints_folder / f"{keypoints_name}.csv"
+                    _collected["keypoints"][(moving_phase, fixed_phase)].append(
+                        _assert_exists(keypoints_folder / f"{keypoints_name}.csv")
                     )
+                _collected["keypoints"][(moving_phase, fixed_phase)] = tuple(
+                    _collected["keypoints"][(moving_phase, fixed_phase)]
+                )
 
             # add average
             _collected["images"]["average"] = _assert_exists(folder / f"average.nii")
@@ -490,83 +532,147 @@ class Lung4DRegistrationDataset(DatasetMixin, Dataset):
 
         return collected
 
+    def _load_image(self, path: Path, is_mask: bool = False) -> Tuple[np.ndarray, dict]:
+        image = sitk.ReadImage(str(path))
+
+        meta = {
+            "filepath": str(path),
+            "image_spacing": image.GetSpacing(),
+            "image_direction": image.GetDirection(),
+            "image_origin": image.GetOrigin(),
+        }
+
+        image = sitk.GetArrayFromImage(image)
+        image = np.swapaxes(image, 0, 2)
+
+        if is_mask:
+            image = np.asarray(image, dtype=bool)
+        else:
+            image = np.asarray(image, dtype=np.float32)
+            if self.input_value_range and self.output_value_range:
+                image = rescale_range(
+                    image,
+                    input_range=self.input_value_range,
+                    output_range=self.output_value_range,
+                    clip=True,
+                )
+
+        return image, meta
+
+    def _load_keypoints(self, path: Path) -> np.ndarray:
+        return read_landmarks(path)
+
     def __len__(self):
         return len(self.filepaths)
 
     def __getitem__(self, item):
-        fixed_image = Lung4DRegistrationDataset.load_and_preprocess(
-            self.filepaths[item]["fixed_image"]
-        )
-        moving_image = Lung4DRegistrationDataset.load_and_preprocess(
-            self.filepaths[item]["moving_image"]
-        )
-        fixed_mask = Lung4DRegistrationDataset.load_and_preprocess(
-            self.filepaths[item]["fixed_mask"], is_mask=True
-        )
-        moving_mask = Lung4DRegistrationDataset.load_and_preprocess(
-            self.filepaths[item]["moving_mask"], is_mask=True
-        )
+        images = {}
+        masks = {}
+        keypoints = {}
+        for phase in self.phases:
+            image, meta = self._load_image(self.filepaths[item]["images"][phase])
+            images[phase] = (image, meta)
 
-        moving_keypoints = read_landmarks(
-            self.filepaths[item]["moving_keypoints"], sep=","
-        )
-        fixed_keypoints = read_landmarks(
-            self.filepaths[item]["fixed_keypoints"], sep=","
-        )
+            mask, meta = self._load_image(self.filepaths[item]["masks"][phase])
+            masks[phase] = (mask, meta)
 
-        image_spacing = fixed_image.GetSpacing()
-        image_shape = fixed_image.GetSize()
-        image_direction = fixed_image.GetDirection()
-        if not self.as_sitk:
-            image_spacing = np.array(image_spacing)
+            for other_phase in self.phases:
+                if phase == other_phase:
+                    continue
+                # moving phase, fixed phase
+                phase_combination = (phase, other_phase)
+                moving_keypoints = self._load_keypoints(
+                    self.filepaths[item]["keypoints"][(phase, other_phase)][0]
+                )
+                fixed_keypoints = self._load_keypoints(
+                    self.filepaths[item]["keypoints"][(phase, other_phase)][1]
+                )
 
-            moving_image = sitk.GetArrayFromImage(moving_image)
-            fixed_image = sitk.GetArrayFromImage(fixed_image)
-            moving_mask = sitk.GetArrayFromImage(moving_mask)
-            fixed_mask = sitk.GetArrayFromImage(fixed_mask)
+                keypoints[phase_combination] = (moving_keypoints, fixed_keypoints)
 
-            # flip axes
-            moving_image = np.swapaxes(moving_image, 0, 2)
-            fixed_image = np.swapaxes(fixed_image, 0, 2)
-            moving_mask = np.swapaxes(moving_mask, 0, 2)
-            fixed_mask = np.swapaxes(fixed_mask, 0, 2)
-
-            # fill holes if any
-            moving_mask = binary_fill_holes(moving_mask)
-            fixed_mask = binary_fill_holes(fixed_mask)
-
-            if self.dilate_masks:
-                moving_mask = binary_dilation(
-                    moving_mask.astype(np.uint8), iterations=1
-                ).astype(np.uint8)
-                fixed_mask = binary_dilation(
-                    fixed_mask.astype(np.uint8), iterations=1
-                ).astype(np.uint8)
-
-            image_shape = np.array(image_shape)
-            image_direction = np.array(image_direction)
-
-            fixed_image = np.asarray(fixed_image[np.newaxis], dtype=np.float32)
-            moving_image = np.asarray(moving_image[np.newaxis], dtype=np.float32)
-            fixed_mask = np.asarray(fixed_mask[np.newaxis], dtype=np.float32)
-            moving_mask = np.asarray(moving_mask[np.newaxis], dtype=np.float32)
-
-        data = {
-            "patient": str(self.filepaths[item]["patient"]),
-            "moving_image_name": str(self.filepaths[item]["moving_image"]),
-            "fixed_image_name": str(self.filepaths[item]["fixed_image"]),
-            "moving_image": moving_image,
-            "fixed_image": fixed_image,
-            "moving_mask": moving_mask,
-            "fixed_mask": fixed_mask,
-            "moving_keypoints": moving_keypoints,
-            "fixed_keypoints": fixed_keypoints,
-            "image_shape": image_shape,
-            "image_spacing": image_spacing,
-            "image_direction": image_direction,
+        return {
+            "patient": self.filepaths[item]["patient"],
+            "folder": self.filepaths[item]["folder"],
+            "meta": self.filepaths[item]["meta"],
+            "images": images,
+            "masks": masks,
+            "keypoints": keypoints,
         }
 
-        return data
+    # def __getitem__(self, item):
+    #     fixed_image = Lung4DRegistrationDataset.load_and_preprocess(
+    #         self.filepaths[item]["fixed_image"]
+    #     )
+    #     moving_image = Lung4DRegistrationDataset.load_and_preprocess(
+    #         self.filepaths[item]["moving_image"]
+    #     )
+    #     fixed_mask = Lung4DRegistrationDataset.load_and_preprocess(
+    #         self.filepaths[item]["fixed_mask"], is_mask=True
+    #     )
+    #     moving_mask = Lung4DRegistrationDataset.load_and_preprocess(
+    #         self.filepaths[item]["moving_mask"], is_mask=True
+    #     )
+    #
+    #     moving_keypoints = read_landmarks(
+    #         self.filepaths[item]["moving_keypoints"], sep=","
+    #     )
+    #     fixed_keypoints = read_landmarks(
+    #         self.filepaths[item]["fixed_keypoints"], sep=","
+    #     )
+    #
+    #     image_spacing = fixed_image.GetSpacing()
+    #     image_shape = fixed_image.GetSize()
+    #     image_direction = fixed_image.GetDirection()
+    #     if not self.as_sitk:
+    #         image_spacing = np.array(image_spacing)
+    #
+    #         moving_image = sitk.GetArrayFromImage(moving_image)
+    #         fixed_image = sitk.GetArrayFromImage(fixed_image)
+    #         moving_mask = sitk.GetArrayFromImage(moving_mask)
+    #         fixed_mask = sitk.GetArrayFromImage(fixed_mask)
+    #
+    #         # flip axes
+    #         moving_image = np.swapaxes(moving_image, 0, 2)
+    #         fixed_image = np.swapaxes(fixed_image, 0, 2)
+    #         moving_mask = np.swapaxes(moving_mask, 0, 2)
+    #         fixed_mask = np.swapaxes(fixed_mask, 0, 2)
+    #
+    #         # fill holes if any
+    #         moving_mask = binary_fill_holes(moving_mask)
+    #         fixed_mask = binary_fill_holes(fixed_mask)
+    #
+    #         if self.dilate_masks:
+    #             moving_mask = binary_dilation(
+    #                 moving_mask.astype(np.uint8), iterations=1
+    #             ).astype(np.uint8)
+    #             fixed_mask = binary_dilation(
+    #                 fixed_mask.astype(np.uint8), iterations=1
+    #             ).astype(np.uint8)
+    #
+    #         image_shape = np.array(image_shape)
+    #         image_direction = np.array(image_direction)
+    #
+    #         fixed_image = np.asarray(fixed_image[np.newaxis], dtype=np.float32)
+    #         moving_image = np.asarray(moving_image[np.newaxis], dtype=np.float32)
+    #         fixed_mask = np.asarray(fixed_mask[np.newaxis], dtype=np.float32)
+    #         moving_mask = np.asarray(moving_mask[np.newaxis], dtype=np.float32)
+    #
+    #     data = {
+    #         "patient": str(self.filepaths[item]["patient"]),
+    #         "moving_image_name": str(self.filepaths[item]["moving_image"]),
+    #         "fixed_image_name": str(self.filepaths[item]["fixed_image"]),
+    #         "moving_image": moving_image,
+    #         "fixed_image": fixed_image,
+    #         "moving_mask": moving_mask,
+    #         "fixed_mask": fixed_mask,
+    #         "moving_keypoints": moving_keypoints,
+    #         "fixed_keypoints": fixed_keypoints,
+    #         "image_shape": image_shape,
+    #         "image_spacing": image_spacing,
+    #         "image_direction": image_direction,
+    #     }
+    #
+    #     return data
 
 
 class NLSTDataset(DatasetMixin, Dataset):

@@ -15,13 +15,11 @@ import yaml
 from aim.sdk.repo import Repo, RepoStatus, Run
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
-from tqdm import trange
 
 from vroc.common_types import Number, PathLike
 from vroc.decorators import convert, timing
 from vroc.helper import concat_dicts
 from vroc.logger import LoggerMixin
-from vroc.models import AutoEncoder
 
 
 class BaseTrainer(ABC, LoggerMixin):
@@ -64,12 +62,19 @@ class BaseTrainer(ABC, LoggerMixin):
         self._model_folder.mkdir(parents=True, exist_ok=True)
 
         # metric tracking and model saving
-        self.model_saver = BestModelSaver(
+        self.val_model_saver = BestModelSaver(
             tracked_metrics=self.METRICS,
             model=self.model,
             optimizer=self.optimizer,
-            output_folder=self._model_folder,
+            output_folder=self._model_folder / "validation",
             top_k=3,
+        )
+        self.train_model_saver = BestModelSaver(
+            tracked_metrics={"step": MetricType.LARGER_IS_BETTER},
+            model=self.model,
+            optimizer=self.optimizer,
+            output_folder=self._model_folder / "training",
+            top_k=10,
         )
 
         # dict for metric history (for, e.g., calculating running means)
@@ -191,14 +196,19 @@ class BaseTrainer(ABC, LoggerMixin):
         metrics = concat_dicts(metrics, extend_lists=True)
 
         self._track_metrics(metrics, context={"subset": "val"})
-        self.model_saver.track(metrics, step=self.i_step)
+        self.val_model_saver.track(metrics, step=self.i_step)
         self.log_info("finished validation", context="VAL")
 
         # set to train mode again
         self.model.train()
 
     @timing()
-    def run(self, steps: int = 100, validation_interval: int = 1):
+    def run(
+        self,
+        steps: int = 10_000,
+        validation_interval: int = 1000,
+        save_interval: int = 1000,
+    ):
         self.log_info("started run", context="RUN")
         self.i_step = 0
         self.i_epoch = 0
@@ -213,6 +223,11 @@ class BaseTrainer(ABC, LoggerMixin):
                 ):
                     # run validation at given intervals (if validation loader is given)
                     self.validate()
+                elif save_interval and self.i_step % save_interval == 0:
+                    # save model without validation
+                    self.train_model_saver.track(
+                        {"step": self.i_step}, step=self.i_step
+                    )
 
                 if self.i_step >= steps:
                     # stop training
@@ -261,6 +276,7 @@ class BestModelSaver(LoggerMixin):
 
         self.model = model
         self.output_folder = output_folder
+        self.output_folder.mkdir(parents=True, exist_ok=True)
         self.top_k = top_k
         self.model_name = model_name
         self.optimizer = optimizer

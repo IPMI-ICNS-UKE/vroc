@@ -7,8 +7,7 @@ import scipy.ndimage as ndi
 import torch
 import torch.nn.functional as F
 
-from vroc.common_types import ArrayOrTensor, FloatTuple3D
-from vroc.convert import as_tensor
+from vroc.common_types import ArrayOrTensor
 
 
 def _resize_torch(

@@ -1,32 +1,17 @@
 import logging
-import sys
 import time
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import nibabel as nib
 import numpy as np
 import SimpleITK as sitk
 import torch
-from matplotlib.animation import FFMpegWriter
-from scipy.ndimage.morphology import binary_dilation
 from torch.optim import Adam
 
-from vroc.common_types import PathLike
-from vroc.feature_extractor import OrientedHistogramFeatureExtrator
-from vroc.guesser import ParameterGuesser
-from vroc.helper import (
-    compute_tre_numpy,
-    compute_tre_sitk,
-    read_landmarks,
-    rescale_range,
-)
+from vroc.helper import compute_tre_numpy, read_landmarks
 from vroc.l2r_eval import calculate_l2r_smoothness
 from vroc.logger import init_fancy_logging
-from vroc.loss import TRELoss, mse_loss, ncc_loss, ngf_loss
-from vroc.metrics import jacobian_determinant
+from vroc.loss import mse_loss
 from vroc.models import DemonsVectorFieldBooster
-from vroc.preprocessing import get_non_ct_background_mask
 from vroc.registration import VrocRegistration
 
 init_fancy_logging()
@@ -117,8 +102,6 @@ def load(
 #     ),
 # )
 # parameter_guesser.fit()
-
-from vroc.decay import half_life_to_lambda
 
 params = {
     "iterations": 800,

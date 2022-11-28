@@ -68,7 +68,12 @@ class FancyFormatter(logging.Formatter):
         color = level_style["color"]
         bold = level_style.get("bold", False)
 
-        return self._colorize_string(base_format, text_color=color, bold=bold)
+        if not self.disable_colors:
+            base_format = self._colorize_string(
+                base_format, text_color=color, bold=bold
+            )
+
+        return base_format
 
     def __init__(
         self,
@@ -77,6 +82,7 @@ class FancyFormatter(logging.Formatter):
         max_func_name_length: int = 32,
         max_lineno_length: int = 4,
         date_format: str = None,
+        disable_colors: bool = False,
     ):
         # this is NOOP as we initialize a new Formatter in format()
         # (just included to suppress warning)
@@ -87,6 +93,7 @@ class FancyFormatter(logging.Formatter):
         self.max_func_name_length = max_func_name_length
         self.max_lineno_length = max_lineno_length
         self.date_format = date_format
+        self.disable_colors = disable_colors
 
     def _shorten_left(self, s: str, max_length: int) -> str:
         if len(s) > max_length:
@@ -112,7 +119,7 @@ class FancyFormatter(logging.Formatter):
 
 
 def init_fancy_logging(
-    handler: logging.Handler | None = None,
+    handlers: Sequence[logging.Handler] | None = None,
     styles: Dict[int, dict] | None = None,
     max_module_name_length: int = 32,
     max_func_name_length: int = 32,
@@ -121,8 +128,8 @@ def init_fancy_logging(
     """Initializes fancy logging, i.e. nicely structured logging messages with
     colors.
 
-    :param handler:
-    :type handler:
+    :param handlers:
+    :type handlers:
     :param styles:
     :type styles:
     :param max_module_name_length:
@@ -134,23 +141,31 @@ def init_fancy_logging(
     :return:
     :rtype:
     """
-    if not handler:
+    if not handlers:
         handler = logging.StreamHandler(sys.stdout)
         handler.setLevel(logging.DEBUG)
+        handlers = [handler]
 
-    handler.setFormatter(
-        FancyFormatter(
-            styles=styles,
-            max_module_name_length=max_module_name_length,
-            max_func_name_length=max_func_name_length,
-            max_lineno_length=max_lineno_length,
+    for handler in handlers:
+        if isinstance(handler, logging.FileHandler):
+            disable_colors = True
+        else:
+            disable_colors = False
+
+        handler.setFormatter(
+            FancyFormatter(
+                styles=styles,
+                max_module_name_length=max_module_name_length,
+                max_func_name_length=max_func_name_length,
+                max_lineno_length=max_lineno_length,
+                disable_colors=disable_colors,
+            )
         )
-    )
-    logging.basicConfig(handlers=[handler])
+    logging.basicConfig(handlers=handlers)
 
 
 class RegistrationLogEntry:
-    DEFAULT_ORDERING = ("stage", "level", "iteration", "loss")
+    DEFAULT_ORDERING = ("stage", "level", "iteration", "loss", "losses")
 
     def __init__(
         self,
@@ -175,8 +190,10 @@ class RegistrationLogEntry:
         def sorting_key(string: str) -> Tuple[int, str]:
             prio = len(priorities)
             for word, prioritiy in priorities.items():
-                if string.startswith(word):
+                if string == word:
                     prio = prioritiy
+                elif string.startswith(word):
+                    prio = prioritiy + len(self._ordering)
 
             return (prio, string)
 
@@ -218,24 +235,36 @@ class RegistrationLogEntry:
         return str(log)
 
 
-if __name__ == "__main__":
-
-    init_fancy_logging()
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-
-    logger.debug("debug")
-    logger.info("info")
-    logger.warning("warning")
-    logger.error("error")
-    logger.critical("critical")
-
-    log = RegistrationLogEntry(
-        mem=1,
-        stage="vroc",
-        level=1,
-        iteration=100,
-        loss=1,
-    )
-    str(log)
+# if __name__ == "__main__":
+#
+#     # init_fancy_logging()
+#
+#     # logging.basicConfig(
+#     #     level=logging.INFO,
+#     #     format=(
+#     #         "{asctime} [{levelname:>8}] "
+#     #         "[{name:>32}:"
+#     #         "{funcName:>32}:"
+#     #         "L{lineno:>4}] {message}"
+#     #     ),
+#     #     style="{",
+#     #     handlers=[logging.StreamHandler()],
+#     # )
+#
+#     logger = logging.getLogger(__name__)
+#     logger.setLevel(logging.DEBUG)
+#
+#     logger.debug("debug")
+#     logger.info("info")
+#     logger.warning("warning")
+#     logger.error("error")
+#     logger.critical("critical")
+#
+#     log = RegistrationLogEntry(
+#         mem=1,
+#         stage="vroc",
+#         level=1,
+#         iteration=100,
+#         loss=1,
+#     )
+#     str(log)

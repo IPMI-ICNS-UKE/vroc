@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import pickle
-from typing import List, Optional, Union
-from uuid import UUID, uuid4
+from typing import List
+from uuid import UUID
 
 import numpy as np
-import pandas as pd
-import peewee
 
 import vroc.database.models as orm
 from vroc.common_types import PathLike

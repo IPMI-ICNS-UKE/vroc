@@ -2,37 +2,27 @@ import logging
 import time
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import nibabel as nib
 import numpy as np
 import SimpleITK as sitk
 import torch
-from matplotlib.animation import FFMpegWriter
 from scipy.ndimage.morphology import binary_dilation
 from torch.optim import Adam
 
-from vroc.common_types import PathLike
-from vroc.feature_extractor import OrientedHistogramFeatureExtrator
-from vroc.guesser import ParameterGuesser
-from vroc.helper import (
-    compute_tre_numpy,
-    compute_tre_sitk,
-    read_landmarks,
-    rescale_range,
-)
+from vroc.helper import read_landmarks
 from vroc.l2r_eval import calculate_l2r_smoothness
 from vroc.logger import init_fancy_logging
-from vroc.loss import TRELoss, mse_loss, ncc_loss, ngf_loss
-from vroc.metrics import jacobian_determinant
+from vroc.loss import TRELoss, mse_loss
 from vroc.models import DemonsVectorFieldBooster
 from vroc.registration import VrocRegistration
 
 init_fancy_logging()
 
-logging.getLogger(__name__).setLevel(logging.INFO)
-logging.getLogger("vroc").setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
+
+logger.setLevel(logging.DEBUG)
+logging.getLogger("vroc").setLevel(logging.DEBUG)
+logging.getLogger("vroc.affine").setLevel(logging.INFO)
 logging.getLogger("vroc.models.VarReg").setLevel(logging.INFO)
-logging.getLogger("vroc.affine").setLevel(logging.DEBUG)
 
 ROOT_DIR = (
     Path("/home/tsentker/data/learn2reg"),
@@ -44,7 +34,7 @@ FOLDER = "NLST_Validation"
 OUTPUT_FOLDER = Path(f"{ROOT_DIR}/{FOLDER}/predictions/non_boosted")
 OUTPUT_FOLDER.mkdir(exist_ok=True)
 
-DEVICE = "cuda:1"
+DEVICE = "cuda:0"
 
 
 def write_nlst_vector_field(
@@ -113,8 +103,6 @@ def load(
 # )
 # parameter_guesser.fit()
 
-from vroc.decay import half_life_to_lambda
-
 params = {
     "iterations": 800,
     "tau": 2.25,
@@ -140,163 +128,169 @@ tres_after = []
 smoothnesses = []
 t_start = time.time()
 
+model = DemonsVectorFieldBooster(n_iterations=6).to(DEVICE)
 
-for case in range(101, 102):
-    fixed_landmarks = read_landmarks(
-        f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
-        sep=" ",
-    )
-    moving_landmarks = read_landmarks(
-        f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0001.csv",
-        sep=" ",
-    )
+# state = torch.load('/home/fmadesta/research/varreg_on_crack/data/boosting.pth',
+#                    map_location=DEVICE)
+# model.load_state_dict(state, strict=False)
+optimizer = Adam(model.parameters(), lr=1e-4)
 
-    (
-        moving_image,
-        fixed_image,
-        moving_mask,
-        fixed_mask,
-        image_spacing,
-        reference_image,
-    ) = load(
-        moving_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/NLST_{case:04d}_0001.nii.gz",
-        fixed_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/NLST_{case:04d}_0000.nii.gz",
-        moving_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/NLST_{case:04d}_0001.nii.gz",
-        fixed_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/NLST_{case:04d}_0000.nii.gz",
-    )
+for _ in range(1):
+    for case in range(101, 103):
+        fixed_landmarks = read_landmarks(
+            f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0000.csv",
+            sep=" ",
+        )
+        moving_landmarks = read_landmarks(
+            f"{ROOT_DIR}/{FOLDER}/keypointsTr/NLST_{case:04d}_0001.csv",
+            sep=" ",
+        )
 
-    moving_mask = binary_dilation(moving_mask.astype(np.uint8), iterations=1).astype(
-        bool
-    )
-    fixed_mask = binary_dilation(fixed_mask.astype(np.uint8), iterations=1).astype(bool)
-    # moving_mask = moving_mask.astype(bool)
-    # fixed_mask = fixed_mask.astype(bool)
+        (
+            moving_image,
+            fixed_image,
+            moving_mask,
+            fixed_mask,
+            image_spacing,
+            reference_image,
+        ) = load(
+            moving_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/NLST_{case:04d}_0001.nii.gz",
+            fixed_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/NLST_{case:04d}_0000.nii.gz",
+            moving_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/NLST_{case:04d}_0001.nii.gz",
+            fixed_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/NLST_{case:04d}_0000.nii.gz",
+        )
 
-    # union_mask = moving_mask | fixed_mask
+        moving_mask = binary_dilation(
+            moving_mask.astype(np.uint8), iterations=1
+        ).astype(bool)
+        fixed_mask = binary_dilation(fixed_mask.astype(np.uint8), iterations=1).astype(
+            bool
+        )
+        # moving_mask = moving_mask.astype(bool)
+        # fixed_mask = fixed_mask.astype(bool)
 
-    moving_keypoints = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
-    fixed_keypoints = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
+        # union_mask = moving_mask | fixed_mask
 
-    registration_result = registration.register(
-        moving_image=moving_image,
-        fixed_image=fixed_image,
-        moving_mask=moving_mask,
-        fixed_mask=fixed_mask,
-        image_spacing=image_spacing,
-        register_affine=True,
-        affine_loss_function=ncc_loss,
-        affine_step_size=0.1,
-        affine_iterations=300,
-        force_type="demons",
-        gradient_type="passive",
-        valid_value_range=(-1024, 3071),
-        early_stopping_delta=0.00001,
-        early_stopping_window=None,
-        default_parameters=params,
-        debug=False,
-        debug_step_size=1,
-        return_as_tensor=True,
-    )
+        moving_keypoints = torch.as_tensor(moving_landmarks[np.newaxis], device=DEVICE)
+        fixed_keypoints = torch.as_tensor(fixed_landmarks[np.newaxis], device=DEVICE)
 
-    from vroc.keypoints import extract_keypoints
+        # registration_result = registration.register(
+        #     moving_image=moving_image,
+        #     fixed_image=fixed_image,
+        #     moving_mask=moving_mask,
+        #     fixed_mask=fixed_mask,
+        #     image_spacing=image_spacing,
+        #     register_affine=True,
+        #     affine_loss_function=ncc_loss,
+        #     affine_step_size=0.1,
+        #     affine_iterations=300,
+        #     force_type="demons",
+        #     gradient_type="active",
+        #     valid_value_range=(-1024, 3071),
+        #     early_stopping_delta=0.00001,
+        #     early_stopping_window=None,
+        #     default_parameters=params,
+        #     debug=False,
+        #     debug_step_size=1,
+        #     return_as_tensor=True,
+        # )
 
-    moving_keypointss, fixed_keypointss = extract_keypoints(
-        moving_image=registration_result.moving_image,
-        fixed_image=registration_result.fixed_image,
-        fixed_mask=registration_result.fixed_mask,
-        alpha=2.5,
-        beta=150,
-        gamma=5,
-        delta=1,
-        sigma_foerstner=1.4,
-        sigma_mind=0.8,
-        search_radius=[16, 8],
-        length=[6, 3],
-        quantization=[2, 1],
-        patch_radius=[3, 2],
-        transform=["dense", "dense"],
-    )
+        # moving_keypoints, fixed_keypoints = extract_keypoints(
+        #     moving_image=registration_result.moving_image,
+        #     fixed_image=registration_result.fixed_image,
+        #     fixed_mask=registration_result.fixed_mask,
+        # )
 
-    pass
-
-    # model = DemonsVectorFieldBooster(shape=(224, 192, 224), n_iterations=4).to(DEVICE)
-    # optimizer = Adam(model.parameters(), lr=5e-4)
-    #
-    # registration_result = registration.register_and_train_boosting(
-    #     # boosting specific kwargs
-    #     model=model,
-    #     optimizer=optimizer,
-    #     n_iterations=400,
-    #     moving_keypoints=moving_keypoints,
-    #     fixed_keypoints=fixed_keypoints,
-    #     # registration specific kwargs
-    #     moving_image=moving_image,
-    #     fixed_image=fixed_image,
-    #     moving_mask=moving_mask,
-    #     fixed_mask=fixed_mask,
-    #     image_spacing=image_spacing,
-    #     register_affine=True,
-    #     affine_loss_fn=ncc_loss,
-    #     force_type="demons",
-    #     gradient_type="active",
-    #     valid_value_range=(-1024, 3071),
-    #     early_stopping_delta=0.00001,
-    #     early_stopping_window=None,
-    #     default_parameters=params,
-    #     debug=False,
-    # )
-    vector_field = registration_result.composed_vector_field
-
-    smoothness = calculate_l2r_smoothness(
-        vector_field.cpu().detach().numpy().squeeze(), mask=fixed_mask
-    )
-    smoothnesses.append(smoothness)
-
-    # warped_moving_image = registration_result.warped_moving_image.swapaxes(0, 2)
-    # warped_moving_image = sitk.GetImageFromArray(warped_moving_image)
-    # warped_moving_image.CopyInformation(reference_image)
-    # sitk.WriteImage(
-    #     warped_moving_image, str(OUTPUT_FOLDER / f"warped_image_{case}_{case}.nii")
-    # )
-    #
-    # write_nlst_vector_field(
-    #     vector_field,
-    #     case=f"{case:04d}",
-    #     output_folder=OUTPUT_FOLDER,
-    # )
-
-    if not isinstance(vector_field, torch.Tensor):
-        vector_field = torch.as_tensor(vector_field[np.newaxis], device=DEVICE)
-
-    tre_loss = TRELoss(apply_sqrt=True).to(DEVICE)
-    image_spacing = torch.as_tensor(image_spacing).to(DEVICE)
-    loss_before = float(
-        tre_loss(
-            vector_field * 0.0,
-            moving_keypoints,
-            fixed_keypoints,
+        registration_result = registration.register_and_train_boosting(
+            # boosting specific kwargs
+            model=model,
+            optimizer=optimizer,
+            n_iterations=0,
+            moving_keypoints=moving_keypoints,
+            fixed_keypoints=fixed_keypoints,
+            image_loss_function="mse",
+            # loss weights
+            keypoint_loss_weight=1.0,
+            label_loss_weight=0.0,
+            smoothness_loss_weight=0.0,
+            image_loss_weight=0.0,
+            # registration specific kwargs
+            moving_image=moving_image,
+            fixed_image=fixed_image,
+            moving_mask=moving_mask,
+            fixed_mask=fixed_mask,
+            use_masks=True,
             image_spacing=image_spacing,
+            register_affine=True,
+            affine_loss_function=mse_loss,
+            affine_step_size=0.01,
+            affine_iterations=300,
+            force_type="demons",
+            gradient_type="passive",
+            valid_value_range=(-1000, 3071),
+            early_stopping_delta=0.00001,
+            early_stopping_window=None,
+            default_parameters=params,
+            debug=False,
+            debug_output_folder=OUTPUT_FOLDER / "debug",
+            debug_step_size=10,
+            return_as_tensor=True,
         )
-    )
-    loss_after = float(
-        tre_loss(
-            vector_field, moving_keypoints, fixed_keypoints, image_spacing=image_spacing
+        vector_field = registration_result.composed_vector_field
+
+        smoothness = calculate_l2r_smoothness(
+            vector_field.cpu().detach().numpy().squeeze(), mask=fixed_mask
         )
-    )
+        smoothnesses.append(smoothness)
 
-    print(
-        f"NLST_0{case}: "
-        f"tre_loss_before={loss_before:.3f}, "
-        f"tre_loss_after={loss_after:.3f}, "
-        f"smoothness={smoothness:.3f}, "
-    )
-    tres_before.append(np.mean(loss_before))
-    tres_after.append(np.mean(loss_after))
+        # warped_moving_image = registration_result.warped_moving_image.swapaxes(0, 2)
+        # warped_moving_image = sitk.GetImageFromArray(warped_moving_image)
+        # warped_moving_image.CopyInformation(reference_image)
+        # sitk.WriteImage(
+        #     warped_moving_image, str(OUTPUT_FOLDER / f"warped_image_{case}_{case}.nii")
+        # )
+        #
+        # write_nlst_vector_field(
+        #     vector_field,
+        #     case=f"{case:04d}",
+        #     output_folder=OUTPUT_FOLDER,
+        # )
 
-    # if debug_info := registration_result.debug_info:
-    #     animation = debug_info["animation"]
-    #     writer = FFMpegWriter(fps=1)
-    #     animation.save("/datalake/learn2reg/registration.mp4", writer=writer)
+        if not isinstance(vector_field, torch.Tensor):
+            vector_field = torch.as_tensor(vector_field[np.newaxis], device=DEVICE)
+
+        tre_loss = TRELoss(apply_sqrt=True).to(DEVICE)
+        image_spacing = torch.as_tensor(image_spacing).to(DEVICE)
+        loss_before = float(
+            tre_loss(
+                vector_field * 0.0,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing=image_spacing,
+            )
+        )
+        loss_after = float(
+            tre_loss(
+                vector_field,
+                moving_keypoints,
+                fixed_keypoints,
+                image_spacing=image_spacing,
+            )
+        )
+
+        print(
+            f"NLST_0{case}: "
+            f"tre_loss_before={loss_before:.3f}, "
+            f"tre_loss_after={loss_after:.3f}, "
+            f"smoothness={smoothness:.3f}, "
+        )
+        tres_before.append(np.mean(loss_before))
+        tres_after.append(np.mean(loss_after))
+
+        # if debug_info := registration_result.debug_info:
+        #     animation = debug_info["animation"]
+        #     writer = FFMpegWriter(fps=1)
+        #     animation.save("/datalake/learn2reg/registration.mp4", writer=writer)
 
 
 print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")

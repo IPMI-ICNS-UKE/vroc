@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import math
 from abc import ABC
 from typing import Literal, Optional, Tuple, Type, Union
 
-import matplotlib
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,7 +17,6 @@ from vroc.common_types import (
     IntTuple3D,
     Number,
 )
-from vroc.helper import binary_dilation
 from vroc.kernels import gradient_kernel_3d
 
 
@@ -230,7 +226,8 @@ class BaseGaussianSmoothing(ABC, nn.Module):
             radius = BaseGaussianSmoothing.get_kernel_radius(sigma, sigma_cutoff)
 
         sigma2 = sigma * sigma
-        x = torch.arange(-radius, radius + 1)
+        sigma2 = torch.as_tensor(sigma2)
+        x = torch.arange(-radius, radius + 1, device=sigma2.device)
         phi_x = torch.exp(-0.5 / sigma2 * x**2)
         phi_x = phi_x / phi_x.sum()
 
@@ -492,6 +489,7 @@ class SpatialTransformer(nn.Module):
 
         image_spatial_shape = image.shape[2:]
         n_spatial_dims = len(image_spatial_shape)
+        is_affine_transformation = transformation.shape[-2:] == (4, 4)
 
         if self.identity_grid is None:
             # create identity grid dynamically
@@ -499,10 +497,16 @@ class SpatialTransformer(nn.Module):
                 image_spatial_shape, device=image.device
             )
             self.identity_grid = identity_grid
+        elif self.identity_grid.shape[1:] != image_spatial_shape:
+            # mismatch: create new identity grid
+            identity_grid = self.create_identity_grid(
+                image_spatial_shape, device=image.device
+            )
+            self.identity_grid = identity_grid
         else:
             identity_grid = self.identity_grid
 
-        if transformation.shape[-2:] == (4, 4):
+        if is_affine_transformation:
             # transformation is affine matrix
             # discard last row of 4x4 matrix to get 3x4 matrix
             # (last low of affine matrix is not used by PyTorch)
@@ -889,26 +893,285 @@ class NGFForces(BaseForces):
         )
 
 
+class RegularizationConv3d(nn.Conv3d):
+    def forward(self, input: torch.Tensor, norm: float = 1.0) -> torch.Tensor:
+        # normalize weights to sum = norm for each output channel
+        # weight has shape of (out_channels, in_channels/groups, *kernel_size)
+        normalized_weights = (
+            torch.softmax(self.weight.view(self.weight.shape[0], -1), dim=-1) * norm
+        )
+        normalized_weights = normalized_weights.view(*self.weight.shape)
+
+        return self._conv_forward(input, normalized_weights, self.bias)
+
+
+# class TrainableRegularization3d(nn.Module):
+#     def __init__(self, n_levels: int = 3, filter_base: int = 16, max_sigma: float = 5):
+#         super().__init__()
+#
+#         self.n_levels = n_levels
+#         self.filter_base = filter_base
+#         self.max_sigma = max_sigma
+#
+#         for i_level in range(self.n_levels):
+#             pool = nn.AvgPool3d(kernel_size=2**i_level)
+#             conv_1 = nn.Conv3d(
+#                 in_channels=1,
+#                 out_channels=self.filter_base,
+#                 kernel_size=(3, 3, 3),
+#                 padding='same',
+#                 bias=True,
+#             )
+#             conv_2 = nn.Conv3d(
+#                 in_channels=self.filter_base,
+#                 out_channels=self.filter_base,
+#                 kernel_size=(3, 3, 3),
+#                 padding='same',
+#                 bias=True,
+#             )
+#             self.add_module(f"pool_{i_level}", module=pool)
+#             self.add_module(f"conv_{i_level}_1", module=conv_1)
+#             self.add_module(f"conv_{i_level}_2", module=conv_2)
+#
+#         self.fuse = nn.Conv3d(
+#             in_channels=self.n_levels * self.filter_base,
+#             out_channels=3,
+#             kernel_size=(1, 1, 1),
+#             padding='same',
+#             bias=False,
+#         )
+#     def forward(self, vector_field: torch.Tensor, moving_image: torch.Tensor, fixed_image: torch.Tensor):
+#         if vector_field.shape[0] != 1:
+#             raise NotImplementedError(
+#                 'Currently only implemented for input of batch size 1'
+#             )
+#
+#         diff = (moving_image - fixed_image) / (fixed_image + 1e-6)
+#         diff = F.softsign(diff)
+#
+#         level_outputs = []
+#         n_vector_components = vector_field.shape[1]
+#         spatial_shape = vector_field.shape[2:]
+#         for i_level in range(self.n_levels):
+#             pool = self.get_submodule(f"pool_{i_level}")
+#             conv_1 = self.get_submodule(f"conv_{i_level}_1")
+#             conv_2 = self.get_submodule(f"conv_{i_level}_2")
+#
+#             downsampled = pool(diff)
+#             features = conv_1(downsampled)
+#             features = F.mish(features)
+#             features = conv_2(features)
+#             features = F.mish(features)
+#             features = F.interpolate(features, size=spatial_shape, mode='nearest')
+#             level_outputs.append(features)
+#
+#         level_outputs = torch.concat(level_outputs, dim=1)
+#         kernel_weights = self.fuse(level_outputs)
+#         # kernel_weights = F.sigmoid(kernel_weights) * self.max_sigma
+#         kernel_weights = F.relu(kernel_weights) + 0.5
+#
+#         # global average pooling
+#         kernel_weights = kernel_weights.view(*kernel_weights.shape[:2], -1)
+#         kernel_weights = kernel_weights.mean(dim=-1)
+#
+#         sigma_x = kernel_weights[0, 0]
+#         sigma_y = kernel_weights[0, 1]
+#         sigma_z = kernel_weights[0, 2]
+#
+#         smoothing = GaussianSmoothing3d(
+#             sigma=(sigma_x, sigma_y, sigma_z),
+#             radius=(5, 5, 5),
+#             sigma_cutoff=None
+#         ).to(vector_field.device)
+#
+#         print(f'{(sigma_x, sigma_y, sigma_z) = }')
+#         return smoothing(vector_field)
+
+
+class TrainableRegularization3d(nn.Module):
+    def __init__(self, n_levels: int = 3, filter_base: int = 16, max_sigma: float = 5):
+        super().__init__()
+
+        self.n_levels = n_levels
+        self.filter_base = filter_base
+        self.max_sigma = max_sigma
+
+        for i_level in range(self.n_levels):
+            pool = nn.AvgPool3d(kernel_size=2**i_level)
+            conv_1 = nn.Conv3d(
+                in_channels=1,
+                out_channels=self.filter_base,
+                kernel_size=(3, 3, 3),
+                padding="same",
+                bias=True,
+            )
+            conv_2 = nn.Conv3d(
+                in_channels=self.filter_base,
+                out_channels=self.filter_base,
+                kernel_size=(3, 3, 3),
+                padding="same",
+                bias=True,
+            )
+            self.add_module(f"pool_{i_level}", module=pool)
+            self.add_module(f"conv_{i_level}_1", module=conv_1)
+            self.add_module(f"conv_{i_level}_2", module=conv_2)
+
+        self.fuse = nn.Conv3d(
+            in_channels=self.n_levels * self.filter_base,
+            out_channels=3,
+            kernel_size=(1, 1, 1),
+            padding="same",
+            bias=False,
+        )
+
+    def forward(
+        self,
+        vector_field: torch.Tensor,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+    ):
+        if vector_field.shape[0] != 1:
+            raise NotImplementedError(
+                "Currently only implemented for input of batch size 1"
+            )
+
+        diff = (moving_image - fixed_image) / (fixed_image + 1e-6)
+        diff = F.softsign(diff)
+
+        level_outputs = []
+        n_vector_components = vector_field.shape[1]
+        spatial_shape = vector_field.shape[2:]
+        for i_level in range(self.n_levels):
+            pool = self.get_submodule(f"pool_{i_level}")
+            conv_1 = self.get_submodule(f"conv_{i_level}_1")
+            conv_2 = self.get_submodule(f"conv_{i_level}_2")
+
+            downsampled = pool(diff)
+            features = conv_1(downsampled)
+            features = F.mish(features)
+            features = conv_2(features)
+            features = F.mish(features)
+            features = F.interpolate(features, size=spatial_shape, mode="nearest")
+            level_outputs.append(features)
+
+        level_outputs = torch.concat(level_outputs, dim=1)
+        kernel_weights = self.fuse(level_outputs)
+        # kernel_weights = F.sigmoid(kernel_weights) * self.max_sigma
+        kernel_weights = F.relu(kernel_weights) + 0.5
+
+        # global average pooling
+        kernel_weights = kernel_weights.view(*kernel_weights.shape[:2], -1)
+        kernel_weights = kernel_weights.mean(dim=-1)
+
+        sigma_x = kernel_weights[0, 0]
+        sigma_y = kernel_weights[0, 1]
+        sigma_z = kernel_weights[0, 2]
+
+        smoothing = GaussianSmoothing3d(
+            sigma=(sigma_x, sigma_y, sigma_z), radius=(5, 5, 5), sigma_cutoff=None
+        ).to(vector_field.device)
+
+        print(f"{(sigma_x, sigma_y, sigma_z) = }")
+        return smoothing(vector_field)
+
+
+class DynamicRegularization3d(nn.Module):
+    def __init__(
+        self,
+        factors: FloatTuple = (0.125, 0.25, 0.5, 1.0),
+        filter_base: int = 16,
+        max_sigma: float = 5,
+    ):
+        super().__init__()
+
+        self.factors = factors
+
+        self.n_levels = len(self.factors)
+        self.filter_base = filter_base
+        self.max_sigma = max_sigma
+
+        # self.weighting_net = FlexUNet(
+        #     n_channels=2, n_levels=4, n_classes=self.n_levels + 3, filter_base=4, norm_layer=nn.InstanceNorm3d, return_bottleneck=False, skip_connections=True
+        # )
+
+    def forward(
+        self,
+        vector_field: torch.Tensor,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        weights,
+    ):
+        if vector_field.shape[0] != 1:
+            raise NotImplementedError(
+                "Currently only implemented for input of batch size 1"
+            )
+
+        # diff = (moving_image - fixed_image) / (fixed_image + 1e-6)
+        # diff = F.softsign(diff)
+
+        # images = torch.concat((moving_image, fixed_image), dim=1)
+        #
+        # output = self.weighting_net(images)
+        # weights = output[:, :self.n_levels]
+        # taus = output[:, self.n_levels:]
+        # taus = 5 * torch.sigmoid(taus)
+        # sigmas = sigmas.view(*sigmas.shape[:2], -1).max(dim=-1).values[0]
+        # sigmas = 100 * torch.sigmoid(sigmas) + 0.5
+        # sigma_x, sigma_y, sigma_z = sigmas
+
+        smoother = GaussianSmoothing3d(
+            sigma=(1.0, 1.0, 1.0), radius=(2, 2, 2), sigma_cutoff=None
+        ).to(vector_field)
+
+        weights = torch.softmax(weights, dim=1)
+
+        # print(f'sigmas: {(sigma_x, sigma_y, sigma_z)}')
+        # print(f'mean weights: {weights.view(*weights.shape[:2], -1).mean(dim=-1)}')
+
+        spatial_shape = vector_field.shape[2:]
+
+        weighted_regularization = torch.zeros_like(vector_field)
+        for i_level in range(self.n_levels):
+            factor = self.factors[i_level]
+            downsampled = F.interpolate(
+                vector_field, scale_factor=factor, mode="trilinear"
+            )
+            smoothed = smoother(downsampled)
+            smoothed = F.interpolate(smoothed, size=spatial_shape, mode="trilinear")
+
+            level_weight = weights[:, i_level : i_level + 1]
+            weighted_regularization += level_weight * smoothed
+
+        return weighted_regularization
+
+
 if __name__ == "__main__":
+    moving = torch.rand((1, 1, 32, 32, 32)).to("cuda")
+    fixed = torch.rand((1, 1, 32, 32, 32)).to("cuda")
 
-    import time
+    vf = torch.rand((1, 3, 32, 32, 32)).to("cuda")
 
-    d1 = GaussianSmoothing3d(
-        sigma=(1.0, 2.0, 3.0),
-        # radius=(1, 2, 3),
-        sigma_cutoff=(2.0, 2.0, 2.0),
-        force_same_size=True,
-    )
+    r = DynamicRegularization3d(n_levels=3, filter_base=16).to("cuda")
+    rr = r(vf, moving, fixed)
 
-    d2 = GaussianSmoothing3d(
-        sigma=(1.0, 2.0, 3.0), radius=(1, 2, 3), sigma_cutoff=None, force_same_size=True
-    )
-    t = time.time()
-    d3 = GaussianSmoothing3d(
-        sigma=(1.0, 2.0, 3.0), radius=(1, 2, 3), sigma_cutoff=None, force_same_size=True
-    )
-    print(time.time() - t)
-
-    print(d1.kernel_size)
-    print(d2.kernel_size)
-    print(d3.kernel_size)
+    # import time
+    #
+    # d1 = GaussianSmoothing3d(
+    #     sigma=(1.0, 2.0, 3.0),
+    #     # radius=(1, 2, 3),
+    #     sigma_cutoff=(2.0, 2.0, 2.0),
+    #     force_same_size=True,
+    # )
+    #
+    # d2 = GaussianSmoothing3d(
+    #     sigma=(1.0, 2.0, 3.0), radius=(1, 2, 3), sigma_cutoff=None, force_same_size=True
+    # )
+    # t = time.time()
+    # d3 = GaussianSmoothing3d(
+    #     sigma=(1.0, 2.0, 3.0), radius=(1, 2, 3), sigma_cutoff=None, force_same_size=True
+    # )
+    # print(time.time() - t)
+    #
+    # print(d1.kernel_size)
+    # print(d2.kernel_size)
+    # print(d3.kernel_size)

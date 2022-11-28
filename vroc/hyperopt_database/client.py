@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import pickle
-from typing import Dict, List, Optional, Tuple, Union
-from uuid import UUID, uuid4
+from typing import Dict, List, Union
 
 import numpy as np
 import pandas as pd
-from peewee import JOIN, prefetch
-from sklearn.metrics.pairwise import cosine_distances
+from peewee import prefetch
 
 import vroc.database.models as orm
 from vroc.common_types import PathLike

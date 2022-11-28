@@ -1,5 +1,3 @@
-import seaborn as sns
-
 from vroc.hyperopt_database.client import DatabaseClient
 
 client = DatabaseClient("/datalake/learn2reg/param_sampling.sqlite")

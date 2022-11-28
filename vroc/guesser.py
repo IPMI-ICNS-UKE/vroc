@@ -4,7 +4,6 @@ from typing import Sequence
 
 import numpy as np
 import umap
-from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 
 from vroc.common_types import PathLike

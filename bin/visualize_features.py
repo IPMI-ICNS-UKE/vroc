@@ -3,10 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import SimpleITK as sitk
 import umap
 
-from vroc.feature_extractor import OrientedHistogramFeatureExtrator
 from vroc.hyperopt_database.client import DatabaseClient
 from vroc.logger import LogFormatter
 from vroc.plot import plot_embedding
