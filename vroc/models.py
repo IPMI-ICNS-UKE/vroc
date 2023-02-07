@@ -709,6 +709,9 @@ class VarReg(nn.Module, LoggerMixin):
         for i_level, (scale_factor, iterations) in enumerate(
             zip(self.scale_factors, self.iterations)
         ):
+            self.logger.info(
+                f"Start level {i_level + 1}/{self.n_levels} with {scale_factor=} and {iterations=}"
+            )
             self._counter = 0
 
             (
@@ -840,7 +843,9 @@ class VarReg(nn.Module, LoggerMixin):
                 self.logger.debug(log)
 
                 # here we do the debug stuff
-                if self.debug and i_iteration % self.debug_step_size == 0:
+                if self.debug and (
+                    i_iteration % self.debug_step_size == 0 or i_iteration < 10
+                ):
                     debug_metrics = {
                         "tau": decayed_tau,
                         "metric": level_metrics[-1],
@@ -852,13 +857,13 @@ class VarReg(nn.Module, LoggerMixin):
                     for i_dim in range(n_spatial_dims):
                         debug_metrics["vector_field"][dim_names[i_dim]] = {
                             "min": float(torch.min(vector_field[:, i_dim])),
-                            "Q0.05": float(
-                                torch.quantile(vector_field[:, i_dim], 0.05)
-                            ),
+                            # "Q0.05": float(
+                            #     torch.quantile(vector_field[:, i_dim], 0.05)
+                            # ),
                             "mean": float(torch.mean(vector_field[:, i_dim])),
-                            "Q0.95": float(
-                                torch.quantile(vector_field[:, i_dim], 0.95)
-                            ),
+                            # "Q0.95": float(
+                            #     torch.quantile(vector_field[:, i_dim], 0.95)
+                            # ),
                             "max": float(torch.max(vector_field[:, i_dim])),
                         }
                     self._plotter.save_snapshot(
@@ -873,6 +878,7 @@ class VarReg(nn.Module, LoggerMixin):
                         full_spatial_shape=full_cropped_spatial_shape,
                         stage="vroc",
                         level=i_level,
+                        scale_factor=scale_factor,
                         iteration=i_iteration,
                         metrics=debug_metrics,
                         output_folder=self.debug_output_folder,
