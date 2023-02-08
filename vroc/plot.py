@@ -166,6 +166,7 @@ class RegistrationProgressPlotter:
         stage: str,
         level: int,
         iteration: int,
+        scale_factor: float,
         metrics: dict,
         output_folder: PathLike,
     ):
@@ -237,6 +238,9 @@ class RegistrationProgressPlotter:
             vector_field_slice = slice_if_not_none(
                 vector_field, slicing=(..., *plot_slicing)
             )
+            if vector_field_slice is not None:
+                vector_field_slice = vector_field_slice / scale_factor
+
             forces_slice = slice_if_not_none(forces, slicing=(..., *plot_slicing))
 
             # col plot positions
