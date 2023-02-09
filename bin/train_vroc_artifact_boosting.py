@@ -43,6 +43,9 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
 
         self.test_plot = None
 
+        self.i_batch = 0
+        self.accumulate_n_batches = 1
+
     def train_on_batch(self, data: dict) -> dict:
         vector_field_with_artifact = torch.as_tensor(
             data["vector_field_with_artifact"],
@@ -128,28 +131,27 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
         modified_fixed_artifact_mask[~fixed_artifact_mask] = False
 
         # boost the vector field
-        self.optimizer.zero_grad()
         with torch.autocast(device_type="cuda", enabled=True):
-            x_mean = vector_field_with_artifact[:, 0:1][union_mask].mean()
-            y_mean = vector_field_with_artifact[:, 1:2][union_mask].mean()
-            z_mean = vector_field_with_artifact[:, 2:3][union_mask].mean()
-
-            vector_field_mean = torch.as_tensor(
-                [x_mean, y_mean, z_mean], device=self.device
-            )
-            vector_field_mean = vector_field_mean.resize(1, 3, 1, 1, 1)
-            x_std = vector_field_with_artifact[:, 0:1][union_mask].std()
-            y_std = vector_field_with_artifact[:, 1:2][union_mask].std()
-            z_std = vector_field_with_artifact[:, 2:3][union_mask].std()
-
-            vector_field_std = torch.as_tensor(
-                [x_std, y_std, z_std], device=self.device
-            )
-            vector_field_std = vector_field_std.resize(1, 3, 1, 1, 1)
-
-            # normed_vector_field_with_artifact = (
-            #     vector_field_with_artifact - vector_field_mean
-            # ) / vector_field_std
+            # x_mean = vector_field_with_artifact[:, 0:1][union_mask].mean()
+            # y_mean = vector_field_with_artifact[:, 1:2][union_mask].mean()
+            # z_mean = vector_field_with_artifact[:, 2:3][union_mask].mean()
+            #
+            # vector_field_mean = torch.as_tensor(
+            #     [x_mean, y_mean, z_mean], device=self.device
+            # )
+            # vector_field_mean = vector_field_mean.resize(1, 3, 1, 1, 1)
+            # x_std = vector_field_with_artifact[:, 0:1][union_mask].std()
+            # y_std = vector_field_with_artifact[:, 1:2][union_mask].std()
+            # z_std = vector_field_with_artifact[:, 2:3][union_mask].std()
+            #
+            # vector_field_std = torch.as_tensor(
+            #     [x_std, y_std, z_std], device=self.device
+            # )
+            # vector_field_std = vector_field_std.resize(1, 3, 1, 1, 1)
+            #
+            # # normed_vector_field_with_artifact = (
+            # #     vector_field_with_artifact - vector_field_mean
+            # # ) / vector_field_std
 
             warped_moving_image = self.spatial_transformer(
                 moving_image, vector_field_with_artifact
@@ -279,10 +281,13 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
             moving_image,
             vector_field_with_artifact,
             fixed_image,
-            extended_artifact_mask,
+            modified_fixed_artifact_mask,
         )
         mse_image_artifact_after = self.mse_loss(
-            moving_image, boosted_vector_field, fixed_image, extended_artifact_mask
+            moving_image,
+            boosted_vector_field,
+            fixed_image,
+            modified_fixed_artifact_mask,
         )
 
         mse_vector_field_artifact_before = F.mse_loss(
@@ -303,12 +308,12 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
             vector_field_without_artifact[..., ~extended_artifact_mask[0, 0]],
         )
 
-        # mse_image_before = self.mse_loss(
-        #     moving_image, vector_field_with_artifact, fixed_image, fixed_mask
-        # )
-        # mse_image_after = self.mse_loss(
-        #     moving_image, boosted_vector_field, fixed_image, fixed_mask
-        # )
+        mse_image_before = self.mse_loss(
+            moving_image, vector_field_with_artifact, fixed_image, fixed_mask
+        )
+        mse_image_after = self.mse_loss(
+            moving_image, boosted_vector_field, fixed_image, fixed_mask
+        )
 
         # mse_vector_field_before = F.mse_loss(
         #     vector_field_with_artifact[extended_artifact_slicing],
@@ -319,24 +324,27 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
         #     vector_field_without_artifact[extended_artifact_slicing],
         # )
         #
-        # tre_before = self.tre_loss(
-        #     vector_field_with_artifact,
-        #     moving_keypoints,
-        #     fixed_keypoints,
-        #     image_spacing,
-        # )
-        # tre_after = self.tre_loss(
-        #     boosted_vector_field,
-        #     moving_keypoints,
-        #     fixed_keypoints,
-        #     image_spacing,
-        # )
+        tre_before = self.tre_loss(
+            vector_field_with_artifact,
+            moving_keypoints,
+            fixed_keypoints,
+            image_spacing,
+        )
+        tre_after = self.tre_loss(
+            boosted_vector_field,
+            moving_keypoints,
+            fixed_keypoints,
+            image_spacing,
+        )
         #
         # mse_image_loss = mse_image_after / mse_image_before
         # mse_vector_field_loss = mse_vector_field_after / mse_vector_field_before
-        # tre_loss = (tre_after / tre_before).mean()
+        tre_loss = (tre_after / tre_before).mean()
 
-        # mse_image_loss = mse_image_artifact_after / mse_image_artifact_before
+        mse_image_artifact = mse_image_artifact_after / mse_image_artifact_before
+        mse_image_non_artifact = mse_image_after / mse_image_before
+
+        mse_image_loss = 0.8 * mse_image_artifact + 0.2 * mse_image_non_artifact
         # mse_vector_field_loss = mse_vector_field_after / mse_vector_field_before
 
         mse_vector_field_artifact_loss = (
@@ -346,22 +354,35 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
             mse_vector_field_non_artifact_after / mse_vector_field_non_artifact_before
         )
 
-        loss = (
-            5.0 * mse_vector_field_artifact_loss
-            + 1.0 * mse_vector_field_non_artifact_loss
+        # loss = (
+        #     0.45 * mse_image_loss +
+        #     0.45 * mse_vector_field_artifact_loss +
+        #     0.10 * mse_vector_field_non_artifact_loss
+        # )
+        mse_image_loss = 0.8 * mse_image_artifact + 0.2 * mse_image_non_artifact
+        mse_vector_field_loss = (
+            mse_vector_field_artifact_after / mse_vector_field_artifact_before
         )
-        loss = loss / 6.0
-        loss = loss * data["artifact_size"][0]
+        tre_loss = (tre_after / tre_before).mean()
+
+        loss = mse_vector_field_loss  # + tre_loss
+        # loss = loss * data["artifact_size"][0]
+
+        self.scaler.scale(loss / self.accumulate_n_batches).backward()
+        self.i_batch += 1
 
         self.log_info(
             f"artifact size = {float(data['artifact_size'][0])}", context="TRAIN"
         )
 
-        if torch.isfinite(loss):
-            self.scaler.scale(loss).backward()
+        if self.i_batch % self.accumulate_n_batches == 0:
+
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            logger.info("Perform optimizer step")
+            self.log_info("Perform optimizer step", context="TRAIN")
+
+            self.optimizer.zero_grad()
+            self.i_batch = 0
 
         return {
             "loss": float(loss),
@@ -369,9 +390,11 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
             "mse_vector_field_non_artifact_loss": float(
                 mse_vector_field_non_artifact_loss
             ),
-            # "mse_image_loss": float(mse_image_loss),
+            "mse_image_loss": float(mse_image_loss),
+            "mse_image_artifact": float(mse_image_artifact),
+            "mse_image_non_artifact": float(mse_image_non_artifact),
             # "mse_vector_field_loss": float(mse_vector_field_loss),
-            # "tre_loss": float(tre_loss),
+            "tre_loss": float(tre_loss),
             # "tre_loss_total": float(tre_loss_total),
             # "tre_loss_artifact": float(tre_loss_artifact),
             # "mse_loss_total": float(mse_loss_total),
@@ -457,33 +480,36 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
                 artifact_slicing[3].stop + artifact_slicing_padding,
             ),
         )
+
+        extended_artifact_mask = torch.zeros_like(fixed_artifact_mask)
+        extended_artifact_mask[extended_artifact_slicing] = True
+
         modified_fixed_artifact_mask = torch.zeros_like(fixed_artifact_mask)
         modified_fixed_artifact_mask[extended_artifact_slicing] = True
         modified_fixed_artifact_mask[~fixed_artifact_mask] = False
 
         # boost the vector field
-        self.optimizer.zero_grad()
         with torch.autocast(device_type="cuda", enabled=False), torch.inference_mode():
-            x_mean = vector_field_with_artifact[:, 0:1][union_mask].mean()
-            y_mean = vector_field_with_artifact[:, 1:2][union_mask].mean()
-            z_mean = vector_field_with_artifact[:, 2:3][union_mask].mean()
-
-            vector_field_mean = torch.as_tensor(
-                [x_mean, y_mean, z_mean], device=self.device
-            )
-            vector_field_mean = vector_field_mean.resize(1, 3, 1, 1, 1)
-            x_std = vector_field_with_artifact[:, 0:1][union_mask].std()
-            y_std = vector_field_with_artifact[:, 1:2][union_mask].std()
-            z_std = vector_field_with_artifact[:, 2:3][union_mask].std()
-
-            vector_field_std = torch.as_tensor(
-                [x_std, y_std, z_std], device=self.device
-            )
-            vector_field_std = vector_field_std.resize(1, 3, 1, 1, 1)
-
-            normed_vector_field_with_artifact = (
-                vector_field_with_artifact - vector_field_mean
-            ) / vector_field_std
+            # x_mean = vector_field_with_artifact[:, 0:1][union_mask].mean()
+            # y_mean = vector_field_with_artifact[:, 1:2][union_mask].mean()
+            # z_mean = vector_field_with_artifact[:, 2:3][union_mask].mean()
+            #
+            # vector_field_mean = torch.as_tensor(
+            #     [x_mean, y_mean, z_mean], device=self.device
+            # )
+            # vector_field_mean = vector_field_mean.resize(1, 3, 1, 1, 1)
+            # x_std = vector_field_with_artifact[:, 0:1][union_mask].std()
+            # y_std = vector_field_with_artifact[:, 1:2][union_mask].std()
+            # z_std = vector_field_with_artifact[:, 2:3][union_mask].std()
+            #
+            # vector_field_std = torch.as_tensor(
+            #     [x_std, y_std, z_std], device=self.device
+            # )
+            # vector_field_std = vector_field_std.resize(1, 3, 1, 1, 1)
+            #
+            # normed_vector_field_with_artifact = (
+            #     vector_field_with_artifact - vector_field_mean
+            # ) / vector_field_std
 
             warped_moving_image = self.spatial_transformer(
                 moving_image, vector_field_with_artifact
@@ -605,6 +631,19 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
         #     + tre_loss_artifact * 0.005
         # )
 
+        mse_image_artifact_before = self.mse_loss(
+            moving_image,
+            vector_field_with_artifact,
+            fixed_image,
+            modified_fixed_artifact_mask,
+        )
+        mse_image_artifact_after = self.mse_loss(
+            moving_image,
+            boosted_vector_field,
+            fixed_image,
+            modified_fixed_artifact_mask,
+        )
+
         mse_image_before = self.mse_loss(
             moving_image, vector_field_with_artifact, fixed_image, fixed_mask
         )
@@ -612,13 +651,22 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
             moving_image, boosted_vector_field, fixed_image, fixed_mask
         )
 
-        mse_vector_field_before = F.mse_loss(
-            vector_field_with_artifact[extended_artifact_slicing],
-            vector_field_without_artifact[extended_artifact_slicing],
+        mse_vector_field_artifact_before = F.mse_loss(
+            vector_field_with_artifact[..., extended_artifact_mask[0, 0]],
+            vector_field_without_artifact[..., extended_artifact_mask[0, 0]],
         )
-        mse_vector_field_after = F.mse_loss(
-            boosted_vector_field[extended_artifact_slicing],
-            vector_field_without_artifact[extended_artifact_slicing],
+        mse_vector_field_artifact_after = F.mse_loss(
+            boosted_vector_field[..., extended_artifact_mask[0, 0]],
+            vector_field_without_artifact[..., extended_artifact_mask[0, 0]],
+        )
+
+        mse_vector_field_non_artifact_before = F.mse_loss(
+            vector_field_with_artifact[..., ~extended_artifact_mask[0, 0]],
+            vector_field_without_artifact[..., ~extended_artifact_mask[0, 0]],
+        )
+        mse_vector_field_non_artifact_after = F.mse_loss(
+            boosted_vector_field[..., ~extended_artifact_mask[0, 0]],
+            vector_field_without_artifact[..., ~extended_artifact_mask[0, 0]],
         )
 
         tre_before = self.tre_loss(
@@ -634,12 +682,19 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
             image_spacing,
         )
 
-        mse_image_loss = mse_image_after / mse_image_before
-        mse_vector_field_loss = mse_vector_field_after / mse_vector_field_before
+        mse_image_artifact = mse_image_artifact_after / mse_image_artifact_before
+        mse_image_non_artifact = mse_image_after / mse_image_before
+
+        mse_image_loss = 0.8 * mse_image_artifact + 0.2 * mse_image_non_artifact
+        mse_vector_field_loss = (
+            mse_vector_field_artifact_after / mse_vector_field_artifact_before
+        )
         tre_loss = (tre_after / tre_before).mean()
 
-        loss = 1.0 * mse_image_loss + 1.0 * tre_loss
-        loss = loss / 2.0
+        loss = mse_vector_field_loss  # + tre_loss
+
+        # loss = 1.0 * mse_image_loss + 1.0 * tre_loss
+        # loss = loss / 2.0
 
         self.log_info(
             f"artifact size = {float(data['artifact_size'][0])}", context="VAL"
@@ -724,7 +779,8 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
             losses = {
                 "loss": float(loss),
                 "mse_image_loss": float(mse_image_loss),
-                "mse_vector_field_loss": float(mse_vector_field_loss),
+                "mse_image_artifact": float(mse_image_artifact),
+                "mse_image_non_artifact": float(mse_image_non_artifact),
                 "tre_loss": float(tre_loss),
             }
 
@@ -732,6 +788,14 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
                 fig, caption=Path(data["patient"][0]).name + f", losses: {losses}"
             )
             # plt.close(fig)
+
+        losses = {
+            "loss": float(loss),
+            "mse_image_loss": float(mse_image_loss),
+            "mse_image_artifact": float(mse_image_artifact),
+            "mse_image_non_artifact": float(mse_image_non_artifact),
+            "tre_loss": float(tre_loss),
+        }
 
         return {
             **losses,
@@ -749,7 +813,6 @@ class VectorFieldArtifactBoosterTrainer(BaseTrainer):
 if __name__ == "__main__":
     import time
 
-    time.sleep(3600 * 2.0)
     import torch.nn as nn
 
     init_fancy_logging()
@@ -772,6 +835,9 @@ if __name__ == "__main__":
         train_size=0.80,
         is_train=False,
     )
+
+    print(f"length train/test: {len(train_dataset)}/{len(test_dataset)}")
+
     # for overfitting test
     # train_dataset.filepaths = train_dataset.filepaths[:1]
 
@@ -779,7 +845,7 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=1,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         collate_fn=partial(
             dict_collate,
             noop_keys=[
@@ -794,6 +860,7 @@ if __name__ == "__main__":
         test_dataset,
         batch_size=1,
         shuffle=False,
+        num_workers=8,
         collate_fn=partial(
             dict_collate,
             noop_keys=[
@@ -805,30 +872,44 @@ if __name__ == "__main__":
         ),
     )
 
+    convolution_kwargs = {
+        "kernel_size": 3,
+        "padding": "same",
+        "bias": False,
+    }
+
+    n_filters_init = 32
+    encoder_n_filters = (32, 32, 32, 32)
+    decoder_n_filters = (32, 32, 32, 32)
+    n_filters_final = 32
     model = FlexUNet(
         n_channels=3,
         n_classes=3,
         n_levels=4,
-        filter_base=16,
-        norm_layer=nn.InstanceNorm3d,
+        n_filters=(
+            n_filters_init,
+            *encoder_n_filters,
+            *decoder_n_filters,
+            n_filters_final,
+        ),
+        norm_layer=None,  # nn.InstanceNorm3d,
         skip_connections=True,
+        convolution_kwargs=convolution_kwargs,
         return_bottleneck=False,
     )
 
     # init with zeros
     model.final_conv.weight.data.fill_(0.0)
-    model.final_conv.bias.data.fill_(0.0)
+    # model.final_conv.bias.data.fill_(0.0)
 
-    optimizer = Adam(model.parameters(), lr=1e-4)
+    optimizer = Adam(model.parameters(), lr=1e-5)
 
-    # # # load states
-    # # state = torch.load(
-    # #     "/datalake/learn2reg/artifact_runs/models_7bb7fbd5e5c640ee9b051a92/step_1000.pth",
-    # #     map_location="cuda",
-    # # )
-    # # model.load_state_dict(state["model"])
-    # # optimizer.load_state_dict(state["optimizer"])
-    # # optimizer_to(optimizer, "cuda")
+    # load states
+    state = torch.load(
+        "/datalake/learn2reg/artifact_runs/models_48bddfef744f4e6bbfe6b841/validation/step_3000.pth",
+        map_location="cuda",
+    )
+    model.load_state_dict(state["model"])
 
     trainer = VectorFieldArtifactBoosterTrainer(
         model=model,
@@ -841,4 +922,4 @@ if __name__ == "__main__":
         device=DEVICE,
     )
     trainer.logger.setLevel(logging.DEBUG)
-    trainer.run(steps=200_000, validation_interval=1000)
+    trainer.run(steps=100_000, save_interval=500)

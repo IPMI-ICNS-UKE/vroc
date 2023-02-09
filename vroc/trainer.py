@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import logging
+import math
 import os
 from abc import ABC, abstractmethod
 from collections import deque
@@ -51,12 +53,15 @@ class BaseTrainer(ABC, LoggerMixin):
         self.model = model.to(device=self.device)
         self.loss_function = loss_function
         self.optimizer = optimizer
+        self.optimizer.zero_grad()
+
         self.scaler = torch.cuda.amp.GradScaler()
 
         self._aim_folder = self.run_folder / "aim"
         repo = BaseTrainer._get_aim_repo(self._aim_folder)
         self.aim_run = Run(repo=repo, experiment=experiment_name)
         self._set_run_params()
+        self._save_trainer_source_code()
 
         self._model_folder = self.run_folder / f"models_{self.aim_run.hash}"
         self._model_folder.mkdir(parents=True, exist_ok=True)
@@ -83,6 +88,10 @@ class BaseTrainer(ABC, LoggerMixin):
         # training step and epoch tracking
         self.i_step = 0
         self.i_epoch = 0
+
+    def _save_trainer_source_code(self) -> str:
+        source_code = inspect.getsource(self.__class__)
+        self.aim_run["source_code"] = source_code
 
     def _set_run_params(self):
         params = {
@@ -150,12 +159,24 @@ class BaseTrainer(ABC, LoggerMixin):
     @timing()
     def train_one_epoch(self):
         self.model.train()
+        self.optimizer.zero_grad()
         self.log_info("started epoch", context="TRAIN")
-        for data in self.train_loader:
+
+        try:
+            n_train_batches = math.ceil(
+                len(self.train_loader) / self.train_loader.batch_size
+            )
+        except TypeError:
+            n_train_batches = None
+
+        for i_batch, data in enumerate(self.train_loader, start=1):
             batch_metrics = self._train_on_batch(data)
 
             batch_metrics_formatted = self._format_metric_dict(batch_metrics)
-            self.log_debug(f"metrics: {batch_metrics_formatted}", context="TRAIN")
+            self.log_debug(
+                f"sample {i_batch}/{n_train_batches}, metrics: {batch_metrics_formatted}",
+                context="TRAIN",
+            )
 
             self._track_metrics(batch_metrics, context={"subset": "train"})
 
@@ -185,12 +206,22 @@ class BaseTrainer(ABC, LoggerMixin):
         # set to eval mode
         self.model.eval()
 
+        try:
+            n_val_batches = math.ceil(
+                len(self.train_loader) / self.train_loader.batch_size
+            )
+        except TypeError:
+            n_val_batches = None
+
         metrics = []
-        for data in self.val_loader:
+        for i_batch, data in enumerate(self.val_loader):
             batch_metrics = self._validate_on_batch(data)
             batch_metrics_formatted = self._format_metric_dict(batch_metrics)
 
-            self.log_debug(f"metrics: {batch_metrics_formatted}", context="VAL")
+            self.log_debug(
+                f"sample {i_batch}/{n_val_batches}, metrics: {batch_metrics_formatted}",
+                context="VAL",
+            )
             metrics.append(batch_metrics)
 
         metrics = concat_dicts(metrics, extend_lists=True)
@@ -209,6 +240,7 @@ class BaseTrainer(ABC, LoggerMixin):
         validation_interval: int = 1000,
         save_interval: int = 1000,
     ):
+
         self.log_info("started run", context="RUN")
         self.i_step = 0
         self.i_epoch = 0

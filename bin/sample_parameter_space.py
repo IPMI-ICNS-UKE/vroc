@@ -31,7 +31,7 @@ def setup_optimizer(
     init_params = VrocRegistration.DEFAULT_REGISTRATION_PARAMETERS
 
     param_config = ng.p.Instrumentation(
-        iterations=ng.p.Constant(800),  # handled by early stooping
+        iterations=ng.p.Constant(800),  # handled by early stopping
         tau=ng.p.Scalar(lower=0.5, upper=10.0, init=init_params["tau"]),
         tau_level_decay=ng.p.Scalar(
             lower=-half_life_to_lambda(4),

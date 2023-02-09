@@ -662,7 +662,7 @@ def extract_keypoints(
     length: Sequence[float] = (6, 3),
     quantization: Sequence[float] = (2, 1),
     patch_radius: Sequence[float] = (3, 2),
-    transform: Sequence[Literal["rigid", "dense"]] = ("dense", "dense"),
+    transform: Sequence[Literal["rigid", "dense"]] = ("rigid", "dense"),
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
     device = fixed_image.device

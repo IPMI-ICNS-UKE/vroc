@@ -1121,6 +1121,576 @@ class DemonsVectorFieldBooster(nn.Module, LoggerMixin):
                 )
             )
 
+        union_mask = torch.logical_or(moving_mask, fixed_mask).to(torch.float32)
+
+        return vector_field_boost * union_mask
+
+
+class DemonsVectorFieldBooster2(nn.Module, LoggerMixin):
+    def __init__(
+        self,
+        n_iterations: int = 10,
+        gradient_type: Literal["active", "passive", "dual"] = "dual",
+    ):
+        super().__init__()
+
+        self.n_iterations = n_iterations
+        self.forces = DemonForces(method=gradient_type)
+
+        regularization_1 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+        regularization_2 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=16,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        fuse = [
+            nn.Conv3d(
+                in_channels=64,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=32,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        self.regularization_1 = nn.Sequential(*regularization_1)
+        self.regularization_2 = nn.Sequential(*regularization_2)
+        self.fuse = nn.Sequential(*fuse)
+        self.spatial_transformer = SpatialTransformer()
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        vector_field: torch.Tensor,
+        image_spacing: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+
+        spatial_image_shape = moving_image.shape[2:]
+        vector_field_boost = torch.zeros(
+            (1, 3) + spatial_image_shape, device=moving_image.device
+        )
+
+        for _ in range(self.n_iterations):
+            composed_vector_field = vector_field_boost + self.spatial_transformer(
+                vector_field, vector_field_boost
+            )
+            warped_moving_image = self.spatial_transformer(
+                moving_image, composed_vector_field
+            )
+
+            # diff = (warped_moving_image - fixed_image) / (fixed_image + 1e-6)
+            # diff = F.softsign(diff)
+
+            forces = self.forces(
+                warped_moving_image,
+                fixed_image,
+                moving_mask,
+                fixed_mask,
+                image_spacing,
+            )
+
+            updated_vector_field_boost = vector_field_boost + forces
+
+            updated_vector_field_boost_1 = self.regularization_1(
+                updated_vector_field_boost
+            )
+            updated_vector_field_boost_2 = self.regularization_2(
+                updated_vector_field_boost
+            )
+
+            vector_field_boost = vector_field_boost + self.fuse(
+                torch.concat(
+                    (updated_vector_field_boost_1, updated_vector_field_boost_2),
+                    dim=1,
+                )
+            )
+
+        union_mask = torch.logical_or(moving_mask, fixed_mask).to(torch.float32)
+
+        return vector_field_boost * union_mask
+
+
+class DemonsVectorFieldBooster3(nn.Module, LoggerMixin):
+    def __init__(
+        self,
+        n_iterations: int = 10,
+        gradient_type: Literal["active", "passive", "dual"] = "dual",
+    ):
+        super().__init__()
+
+        self.n_iterations = n_iterations
+        self.forces = DemonForces(method=gradient_type)
+
+        regularization_1 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+        regularization_2 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=3,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        fuse = [
+            nn.Conv3d(
+                in_channels=6,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        self.regularization_1 = nn.Sequential(*regularization_1)
+        self.regularization_2 = nn.Sequential(*regularization_2)
+        self.fuse = nn.Sequential(*fuse)
+        self.spatial_transformer = SpatialTransformer()
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        vector_field: torch.Tensor,
+        image_spacing: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+
+        spatial_image_shape = moving_image.shape[2:]
+        vector_field_boost = torch.zeros(
+            (1, 3) + spatial_image_shape, device=moving_image.device
+        )
+
+        for _ in range(self.n_iterations):
+            composed_vector_field = vector_field_boost + self.spatial_transformer(
+                vector_field, vector_field_boost
+            )
+            warped_moving_image = self.spatial_transformer(
+                moving_image, composed_vector_field
+            )
+
+            # diff = (warped_moving_image - fixed_image) / (fixed_image + 1e-6)
+            # diff = F.softsign(diff)
+
+            forces = self.forces(
+                warped_moving_image,
+                fixed_image,
+                moving_mask,
+                fixed_mask,
+                image_spacing,
+            )
+
+            updated_vector_field_boost = vector_field_boost + forces
+
+            updated_vector_field_boost_1 = self.regularization_1(
+                updated_vector_field_boost
+            )
+            updated_vector_field_boost_2 = self.regularization_2(
+                updated_vector_field_boost
+            )
+
+            vector_field_boost = vector_field_boost + self.fuse(
+                torch.concat(
+                    (updated_vector_field_boost_1, updated_vector_field_boost_2),
+                    dim=1,
+                )
+            )
+
+        union_mask = torch.logical_or(moving_mask, fixed_mask).to(torch.float32)
+
+        return vector_field_boost * union_mask
+
+
+class DemonsVectorFieldBooster4(nn.Module, LoggerMixin):
+    def __init__(
+        self,
+        n_iterations: int = 10,
+        gradient_type: Literal["active", "passive", "dual"] = "dual",
+    ):
+        super().__init__()
+
+        self.n_iterations = n_iterations
+        self.forces = DemonForces(method=gradient_type)
+
+        regularization_1 = [
+            nn.Conv3d(
+                in_channels=1,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+        regularization_2 = [
+            nn.Conv3d(
+                in_channels=1,
+                out_channels=16,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        fuse = [
+            nn.Conv3d(
+                in_channels=64,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=32,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        self.regularization_1 = nn.Sequential(*regularization_1)
+        self.regularization_2 = nn.Sequential(*regularization_2)
+        self.fuse = nn.Sequential(*fuse)
+        self.spatial_transformer = SpatialTransformer()
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        vector_field: torch.Tensor,
+        image_spacing: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+
+        spatial_image_shape = moving_image.shape[2:]
+        vector_field_boost = torch.zeros(
+            (1, 3) + spatial_image_shape, device=moving_image.device
+        )
+
+        for _ in range(self.n_iterations):
+            composed_vector_field = vector_field_boost + self.spatial_transformer(
+                vector_field, vector_field_boost
+            )
+            warped_moving_image = self.spatial_transformer(
+                moving_image, composed_vector_field
+            )
+
+            diff = (warped_moving_image - fixed_image) / (fixed_image + 1e-6)
+            diff = F.softsign(diff)
+
+            forces = self.forces(
+                moving_image,
+                fixed_image,
+                moving_mask,
+                fixed_mask,
+                image_spacing,
+            )
+
+            updated_vector_field_boost_1 = self.regularization_1(diff)
+            updated_vector_field_boost_2 = self.regularization_2(diff)
+            vector_field_boost = vector_field_boost + self.fuse(
+                torch.concat(
+                    (updated_vector_field_boost_1, updated_vector_field_boost_2),
+                    dim=1,
+                )
+            )
+
+        union_mask = torch.logical_or(moving_mask, fixed_mask).to(torch.float32)
+
+        return vector_field_boost * union_mask
+
+
+class DemonsVectorFieldBooster5(nn.Module, LoggerMixin):
+    def __init__(
+        self,
+        n_iterations: int = 10,
+        gradient_type: Literal["active", "passive", "dual"] = "dual",
+        regularization_channels: int = 16,
+    ):
+        super().__init__()
+
+        self.n_iterations = n_iterations
+        self.forces = DemonForces(method=gradient_type)
+
+        tau_1 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=regularization_channels,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=regularization_channels,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        tau_2 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=regularization_channels,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=regularization_channels,
+                out_channels=3,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        regularization_1 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=regularization_channels,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=regularization_channels,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+        regularization_2 = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=regularization_channels,
+                kernel_size=3,
+                dilation=2,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=regularization_channels,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        fuse = [
+            nn.Conv3d(
+                in_channels=6,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=32,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        self.tau_1 = nn.Sequential(*tau_1)
+        self.tau_2 = nn.Sequential(*tau_2)
+        self.regularization_1 = nn.Sequential(*regularization_1)
+        self.regularization_2 = nn.Sequential(*regularization_2)
+        self.fuse = nn.Sequential(*fuse)
+        self.spatial_transformer = SpatialTransformer()
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        vector_field: torch.Tensor,
+        image_spacing: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+
+        spatial_image_shape = moving_image.shape[2:]
+        vector_field_boost = torch.zeros(
+            (1, 3) + spatial_image_shape, device=moving_image.device
+        )
+
+        for _ in range(self.n_iterations):
+            composed_vector_field = vector_field_boost + self.spatial_transformer(
+                vector_field, vector_field_boost
+            )
+            warped_moving_image = self.spatial_transformer(
+                moving_image, composed_vector_field
+            )
+
+            forces = self.forces(
+                warped_moving_image,
+                fixed_image,
+                moving_mask,
+                fixed_mask,
+                image_spacing,
+            )
+
+            forces = 0.5 * self.tau_1(forces) + 0.5 * self.tau_2(forces)
+
+            regularized_forces_1 = self.regularization_1(forces)
+            regularized_forces_2 = self.regularization_2(forces)
+
+            vector_field_boost = vector_field_boost + self.fuse(
+                torch.concat((regularized_forces_1, regularized_forces_2), dim=1)
+            )
+
+        # union_mask = torch.logical_or(moving_mask, fixed_mask).to(torch.float32)
+
         return vector_field_boost
 
 

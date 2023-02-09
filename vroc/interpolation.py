@@ -64,13 +64,14 @@ def resize(
     image: np.ndarray | torch.Tensor, output_shape: Tuple[int, ...], order: int = 1
 ) -> np.ndarray | torch.Tensor:
     dtype = image.dtype
-    is_mask = dtype in (bool, torch.bool)
     is_numpy = isinstance(image, np.ndarray)
 
     if is_numpy:
         resize_function = _resize_numpy
+        is_mask = dtype in (bool, np.uint8)
     else:
         resize_function = _resize_torch
+        is_mask = dtype in (torch.bool, torch.uint8)
 
     image = resize_function(image=image, output_shape=output_shape, order=order)
 
@@ -86,6 +87,10 @@ def resize(
 
 
 def rescale(image: ArrayOrTensor, factor: float, order: int = 1):
+    if factor == 1:
+        # no scaling needed, fast return
+        return image
+
     is_numpy = isinstance(image, np.ndarray)
 
     if is_numpy:

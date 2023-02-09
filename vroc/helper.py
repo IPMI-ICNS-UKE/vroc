@@ -130,6 +130,7 @@ def compute_tre_numpy(
     image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
     snap_to_voxel: bool = False,
     fixed_bounding_box: Tuple[slice, slice, slice] | None = None,
+    axis: int | None = None,
 ) -> np.ndarray | None:
     if fixed_bounding_box:
         _, keypoint_mask = mask_keypoints(
@@ -153,6 +154,12 @@ def compute_tre_numpy(
 
     if snap_to_voxel:
         fixed_landmarks_warped = np.round(fixed_landmarks_warped)
+
+    if axis is not None:
+        axis_slicing = np.index_exp[:, axis : axis + 1]
+        fixed_landmarks_warped = fixed_landmarks_warped[axis_slicing]
+        moving_landmarks = moving_landmarks[axis_slicing]
+        image_spacing = image_spacing[axis]
 
     return np.linalg.norm(
         (fixed_landmarks_warped - moving_landmarks) * image_spacing, axis=1
@@ -382,8 +389,8 @@ def nearest_factor_pow_2(
     lower_exponents = upper_exponents - 1
 
     if min_exponent:
-        upper_exponents = upper_exponents[upper_exponents >= min_exponent]
-        lower_exponents = lower_exponents[lower_exponents >= min_exponent]
+        upper_exponents[upper_exponents < min_exponent] = np.inf
+        lower_exponents[lower_exponents < min_exponent] = np.inf
 
     def get_distances(
         factors: Tuple[int, ...], exponents: Tuple[int, ...], max_value: int

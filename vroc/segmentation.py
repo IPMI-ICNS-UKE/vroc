@@ -285,7 +285,7 @@ class LungSegmenter3D:
         self.model = model.to(device)
         self.device = device
 
-    def segment(self, image: np.ndarray, subsample: float = 2.0) -> np.ndarray:
+    def segment(self, image: np.ndarray, subsample: float = 1.5) -> np.ndarray:
         image = np.asarray(image, dtype=np.float32)
         if image.ndim != 3:
             raise ValueError("Please pass a 3D image")
@@ -296,7 +296,9 @@ class LungSegmenter3D:
             image, output_shape=tuple(s // subsample for s in original_shape)
         )
         unpadded_shape = image.shape
-        padded_shape = tuple(nearest_factor_pow_2(s) for s in unpadded_shape)
+        padded_shape = tuple(
+            nearest_factor_pow_2(s, min_exponent=4) for s in unpadded_shape
+        )
 
         image, _ = crop_or_pad(image=image, mask=None, target_shape=padded_shape)
         image = rescale_range(

@@ -67,10 +67,13 @@ class TRELoss(nn.Module):
 
         if self.reduction == "mean":
             distances = distances.mean()
+        elif self.reduction == "median":
+            distances = torch.median(distances)
         elif self.reduction == "sum":
             distances = distances.sum()
         elif self.reduction == "quantile":
             distances = torch.quantile(distances, q=self.quantile)
+
         elif not self.reduction:
             # do nothing; this also covers falsy values like None, False, 0
             pass

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 
 from vroc.affine import run_affine_registration
 from vroc.common_types import (
@@ -24,6 +25,7 @@ from vroc.convert import as_tensor
 from vroc.decorators import convert, timing
 from vroc.guesser import ParameterGuesser
 from vroc.helper import to_one_hot
+from vroc.interpolation import rescale, resize
 from vroc.logger import LoggerMixin, RegistrationLogEntry
 from vroc.loss import DiceLoss, TRELoss, WarpedMSELoss, smooth_vector_field_loss
 from vroc.models import VarReg
@@ -178,6 +180,7 @@ class VrocRegistration(LoggerMixin):
         fixed_mask: ArrayOrTensor | None = None,
         use_masks: MaybeSequence[bool] = True,
         image_spacing: FloatTuple2D | FloatTuple3D = (1.0, 1.0, 1.0),
+        initial_vector_field: ArrayOrTensor | None = None,
         register_affine: bool = True,
         affine_loss_function: Callable | None = None,
         affine_iterations: int = 300,
@@ -249,10 +252,23 @@ class VrocRegistration(LoggerMixin):
                 max(moving_image.max(), fixed_image.max()),
             )
 
+        if initial_vector_field is not None and register_affine:
+            raise RuntimeError(
+                "Combination of initial_vector_field and register_affine "
+                "is not supported yet"
+            )
+
+        initial_vector_field = as_tensor(
+            initial_vector_field,
+            n_dim=n_total_dims,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
         if register_affine:
             (
                 warped_affine_moving_image,
-                affine_transform_vector_field,
+                initial_vector_field,
             ) = run_affine_registration(
                 moving_image=moving_image,
                 fixed_image=fixed_image,
@@ -262,8 +278,6 @@ class VrocRegistration(LoggerMixin):
                 n_iterations=affine_iterations,
                 step_size=affine_step_size,
             )
-        else:
-            affine_transform_vector_field = None
 
         # handle ROIs
         # passed masks overwrite ROI segmenter
@@ -357,7 +371,7 @@ class VrocRegistration(LoggerMixin):
                 moving_mask=moving_mask,
                 fixed_mask=fixed_mask,
                 original_image_spacing=image_spacing,
-                initial_vector_field=affine_transform_vector_field,
+                initial_vector_field=initial_vector_field,
             )
 
         result = RegistrationResult(
@@ -388,6 +402,7 @@ class VrocRegistration(LoggerMixin):
         n_iterations: int,
         moving_image: ArrayOrTensor,
         fixed_image: ArrayOrTensor,
+        boost_scale: float = 1.0,
         moving_keypoints: torch.Tensor | None = None,
         fixed_keypoints: torch.Tensor | None = None,
         moving_labels: torch.Tensor | None = None,
@@ -403,6 +418,7 @@ class VrocRegistration(LoggerMixin):
         fixed_mask: ArrayOrTensor | None = None,
         use_masks: MaybeSequence[bool] = True,
         image_spacing: FloatTuple2D | FloatTuple3D = (1.0, 1.0, 1.0),
+        initial_vector_field: ArrayOrTensor | None = None,
         register_affine: bool = True,
         affine_loss_function: Callable | None = None,
         affine_iterations: int = 300,
@@ -446,6 +462,7 @@ class VrocRegistration(LoggerMixin):
             fixed_mask=fixed_mask,
             use_masks=use_masks,
             image_spacing=image_spacing,
+            initial_vector_field=initial_vector_field,
             register_affine=register_affine,
             affine_loss_function=affine_loss_function,
             affine_iterations=affine_iterations,
@@ -572,10 +589,22 @@ class VrocRegistration(LoggerMixin):
             dice_loss_before_boosting = dice_loss(warped_labels, fixed_labels)
 
         gradient_scaler = torch.cuda.amp.GradScaler()
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            threshold=1e-4,
+            threshold_mode="rel",
+            factor=0.1,
+            patience=10,
+            cooldown=10,
+            min_lr=1e-5,
+        )
 
         if debug:
             from vroc.plot import RegistrationProgressPlotter
 
+            debug_output_folder = Path(debug_output_folder)
+            debug_output_folder.mkdir(exist_ok=True, parents=True)
             plotter = RegistrationProgressPlotter(output_folder=debug_output_folder)
         else:
             plotter = None
@@ -601,14 +630,27 @@ class VrocRegistration(LoggerMixin):
                 # composed_boosted_vector_field = composed_boosted_vector_field.detach()
                 with torch.autocast(device_type="cuda", enabled=True):
 
+                    original_shape = moving_image.shape[2:]
+                    boosting_shape = tuple(
+                        int(round(s * boost_scale)) for s in moving_image.shape[2:]
+                    )
+
                     vector_field_boost = model(
-                        moving_image,
-                        fixed_image,
-                        moving_mask,
-                        fixed_mask,
-                        composed_vector_field,
+                        resize(moving_image, output_shape=boosting_shape, order=1),
+                        resize(fixed_image, output_shape=boosting_shape, order=1),
+                        resize(moving_mask, output_shape=boosting_shape, order=0),
+                        resize(fixed_mask, output_shape=boosting_shape, order=0),
+                        resize(
+                            composed_vector_field, output_shape=boosting_shape, order=1
+                        )
+                        * boost_scale,
                         image_spacing,
                         n_iterations=None if is_train else 100,
+                    )
+                    vector_field_boost = resize(
+                        vector_field_boost / boost_scale,
+                        output_shape=original_shape,
+                        order=1,
                     )
 
                     # start from scratch
@@ -619,7 +661,8 @@ class VrocRegistration(LoggerMixin):
                         )
                     )
 
-                    # # continue with boosted result
+                    # continue with boosted result
+
                     # composed_boosted_vector_field = (
                     #     vector_field_boost
                     #     + model.spatial_transformer(
@@ -734,27 +777,24 @@ class VrocRegistration(LoggerMixin):
                     log.loss = loss
                     log.losses = losses
                     log.loss_weights = loss_weights
-                    if i_iteration == 0 or i_iteration >= n_iterations - 1 or True:
-                        self.logger.debug(log)
+                    log.learning_rate = optimizer.param_groups[0]["lr"]
+                    self.logger.debug(log)
+
             if is_train:
                 gradient_scaler.scale(loss).backward()
                 gradient_scaler.step(optimizer)
                 gradient_scaler.update()
 
+                scheduler.step(loss)
+
             # here we do the debug stuff
-            if debug and i_iteration % debug_step_size == 0:
+            if debug and (
+                i_iteration % debug_step_size == 0 or i_iteration == n_iterations - 1
+            ):
                 spatial_shape = moving_image.shape[2:]
                 n_spatial_dims = len(spatial_shape)
 
                 with torch.inference_mode():
-                    # vector field without affine
-                    boosted_vector_field_without_affine = (
-                        vector_field_boost
-                        + model.spatial_transformer(
-                            registration_result.vector_fields[-1], vector_field_boost
-                        )
-                    )
-
                     # warp moving image and mask
                     warped_moving_image = model.spatial_transformer(
                         moving_image, composed_boosted_vector_field
@@ -769,23 +809,23 @@ class VrocRegistration(LoggerMixin):
                 for i_dim in range(n_spatial_dims):
                     debug_metrics["vector_field"][dim_names[i_dim]] = {
                         "min": float(
-                            torch.min(boosted_vector_field_without_affine[:, i_dim])
+                            torch.min(composed_boosted_vector_field[:, i_dim])
                         ),
-                        "Q0.05": float(
-                            torch.quantile(
-                                boosted_vector_field_without_affine[:, i_dim], 0.05
-                            )
-                        ),
+                        # "Q0.05": float(
+                        #     torch.quantile(
+                        #         boosted_vector_field_without_affine[:, i_dim], 0.05
+                        #     )
+                        # ),
                         "mean": float(
-                            torch.mean(boosted_vector_field_without_affine[:, i_dim])
+                            torch.mean(composed_boosted_vector_field[:, i_dim])
                         ),
-                        "Q0.95": float(
-                            torch.quantile(
-                                boosted_vector_field_without_affine[:, i_dim], 0.95
-                            )
-                        ),
+                        # "Q0.95": float(
+                        #     torch.quantile(
+                        #         boosted_vector_field_without_affine[:, i_dim], 0.95
+                        #     )
+                        # ),
                         "max": float(
-                            torch.max(boosted_vector_field_without_affine[:, i_dim])
+                            torch.max(composed_boosted_vector_field[:, i_dim])
                         ),
                     }
                 i_level = 0
@@ -795,13 +835,14 @@ class VrocRegistration(LoggerMixin):
                     fixed_image=fixed_image,
                     warped_image=warped_moving_image,
                     forces=None,
-                    vector_field=boosted_vector_field_without_affine,
+                    vector_field=composed_boosted_vector_field,
                     moving_mask=moving_mask,
                     fixed_mask=fixed_mask,
                     warped_mask=warped_moving_mask,
                     full_spatial_shape=spatial_shape,
                     stage="boosting",
                     level=i_level,
+                    scale_factor=1.0,
                     iteration=i_iteration,
                     metrics=debug_metrics,
                     output_folder=debug_output_folder,
