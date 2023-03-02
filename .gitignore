@@ -314,3 +314,14 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/python,pycharm+all,linux,macos,windows
+/hyperopt_results_all_cases.pkl
+/hyperopt_results_all_cases_small_tau.pkl
+/hyperopt_results_case01.pkl
+/hyperopt_results_case01_04_08.pkl
+/hyperopt_results_case01_04_08_larger_tau.pkl
+/hyperopt_results_case01_04_08_smaller_tau.pkl
+/hyperopt_results_case04.pkl
+/bin/runs/
+
+l2r_submission/*.zip
+l2r_submission/*.tar.gz

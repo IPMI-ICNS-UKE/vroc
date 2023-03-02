@@ -1,8 +1,9 @@
+import os
 import re
 from pathlib import Path
 
-import SimpleITK as sitk
 import numpy as np
+import SimpleITK as sitk
 
 
 def read_meta(filepath: Path) -> dict:
@@ -39,14 +40,59 @@ def read_image(filepath: Path) -> sitk.Image:
     return image
 
 
+def read_landmarks(filepath: Path) -> np.array:
+    with open(filepath) as f:
+        lines = [tuple(map(float, line.rstrip().split("\t"))) for line in f]
+    return lines
+
+
 if __name__ == "__main__":
-    DIRLAB_FOLDER = Path("/datalake/dirlab2022")
+    DIRLAB_FOLDER = Path("/home/tsentker/data/dirlab2022/")
+    DIRLAB_FOLDER_OLD = Path("/home/tsentker/data/dirlab/Segm_asMHD")
 
-    for image_filepath in sorted(DIRLAB_FOLDER.glob("**/*.img")):
+    # for image_filepath in sorted(DIRLAB_FOLDER.glob("**/*.img")):
+    #
+    #     phase = int(re.search("T(\d\d)", str(image_filepath)).group(1)) // 10
+    #
+    #     print(phase, image_filepath)
+    #     image = read_image(image_filepath)
+    #     output_filepath = image_filepath.parent / f"phase_{phase}.mha"
+    #     sitk.WriteImage(image, str(output_filepath))
 
-        phase = int(re.search("T(\d\d)", str(image_filepath)).group(1)) // 10
+    # for f in sorted(DIRLAB_FOLDER_OLD.glob("**/**/*Lungs.mhd")):
+    #     case = int(re.search("Case(\d\d)", str(f)).group(1))
+    #     phase = int(re.search("T(\d\d)", str(f)).group(1)) // 10
+    #     output_filepath = os.path.join(DIRLAB_FOLDER, 'data', f'Case{case:02d}Pack', 'segmentation', f'mask_{phase}.mha')
+    #     segm = sitk.ReadImage(str(f))
+    #     segm_arr = sitk.GetArrayFromImage(segm)
+    #     segm_arr = np.flip(segm_arr, axis=0)
+    #     segm_img = sitk.GetImageFromArray(segm_arr)
+    #     segm_img.SetSpacing(segm.GetSpacing())
+    #     # segm_img.SetOrigin((0.0, 0.0, 0.0))
+    #     segm_img = sitk.Cast(segm_img, sitk.sitkInt8)
+    #     sitk.WriteImage(segm_img, str(output_filepath))
+    #     print(f, output_filepath)
+    #     # break
 
-        print(phase, image_filepath)
-        image = read_image(image_filepath)
-        output_filepath = image_filepath.parent / f"phase_{phase}.mha"
-        sitk.WriteImage(image, str(output_filepath))
+    dirlab_cases = np.arange(1, 11)
+    for case in dirlab_cases:
+        ref_img = sitk.ReadImage(
+            os.path.join(DIRLAB_FOLDER, f"data/Case{case:02d}Pack/Images/phase_0.mha")
+        )
+        for lms_filepath in sorted(
+            DIRLAB_FOLDER.glob(f"data/Case{case:02d}Pack/**/*xyz.txt")
+        ):
+            lms = read_landmarks(lms_filepath)
+            lms_fixed = np.array(
+                [(p[0], p[1], ref_img.GetSize()[2] - p[2]) for p in lms]
+            )
+            phase = (
+                int(re.search("T(\d\d)", str(os.path.split(lms_filepath)[1])).group(1))
+                // 10
+            )
+            np.savetxt(
+                os.path.join(os.path.split(lms_filepath)[0], f"landmarks_{phase}.txt"),
+                lms_fixed,
+                delimiter="\t",
+                fmt="%d",
+            )
