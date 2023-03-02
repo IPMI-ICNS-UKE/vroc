@@ -7,7 +7,13 @@ import scipy.ndimage as ndi
 import torch
 import torch.nn.functional as F
 
-from vroc.common_types import ArrayOrTensor
+from vroc.common_types import ArrayOrTensor, IntTuple3D
+
+LINEAR_INTERPOLATION_MODES = {
+    1: "linear",
+    2: "bilinear",
+    3: "trilinear",
+}
 
 
 def _resize_torch(
@@ -17,14 +23,7 @@ def _resize_torch(
         raise NotImplementedError(
             "Currently only nearest and linear interpolation is implemented"
         )
-
-    LINEAR_INTERPOLATION_MODES = {
-        3: "linear",
-        4: "bilinear",
-        5: "trilinear",
-    }
-
-    mode = LINEAR_INTERPOLATION_MODES[image.ndim] if order == 1 else "nearest"
+    mode = LINEAR_INTERPOLATION_MODES[image.ndim - 2] if order == 1 else "nearest"
 
     # pytorch can only resample float32
     if (dtype := image.dtype) != torch.float32:
@@ -84,6 +83,38 @@ def resize(
         image = image.to(dtype)
 
     return image
+
+
+def match_vector_field(
+    vector_field: torch.Tensor,
+    image: torch.Tensor | None = None,
+    image_shape: IntTuple3D | None = None,
+) -> torch.Tensor:
+    if image is not None and vector_field.ndim != image.ndim:
+        raise ValueError("Dimension mismatch")
+    if image is not None and image_shape is not None:
+        raise ValueError("Please either pass image or image_shape")
+
+    vector_field_shape = vector_field.shape
+    if image is not None:
+        image_shape = image.shape
+    else:
+        image_shape = (1, 1, *image_shape)
+
+    if vector_field_shape[2:] == image_shape[2:]:
+        # vector field and image are already the same size
+        return vector_field
+
+    vector_field = resize(vector_field, output_shape=image_shape[2:], order=1)
+
+    # scale factor to scale the vector field values
+    scale_factor = torch.tensor(
+        [s1 / s2 for (s1, s2) in zip(image_shape[2:], vector_field_shape[2:])]
+    )
+    # 5D shape: (1, 3, 1, 1, 1), 4D shape: (1, 2, 1, 1)
+    scale_factor = torch.reshape(scale_factor, (1, -1) + (1,) * (len(image_shape) - 2))
+
+    return vector_field * scale_factor.to(vector_field)
 
 
 def rescale(image: ArrayOrTensor, factor: float, order: int = 1):

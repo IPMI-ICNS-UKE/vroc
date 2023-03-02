@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vroc.blocks import SpatialTransformer
-from vroc.common_types import IntTuple3D
+from vroc.common_types import FloatTuple3D, IntTuple3D
 from vroc.helper import to_one_hot
 
 
@@ -32,7 +32,7 @@ class TRELoss(nn.Module):
         vector_field: torch.Tensor,
         moving_landmarks: torch.Tensor,
         fixed_landmarks: torch.Tensor,
-        image_spacing: torch.Tensor,
+        image_spacing: torch.Tensor | FloatTuple3D,
     ):
         # vector_field: shape of (1, 3, x_dim, y_dim, z_dim), values are in voxel
         # displacement (i.e. not torch grid_sample convention [-1, 1])
@@ -59,6 +59,9 @@ class TRELoss(nn.Module):
         # distances will be float32 as displacements is float32
         distances = (fixed_landmarks + displacements) - moving_landmarks
         # scale x, x, z distance component with image spacing
+        image_spacing = torch.as_tensor(
+            image_spacing, dtype=torch.float32, device=distances.device
+        )
         distances = distances * image_spacing
         distances = distances.pow(2).sum(dim=-1)
 

@@ -6,7 +6,7 @@ from collections.abc import MutableSequence
 from math import ceil
 from multiprocessing import Queue
 from pathlib import Path
-from typing import Any, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Sequence, Tuple
 
 import numpy as np
 import SimpleITK as sitk
@@ -21,6 +21,10 @@ from vroc.common_types import (
     IntTuple3D,
     PathLike,
 )
+from vroc.decorators import convert
+
+if TYPE_CHECKING:
+    from vroc.registration import RegistrationResult
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +592,35 @@ def check_mask_validity(
     moving_image[fixed_mask & ~moving_mask].std() == 0
 
     return
+
+
+def write_vector_field(
+    vector_field: np.ndarray,
+    output_filepath: PathLike,
+):
+    vector_field = np.swapaxes(vector_field, 1, 3)
+    vector_field = sitk.GetImageFromArray(vector_field, isVector=False)
+
+    sitk.WriteImage(vector_field, str(output_filepath))
+
+
+@convert("output_folder", converter=Path)
+def write_registration_result(
+    registration_result: RegistrationResult, output_folder: PathLike
+):
+    output_folder: Path
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    # write warped image
+    warped_image = np.swapaxes(registration_result.warped_moving_image, 0, 2)
+    warped_image = sitk.GetImageFromArray(warped_image)
+
+    sitk.WriteImage(warped_image, str(output_folder / "warped_image.nii"))
+
+    write_vector_field(
+        vector_field=registration_result.composed_vector_field,
+        output_filepath=output_folder / "vector_field.nii",
+    )
 
 
 if __name__ == "__main__":

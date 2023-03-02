@@ -3,9 +3,11 @@ from __future__ import annotations
 from abc import ABC
 from typing import Literal, Optional, Tuple, Type, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 from torch.nn.parameter import Parameter
 
 from vroc.common_types import (
@@ -1145,14 +1147,123 @@ class DynamicRegularization3d(nn.Module):
         return weighted_regularization
 
 
+# class NormedConv1d(nn.Conv1d):
+#     def forward(self, input: Tensor) -> Tensor:
+#         result = self._conv_forward(input, self.weight, self.bias)
+#
+#         with torch.no_grad():
+#             input_mean = input.mean(dim=(-1,), keepdim=True)
+#             result_mean = result.mean(dim=(-1,), keepdim=True)
+#             norm = result_mean / input_mean
+#
+#         result = result / norm
+#
+#         return result
+#
+#
+# class NormedConv3d(nn.Conv3d):
+#     def forward(self, input: Tensor, input_mean: Tensor | None = None) -> Tensor:
+#         result = self._conv_forward(input, self.weight, self.bias)
+#
+#         with torch.no_grad():
+#             if input_mean is None:
+#                 input_mean = input.mean(dim=(-1, -2, -3), keepdim=True)
+#             result_mean = result.mean(dim=(-1, -2, -3), keepdim=True)
+#             norm = result_mean / input_mean
+#
+#         result = result / norm
+#
+#         return result
+
+
+class NormedConv1d(nn.Conv1d):
+    def __init__(
+        self,
+        in_channels: int,
+        kernel_size,
+        stride=1,
+        padding=0,
+        dilation=1,
+        padding_mode: str = "zeros",
+        device=None,
+        dtype=None,
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=in_channels,
+            bias=False,
+            padding_mode=padding_mode,
+            device=device,
+            dtype=dtype,
+        )
+
+    def forward(self, input: Tensor) -> Tensor:
+        kernel_norm = self.weight.sum(dim=-1, keepdim=True)
+        result = self._conv_forward(input, self.weight / kernel_norm, self.bias)
+
+        return result
+
+
+class NormedConv3d(nn.Conv3d):
+    def __init__(
+        self,
+        in_channels: int,
+        kernel_size,
+        stride=1,
+        padding=0,
+        dilation=1,
+        padding_mode: str = "zeros",
+        device=None,
+        dtype=None,
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=in_channels,
+            bias=False,
+            padding_mode=padding_mode,
+            device=device,
+            dtype=dtype,
+        )
+
+    def forward(self, input: Tensor) -> Tensor:
+        kernel_norm = self.weight.sum(dim=(-3, -2, -1), keepdim=True)
+        result = self._conv_forward(input, self.weight / kernel_norm, self.bias)
+
+        return result
+
+
 if __name__ == "__main__":
-    moving = torch.rand((1, 1, 32, 32, 32)).to("cuda")
-    fixed = torch.rand((1, 1, 32, 32, 32)).to("cuda")
+    # moving = torch.rand((1, 1, 32, 32, 32)).to("cuda")
+    # fixed = torch.rand((1, 1, 32, 32, 32)).to("cuda")
 
-    vf = torch.rand((1, 3, 32, 32, 32)).to("cuda")
+    conv = NormedConv3d(
+        in_channels=3, kernel_size=4, padding="same", padding_mode="reflect"
+    ).to("cuda")
+    # # nn.init.ones_(conv.weight)
+    # inp = torch.rand((1, 2, 6)).to("cuda")
+    # inp[:, 1] *= 10
+    # out = inp
+    # print(inp.mean(dim=-1))
+    # for i in range(10):
+    #     print(f"*** {i}")
+    #     out = conv(out)
+    #     print(out)
+    #     print(out.mean(dim=-1))
 
-    r = DynamicRegularization3d(n_levels=3, filter_base=16).to("cuda")
-    rr = r(vf, moving, fixed)
+    # vf = torch.rand((1, 3, 32, 32, 32)).to("cuda")
+    #
+    # r = DynamicRegularization3d(n_levels=3, filter_base=16).to("cuda")
+    # rr = r(vf, moving, fixed)
 
     # import time
     #
