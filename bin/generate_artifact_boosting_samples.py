@@ -14,7 +14,7 @@ import uuid
 import torch
 import yaml
 
-from vroc.dataset import Lung4DRegistrationDataset
+from vroc.dataset import Lung4DCTRegistrationDataset
 from vroc.helper import (
     compute_tre_numpy,
     get_bounding_box,
@@ -101,7 +101,7 @@ if __name__ == "__main__":
         if filter_by_metadata(patient, filter_func=has_no_artifacts)
     ]
 
-    train_dataset = Lung4DRegistrationDataset(
+    train_dataset = Lung4DCTRegistrationDataset(
         patient_folders=patients_no_artifacts,
         phases=(0, 5),
         train_size=1.0,

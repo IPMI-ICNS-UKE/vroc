@@ -204,7 +204,7 @@ for i_epoch in range(n_epochs):
 
         debug = True
         if debug:
-            debug_folder = Path(f"/datalake/copd_dirlab2022/debug/{int(time.time())}")
+            debug_folder = Path(f"{ROOT_DIR}/{FOLDER}/debug/{int(time.time())}")
         else:
             debug_folder = None
 

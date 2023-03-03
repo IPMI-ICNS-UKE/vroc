@@ -16,11 +16,19 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 import yaml
+from ipmi.common.logger import LoggerMixin
 from scipy.ndimage.morphology import binary_dilation
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, IterableDataset
 
-from vroc.common_types import FloatTuple3D, IntTuple3D, Number, PathLike, SlicingTuple3D
+from vroc.common_types import (
+    FloatTuple2D,
+    FloatTuple3D,
+    IntTuple3D,
+    Number,
+    PathLike,
+    SlicingTuple3D,
+)
 from vroc.decorators import convert
 from vroc.hashing import hash_path
 from vroc.helper import (
@@ -372,110 +380,59 @@ class Lung4DArtifactBoostingDataset(DatasetMixin, Dataset):
         return image_data | registration_data
 
 
-class Lung4DRegistrationDataset(DatasetMixin, Dataset):
-    """The folder/file structure of each passed patient has to match the
-    following pattern:
-
-        patient_folder/
-    ├── masks
-    │  ├── lung_phase_09.nii.gz
-    │  ├── lung_phase_08.nii.gz
-    │  ├── lung_phase_07.nii.gz
-    │  ├── lung_phase_06.nii.gz
-    │  ├── lung_phase_05.nii.gz
-    │  ├── lung_phase_04.nii.gz
-    │  ├── lung_phase_03.nii.gz
-    │  ├── lung_phase_02.nii.gz
-    │  ├── lung_phase_01.nii.gz
-    │  └── lung_phase_00.nii.gz
-    ├── keypoints
-    │  ├── moving_keypoints_09_to_08.csv
-    │  ├── moving_keypoints_09_to_07.csv
-    │  ├── ... (without identity, i.e., moving_keypoints_i_to_i.csv)
-    │  ├── moving_keypoints_00_to_02.csv
-    │  ├── moving_keypoints_00_to_01.csv
-    │  ├── fixed_keypoints_09_to_08.csv
-    │  ├── fixed_keypoints_09_to_07.csv
-    │  ├── ... (without identity, i.e., fixed_keypoints_i_to_i.csv)
-    │  ├── fixed_keypoints_00_to_02.csv
-    │  └── fixed_keypoints_00_to_01.csv
-    ├── phase_09.nii
-    ├── phase_08.nii
-    ├── phase_07.nii
-    ├── phase_06.nii
-    ├── phase_05.nii
-    ├── phase_04.nii
-    ├── phase_03.nii
-    ├── phase_02.nii
-    ├── phase_01.nii
-    ├── phase_00.nii
-    ├── metadata.yml
-    └── average.nii
-    """
-
+class Lung4DCTRegistrationDataset(DatasetMixin, LoggerMixin, Dataset):
     def __init__(
         self,
-        patient_folders: List[Path],
-        phases: Tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
-        input_value_range: Tuple[float, float] | None = (-1024.0, 3071.0),
-        output_value_range: Tuple[float, float] | None = (0.0, 1.0),
-        i_worker: Optional[int] = None,
-        n_worker: Optional[int] = None,
-        is_train: bool = True,
-        train_size: float = 1.0,
-        dilate_masks: int = 0,
+        patient_folders: Sequence[Path],
+        phases: Sequence[int] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        input_value_range: FloatTuple2D | None = (-1024.0, 3071.0),
+        output_value_range: FloatTuple2D | None = (-1024.0, 3071.0),
+        output_image_spacing: FloatTuple3D | None = None,
+        ignore_missing_files: bool = True,
     ):
         self.patient_folders = patient_folders
         self.phases = phases
-        self.filepaths = self.collect_filepaths(self.patient_folders)
         self.input_value_range = input_value_range
         self.output_value_range = output_value_range
+        self.output_image_spacing = output_image_spacing
+        self.ignore_missing_files = ignore_missing_files
 
-        # filepaths = []
-        # for files in collected_files:
-        #     moving_mask = files["patient_folder"] / "masks/lung_phase_05.nii.gz"
-        #     fixed_mask = files["patient_folder"] / "masks/lung_phase_00.nii.gz"
-        #     moving_keypoints = (
-        #         files["patient_folder"] / "keypoints/moving_keypoints_05_to_00.csv"
-        #     )
-        #     fixed_keypoints = (
-        #         files["patient_folder"] / "keypoints/fixed_keypoints_05_to_00.csv"
-        #     )
-        #
-        #     filepaths.append(
-        #         {
-        #             "patient": files["patient_folder"],
-        #             "moving_image": files[5],  # phase 5 / max exhale
-        #             "fixed_image": files[0],  # phase 0 / max inhale
-        #             "moving_mask": moving_mask,
-        #             "fixed_mask": fixed_mask,
-        #             "moving_keypoints": moving_keypoints,
-        #             "fixed_keypoints": fixed_keypoints,
-        #         }
-        #     )
-        #
-        # if train_size < 1.0:
-        #     train_filepaths, test_filepaths = train_test_split(
-        #         filepaths, train_size=train_size, random_state=1337
-        #     )
-        #     self.filepaths = train_filepaths if is_train else test_filepaths
-        # else:
-        #     self.filepaths = filepaths
-        #
-        # self.i_worker = i_worker
-        # self.n_worker = n_worker
-        # self.dilate_masks = dilate_masks
-        #
-        # if i_worker is not None and n_worker is not None:
-        #     self.filepaths = self.filepaths[self.i_worker :: self.n_worker]
+        self.filepaths = self.collect_filepaths(self.patient_folders)
 
-    def collect_filepaths(self, folders: List[Path]) -> List[dict]:
-        def _assert_exists(path: Path) -> Path:
-            if not path.exists():
+    @classmethod
+    def from_folder(
+        cls,
+        folder: PathLike,
+        phases: Sequence[int] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        input_value_range: FloatTuple2D | None = (-1024.0, 3071.0),
+        output_value_range: FloatTuple2D | None = (-1024.0, 3071.0),
+        output_image_spacing: FloatTuple3D | None = None,
+        ignore_missing_files: bool = True,
+    ):
+        patient_folders = sorted([p for p in Path(folder).glob("*") if p.is_dir()])
+
+        return cls(
+            patient_folders=patient_folders,
+            phases=phases,
+            input_value_range=input_value_range,
+            output_value_range=output_value_range,
+            output_image_spacing=output_image_spacing,
+            ignore_missing_files=ignore_missing_files,
+        )
+
+    def _assert_exists(
+        self, path: Path, ignore_missing_files: bool = False
+    ) -> Path | None:
+        if not path.exists():
+            if ignore_missing_files:
+                self.logger.warn(f"File {path} not found. Skipping.")
+                path = None
+            else:
                 raise FileNotFoundError(f"File {path} not found")
 
-            return path
+        return path
 
+    def collect_filepaths(self, folders: Sequence[Path]) -> List[dict]:
         collected = []
         for folder in folders:
             _collected = {
@@ -484,46 +441,54 @@ class Lung4DRegistrationDataset(DatasetMixin, Dataset):
                 "images": {},
                 "masks": {},
                 "keypoints": {},
+                "landmarks": {},
                 "meta": {},
             }
 
             # add phase images
+            image_folder = folder / "images"
             for phase in self.phases:
-                _collected["images"][phase] = _assert_exists(
-                    folder / f"phase_{phase:02d}.nii"
+                _collected["images"][phase] = self._assert_exists(
+                    image_folder / f"phase_{phase:02d}.nii",
+                    ignore_missing_files=self.ignore_missing_files,
                 )
 
             # add masks
             masks_folder = folder / "masks"
             for phase in self.phases:
-                _collected["masks"][phase] = _assert_exists(
-                    masks_folder / f"lung_phase_{phase:02d}.nii.gz"
+                _collected["masks"][phase] = self._assert_exists(
+                    masks_folder / f"lung_phase_{phase:02d}.nii.gz",
+                    ignore_missing_files=self.ignore_missing_files,
                 )
 
-            # add keypoints
-            keypoints_folder = folder / "keypoints"
-            for moving_phase, fixed_phase in itertools.product(
-                self.phases, self.phases
-            ):
-                if moving_phase == fixed_phase:
-                    # skip identity
-                    continue
+            # add keypoints and landmarks
+            for keypoint_or_landmark in ("keypoints", "landmarks"):
+                for moving_phase, fixed_phase in itertools.product(
+                    self.phases, self.phases
+                ):
+                    if moving_phase == fixed_phase:
+                        # skip identity
+                        continue
 
-                _collected["keypoints"][(moving_phase, fixed_phase)] = []
+                    _collected[keypoint_or_landmark][(moving_phase, fixed_phase)] = []
 
-                for moving_or_fixed in ("moving", "fixed"):
-                    keypoints_name = f"{moving_or_fixed}_keypoints_{moving_phase:02d}_to_{fixed_phase:02d}"
-                    _collected["keypoints"][(moving_phase, fixed_phase)].append(
-                        _assert_exists(keypoints_folder / f"{keypoints_name}.csv")
+                    for moving_or_fixed in ("moving", "fixed"):
+                        filename = f"{moving_or_fixed}_{keypoint_or_landmark}_{moving_phase:02d}_to_{fixed_phase:02d}"
+                        _collected[keypoint_or_landmark][
+                            (moving_phase, fixed_phase)
+                        ].append(
+                            self._assert_exists(
+                                folder / keypoint_or_landmark / f"{filename}.csv",
+                                ignore_missing_files=self.ignore_missing_files,
+                            )
+                        )
+                    _collected[keypoint_or_landmark][
+                        (moving_phase, fixed_phase)
+                    ] = tuple(
+                        _collected[keypoint_or_landmark][(moving_phase, fixed_phase)]
                     )
-                _collected["keypoints"][(moving_phase, fixed_phase)] = tuple(
-                    _collected["keypoints"][(moving_phase, fixed_phase)]
-                )
 
-            # add average
-            _collected["images"]["average"] = _assert_exists(folder / f"average.nii")
-
-            if (meta_filepath := folder / "metadata.yml").exists():
+            if (meta_filepath := folder / "metadata.yaml").exists():
                 # load metadata if file exists, otherwise empty
                 with open(meta_filepath, "r") as f:
                     _collected["meta"] = yaml.safe_load(f)
@@ -532,147 +497,136 @@ class Lung4DRegistrationDataset(DatasetMixin, Dataset):
 
         return collected
 
-    def _load_image(self, path: Path, is_mask: bool = False) -> Tuple[np.ndarray, dict]:
-        image = sitk.ReadImage(str(path))
+    @staticmethod
+    def resample_image_spacing(
+        image: sitk.Image,
+        new_spacing: FloatTuple3D,
+        resampler=sitk.sitkLinear,
+        default_voxel_value: Number = 0.0,
+    ):
+        original_spacing = image.GetSpacing()
+        original_size = image.GetSize()
+        new_size = [
+            int(round(original_size[0] * (original_spacing[0] / new_spacing[0]))),
+            int(round(original_size[1] * (original_spacing[1] / new_spacing[1]))),
+            int(round(original_size[2] * (original_spacing[2] / new_spacing[2]))),
+        ]
+        resampled = sitk.Resample(
+            image,
+            new_size,
+            sitk.Transform(),
+            resampler,
+            image.GetOrigin(),
+            new_spacing,
+            image.GetDirection(),
+            default_voxel_value,
+            image.GetPixelID(),
+        )
+        return resampled
 
-        meta = {
-            "filepath": str(path),
-            "image_spacing": image.GetSpacing(),
-            "image_direction": image.GetDirection(),
-            "image_origin": image.GetOrigin(),
-        }
-
-        image = sitk.GetArrayFromImage(image)
-        image = np.swapaxes(image, 0, 2)
-
-        if is_mask:
-            image = np.asarray(image, dtype=bool)
+    def _load_image(
+        self, path: Path, is_mask: bool = False
+    ) -> Tuple[np.ndarray | None, dict]:
+        if not path:
+            image, meta = None, {}
         else:
-            image = np.asarray(image, dtype=np.float32)
-            if self.input_value_range and self.output_value_range:
-                image = rescale_range(
-                    image,
-                    input_range=self.input_value_range,
-                    output_range=self.output_value_range,
-                    clip=True,
+            image = sitk.ReadImage(str(path))
+
+            meta = {
+                "filepath": str(path),
+                "original_image_spacing": image.GetSpacing(),
+                "original_image_direction": image.GetDirection(),
+                "original_image_origin": image.GetOrigin(),
+            }
+
+            if (
+                self.output_image_spacing
+                and self.output_image_spacing != image.GetSpacing()
+            ):
+                interpolator = sitk.sitkNearestNeighbor if is_mask else sitk.sitkLinear
+                default_voxel_value = 0 if is_mask else self.input_value_range[0]
+
+                image = self.resample_image_spacing(
+                    image=image,
+                    new_spacing=self.output_image_spacing,
+                    resampler=interpolator,
+                    default_voxel_value=default_voxel_value,
                 )
+
+            meta.update(
+                {
+                    "image_spacing": image.GetSpacing(),
+                    "image_direction": image.GetDirection(),
+                    "image_origin": image.GetOrigin(),
+                }
+            )
+
+            image = sitk.GetArrayFromImage(image)
+            image = np.swapaxes(image, 0, 2)
+
+            if is_mask:
+                image = np.asarray(image, dtype=bool)
+            else:
+                image = np.asarray(image, dtype=np.float32)
+                if self.input_value_range and self.output_value_range:
+                    image = rescale_range(
+                        image,
+                        input_range=self.input_value_range,
+                        output_range=self.output_value_range,
+                        clip=True,
+                    )
 
         return image, meta
 
     def _load_keypoints(self, path: Path) -> np.ndarray:
-        return read_landmarks(path)
+        return read_landmarks(path) if path else None
 
     def __len__(self):
         return len(self.filepaths)
 
     def __getitem__(self, item):
-        images = {}
-        masks = {}
-        keypoints = {}
+        data = {
+            "patient": self.filepaths[item]["patient"],
+            "folder": self.filepaths[item]["folder"],
+            "meta": self.filepaths[item]["meta"],
+            "images": {},
+            "masks": {},
+            "keypoints": {},
+            "landmarks": {},
+        }
+
         for phase in self.phases:
             image, meta = self._load_image(self.filepaths[item]["images"][phase])
-            images[phase] = (image, meta)
+            data["images"][phase] = {"data": image, "meta": meta}
 
-            mask, meta = self._load_image(self.filepaths[item]["masks"][phase])
-            masks[phase] = (mask, meta)
+            mask, meta = self._load_image(
+                self.filepaths[item]["masks"][phase], is_mask=True
+            )
+            data["masks"][phase] = {"data": mask, "meta": meta}
 
             for other_phase in self.phases:
                 if phase == other_phase:
                     continue
                 # moving phase, fixed phase
                 phase_combination = (phase, other_phase)
-                moving_keypoints = self._load_keypoints(
-                    self.filepaths[item]["keypoints"][(phase, other_phase)][0]
-                )
-                fixed_keypoints = self._load_keypoints(
-                    self.filepaths[item]["keypoints"][(phase, other_phase)][1]
-                )
+                for keypoint_or_landmark in ("keypoints", "landmarks"):
+                    moving_keypoints = self._load_keypoints(
+                        self.filepaths[item][keypoint_or_landmark][
+                            (phase, other_phase)
+                        ][0]
+                    )
+                    fixed_keypoints = self._load_keypoints(
+                        self.filepaths[item][keypoint_or_landmark][
+                            (phase, other_phase)
+                        ][1]
+                    )
 
-                keypoints[phase_combination] = (moving_keypoints, fixed_keypoints)
+                    data[keypoint_or_landmark][phase_combination] = (
+                        moving_keypoints,
+                        fixed_keypoints,
+                    )
 
-        return {
-            "patient": self.filepaths[item]["patient"],
-            "folder": self.filepaths[item]["folder"],
-            "meta": self.filepaths[item]["meta"],
-            "images": images,
-            "masks": masks,
-            "keypoints": keypoints,
-        }
-
-    # def __getitem__(self, item):
-    #     fixed_image = Lung4DRegistrationDataset.load_and_preprocess(
-    #         self.filepaths[item]["fixed_image"]
-    #     )
-    #     moving_image = Lung4DRegistrationDataset.load_and_preprocess(
-    #         self.filepaths[item]["moving_image"]
-    #     )
-    #     fixed_mask = Lung4DRegistrationDataset.load_and_preprocess(
-    #         self.filepaths[item]["fixed_mask"], is_mask=True
-    #     )
-    #     moving_mask = Lung4DRegistrationDataset.load_and_preprocess(
-    #         self.filepaths[item]["moving_mask"], is_mask=True
-    #     )
-    #
-    #     moving_keypoints = read_landmarks(
-    #         self.filepaths[item]["moving_keypoints"], sep=","
-    #     )
-    #     fixed_keypoints = read_landmarks(
-    #         self.filepaths[item]["fixed_keypoints"], sep=","
-    #     )
-    #
-    #     image_spacing = fixed_image.GetSpacing()
-    #     image_shape = fixed_image.GetSize()
-    #     image_direction = fixed_image.GetDirection()
-    #     if not self.as_sitk:
-    #         image_spacing = np.array(image_spacing)
-    #
-    #         moving_image = sitk.GetArrayFromImage(moving_image)
-    #         fixed_image = sitk.GetArrayFromImage(fixed_image)
-    #         moving_mask = sitk.GetArrayFromImage(moving_mask)
-    #         fixed_mask = sitk.GetArrayFromImage(fixed_mask)
-    #
-    #         # flip axes
-    #         moving_image = np.swapaxes(moving_image, 0, 2)
-    #         fixed_image = np.swapaxes(fixed_image, 0, 2)
-    #         moving_mask = np.swapaxes(moving_mask, 0, 2)
-    #         fixed_mask = np.swapaxes(fixed_mask, 0, 2)
-    #
-    #         # fill holes if any
-    #         moving_mask = binary_fill_holes(moving_mask)
-    #         fixed_mask = binary_fill_holes(fixed_mask)
-    #
-    #         if self.dilate_masks:
-    #             moving_mask = binary_dilation(
-    #                 moving_mask.astype(np.uint8), iterations=1
-    #             ).astype(np.uint8)
-    #             fixed_mask = binary_dilation(
-    #                 fixed_mask.astype(np.uint8), iterations=1
-    #             ).astype(np.uint8)
-    #
-    #         image_shape = np.array(image_shape)
-    #         image_direction = np.array(image_direction)
-    #
-    #         fixed_image = np.asarray(fixed_image[np.newaxis], dtype=np.float32)
-    #         moving_image = np.asarray(moving_image[np.newaxis], dtype=np.float32)
-    #         fixed_mask = np.asarray(fixed_mask[np.newaxis], dtype=np.float32)
-    #         moving_mask = np.asarray(moving_mask[np.newaxis], dtype=np.float32)
-    #
-    #     data = {
-    #         "patient": str(self.filepaths[item]["patient"]),
-    #         "moving_image_name": str(self.filepaths[item]["moving_image"]),
-    #         "fixed_image_name": str(self.filepaths[item]["fixed_image"]),
-    #         "moving_image": moving_image,
-    #         "fixed_image": fixed_image,
-    #         "moving_mask": moving_mask,
-    #         "fixed_mask": fixed_mask,
-    #         "moving_keypoints": moving_keypoints,
-    #         "fixed_keypoints": fixed_keypoints,
-    #         "image_shape": image_shape,
-    #         "image_spacing": image_spacing,
-    #         "image_direction": image_direction,
-    #     }
-    #
-    #     return data
+        return data
 
 
 class NLSTDataset(DatasetMixin, Dataset):
@@ -905,12 +859,14 @@ class AutoencoderDataset(DatasetMixin, Dataset):
 
 
 if __name__ == "__main__":
-    # dataset = Lung4DArtifactBoostingDataset(
-    #     patient_folders=list(Path("/datalake_fast/vroc_artifact_boosting/v1").glob("*"))
-    # )
-    # data = dataset[0]
-
-    patient_folders = sorted(
-        list(Path("/datalake_fast/4d_ct_lung_uke_artifact_free").glob("*"))
+    dataset_dirlab_copdgene = Lung4DCTRegistrationDataset.from_folder(
+        "/datalake/dirlab_copdgene/converted",
+        phases=(0, 5),
+        output_image_spacing=(1.0, 1.0, 1.0),
     )
-    dataset = Lung4DRegistrationDataset(patient_folders=patient_folders)
+    dataset_dirlab_4dct = Lung4DCTRegistrationDataset.from_folder(
+        "/datalake/dirlab_4dct/converted", output_image_spacing=(1.0, 1.0, 1.0)
+    )
+
+    d = dataset_dirlab_copdgene[0]
+    dd = dataset_dirlab_4dct[0]

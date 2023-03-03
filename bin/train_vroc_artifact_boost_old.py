@@ -11,7 +11,7 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader
 
 from vroc.blocks import SpatialTransformer
-from vroc.dataset import Lung4DRegistrationDataset
+from vroc.dataset import Lung4DCTRegistrationDataset
 from vroc.helper import (
     get_bounding_box,
     get_robust_bounding_box_3d,
@@ -419,12 +419,12 @@ if __name__ == "__main__":
         if filter_by_metadata(patient, filter_func=has_no_artifacts)
     ]
 
-    train_dataset = Lung4DRegistrationDataset(
+    train_dataset = Lung4DCTRegistrationDataset(
         patient_folders=patients_no_artifacts,
         train_size=0.80,
         is_train=True,
     )
-    test_dataset = Lung4DRegistrationDataset(
+    test_dataset = Lung4DCTRegistrationDataset(
         patient_folders=patients_no_artifacts,
         train_size=0.80,
         is_train=False,

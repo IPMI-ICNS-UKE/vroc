@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from collections.abc import MutableSequence
@@ -127,6 +128,15 @@ def read_landmarks(filepath: PathLike, sep: str | None = None) -> np.ndarray:
     return np.array(lines, dtype=np.float32)
 
 
+def write_landmarks(landmarks: np.ndarray, filepath: PathLike, sep: str | None = ","):
+    np.savetxt(
+        filepath,
+        landmarks,
+        delimiter=sep,
+        fmt="%.3f",
+    )
+
+
 def compute_tre_numpy(
     moving_landmarks: np.ndarray,
     fixed_landmarks: np.ndarray,
@@ -229,7 +239,7 @@ def compute_tre_sitk(
 def rescale_range(
     values: ArrayOrTensor, input_range: Tuple, output_range: Tuple, clip: bool = True
 ):
-    if input_range and output_range:
+    if input_range and output_range and (input_range != output_range):
         is_tensor = isinstance(values, torch.Tensor)
         in_min, in_max = input_range
         out_min, out_max = output_range
@@ -623,10 +633,22 @@ def write_registration_result(
     )
 
 
-if __name__ == "__main__":
-    labels = torch.ones((1, 1, 10))
-    labels[..., 0:3] = 0
-    labels[..., 3:6] = 1
-    labels[..., 6:] = 2
+def calculate_sha256_checksum(filepath: PathLike) -> str:
+    hasher = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
-    l = to_one_hot(labels, n_classes=3)
+
+if __name__ == "__main__":
+    from pprint import pprint
+
+    hashes = {
+        i: calculate_sha256_checksum(
+            f"/datalake/dirlab_copdgene/original_data/copd{i}.zip"
+        )
+        for i in range(1, 11)
+    }
+
+    pprint(hashes)

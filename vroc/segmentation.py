@@ -6,6 +6,7 @@ from typing import Tuple
 
 import numpy as np
 import scipy.ndimage as ndi
+import SimpleITK as sitk
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -285,7 +286,7 @@ class LungSegmenter3D:
         self.model = model.to(device)
         self.device = device
 
-    def segment(self, image: np.ndarray, subsample: float = 1.5) -> np.ndarray:
+    def _segment(self, image: np.ndarray, subsample: float = 1.5) -> np.ndarray:
         image = np.asarray(image, dtype=np.float32)
         if image.ndim != 3:
             raise ValueError("Please pass a 3D image")
@@ -323,6 +324,28 @@ class LungSegmenter3D:
         prediction = prediction > 0.5
 
         return prediction
+
+    def segment(
+        self, image: np.ndarray | sitk.Image, subsample: float = 1.5
+    ) -> np.ndarray | sitk.Image:
+        if isinstance(image, sitk.Image):
+            image_spacing = image.GetSpacing()
+            image_direction = image.GetDirection()
+            image_origin = image.GetOrigin()
+
+            image_arr = sitk.GetArrayFromImage(image)
+            image_arr = np.swapaxes(image_arr, 0, 2)
+            segmentation = self._segment(image=image_arr, subsample=subsample)
+            segmentation = np.swapaxes(segmentation, 0, 2)
+            segmentation = sitk.GetImageFromArray(segmentation.astype(np.uint8))
+            segmentation.SetSpacing(image_spacing)
+            segmentation.SetDirection(image_direction)
+            segmentation.SetOrigin(image_origin)
+
+        else:
+            segmentation = self._segment(image, subsample=subsample)
+
+        return segmentation
 
 
 if __name__ == "__main__":

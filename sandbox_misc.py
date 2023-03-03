@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from vroc.dataset import Lung4DRegistrationDataset
+from vroc.dataset import Lung4DCTRegistrationDataset
 from vroc.helper import get_robust_bounding_box_3d
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ patients_no_artifacts = [
 ]
 
 
-dataset = Lung4DRegistrationDataset(patient_folders=patients_no_artifacts)
+dataset = Lung4DCTRegistrationDataset(patient_folders=patients_no_artifacts)
 
 for data in dataset:
     moving_image = data["moving_image"][0]
