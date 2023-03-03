@@ -621,10 +621,14 @@ class Lung4DCTRegistrationDataset(DatasetMixin, LoggerMixin, Dataset):
                         ][1]
                     )
 
-                    data[keypoint_or_landmark][phase_combination] = (
-                        moving_keypoints,
-                        fixed_keypoints,
-                    )
+                    if moving_keypoints is None and fixed_keypoints is None:
+                        keypoint_pair = None
+                    else:
+                        keypoint_pair = (
+                            moving_keypoints,
+                            fixed_keypoints,
+                        )
+                    data[keypoint_or_landmark][phase_combination] = keypoint_pair
 
         return data
 
