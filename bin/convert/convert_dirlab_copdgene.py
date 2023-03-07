@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
+import click
 import numpy as np
 import SimpleITK as sitk
 import torch
@@ -161,28 +162,67 @@ def read_image_data(filepath: Path, meta: dict):
     return image
 
 
-if __name__ == "__main__":
-    init_fancy_logging()
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
+@click.command()
+@click.argument(
+    "input-folder",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
+@click.option(
+    "--output-folder",
+    type=click.Path(exists=False, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Output folder for converted data set",
+    show_default=True,
+)
+@click.option(
+    "--lung-segmenter-weights",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Filepath of model weights for lung segmenter. "
+        "If None, no lung masks will be created."
+    ),
+    show_default=True,
+)
+@click.option(
+    "--gpu-device",
+    type=str,
+    default="cuda:0",
+    help="CUDA device to use for lung segmenter",
+    show_default=True,
+)
+def convert(
+    input_folder: Path,
+    output_folder: Path,
+    lung_segmenter_weights: Path,
+    gpu_device: str,
+):
+    if not output_folder:
+        output_folder = input_folder.parent / "converted"
+    output_folder.mkdir(exist_ok=True)
 
-    ROOT_FOLDER = Path("/datalake/dirlab_copdgene/original_data")
-    OUTPUT_FOLDER = Path("/datalake/dirlab_copdgene/converted")
-    OUTPUT_FOLDER.mkdir(exist_ok=True)
+    logger.info("Start converting using the following config:")
+    logger.info(f"{input_folder=!s}")
+    logger.info(f"{output_folder=!s}")
+    logger.info(f"{lung_segmenter_weights=!s}")
+    logger.info(f"{gpu_device=}")
 
-    model = Unet3d(n_levels=4, filter_base=32)
-    state = torch.load(
-        "/datalake/learn2reg/runs/models_b6b2234976494eae995af4ab/step_55000.pth"
-    )
-    model.load_state_dict(state["model"])
-    lung_segmenter = LungSegmenter3D(model=model, device="cuda:0")
+    if lung_segmenter_weights:
+        model = Unet3d(n_levels=4, filter_base=32)
+        state = torch.load(lung_segmenter_weights)
+        model.load_state_dict(state["model"])
+        lung_segmenter = LungSegmenter3D(model=model, device=gpu_device)
+    else:
+        lung_segmenter = None
 
     with TemporaryDirectory() as tmp_dir:
         tmp_dir = Path(tmp_dir)
         for i_case in range(1, 11):
             logger.info(f"Extracting {DATASET_NAME} case {i_case}")
 
-            file_checksum = calculate_sha256_checksum(ROOT_FOLDER / f"copd{i_case}.zip")
+            file_checksum = calculate_sha256_checksum(
+                input_folder / f"copd{i_case}.zip"
+            )
             if file_checksum != FILE_CHECKSUMS[i_case]:
                 logger.warning(
                     f"File checksum mismatch for {DATASET_NAME} case {i_case}"
@@ -190,13 +230,13 @@ if __name__ == "__main__":
             else:
                 logger.info(f"File checksum checked for {DATASET_NAME} case {i_case}")
 
-            with ZipFile(ROOT_FOLDER / f"copd{i_case}.zip", "r") as f:
+            with ZipFile(input_folder / f"copd{i_case}.zip", "r") as f:
                 f.extractall(tmp_dir)
 
             patient_input_folder = tmp_dir / f"copd{i_case}"
 
             # output folders
-            patient_output_folder = OUTPUT_FOLDER / f"case_{i_case:02d}"
+            patient_output_folder = output_folder / f"case_{i_case:02d}"
             image_output_folder = patient_output_folder / "images"
             masks_output_folder = patient_output_folder / "masks"
             landmarks_output_folder = patient_output_folder / "landmarks"
@@ -253,3 +293,11 @@ if __name__ == "__main__":
                 )
                 with open(patient_output_folder / "metadata.yaml", "wt") as f_meta:
                     yaml.dump(meta, f_meta)
+
+
+if __name__ == "__main__":
+    init_fancy_logging()
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    convert()
