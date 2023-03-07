@@ -215,8 +215,7 @@ class RegistrationProgressPlotter:
         plot_text = pprint.pformat(plot_text, indent=4)
 
         image_kwargs = {"vmin": None, "vmax": None, "cmap": "gray"}
-        # vector_field_kwargs = {"vmin": -20, "vmax": 20, "cmap": "seismic"}
-        vector_field_kwargs = {"vmin": None, "vmax": None, "cmap": "seismic"}
+        vector_field_kwargs = {"vmin": -20, "vmax": 20, "cmap": "seismic"}
         forces_kwargs = {"vmin": -0.5, "vmax": 0.5, "cmap": "seismic"}
         mask_kwargs = {"vmin": 0, "vmax": 1, "cmap": "gray"}
 

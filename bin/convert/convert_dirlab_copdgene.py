@@ -247,6 +247,8 @@ def convert(
             landmarks_output_folder.mkdir(exist_ok=True)
             keypoints_output_folder.mkdir(exist_ok=True)
 
+            meta = read_meta(i_case)
+
             landmarks = {
                 0: read_landmarks(
                     patient_input_folder / f"copd{i_case}_300_iBH_xyz_r1.txt"
@@ -255,6 +257,11 @@ def convert(
                     patient_input_folder / f"copd{i_case}_300_eBH_xyz_r1.txt"
                 ),
             }
+
+            # flip landmarks in z-axis
+            for i_phase, _landmarks in landmarks.items():
+                _landmarks[:, 2] = meta["image_shape"][2] - _landmarks[:, 2]
+                landmarks[i_phase] = _landmarks
 
             # write full (300) landmarks
             # landmarks are valid for both directions (5 to 0 and 0 to 5 registration)
@@ -275,22 +282,26 @@ def convert(
             for i_phase in (0, 5):
                 logger.info(f"Processing folder {patient_input_folder=!s}, {i_phase=}")
 
-                in_or_ex = "i" if i_case == 0 else "e"
+                in_or_ex = "i" if i_phase == 0 else "e"
 
-                meta = read_meta(i_case)
                 image = read_image_data(
                     patient_input_folder / f"copd{i_case}_{in_or_ex}BHCT.img", meta=meta
                 )
 
-                lung_segmentation = lung_segmenter.segment(image, subsample=1.5)
-
                 sitk.WriteImage(
                     image, str(image_output_folder / f"phase_{i_phase:02d}.nii")
                 )
-                sitk.WriteImage(
-                    lung_segmentation,
-                    str(masks_output_folder / f"lung_phase_{i_phase:02d}.nii.gz"),
-                )
+
+                if lung_segmenter:
+                    logger.info("Create lung segmentation")
+                    lung_segmentation = lung_segmenter.segment(image, subsample=1.5)
+                    sitk.WriteImage(
+                        lung_segmentation,
+                        str(masks_output_folder / f"lung_phase_{i_phase:02d}.nii.gz"),
+                    )
+                else:
+                    logger.info("Skipping creation of lung segmentation")
+
                 with open(patient_output_folder / "metadata.yaml", "wt") as f_meta:
                     yaml.dump(meta, f_meta)
 

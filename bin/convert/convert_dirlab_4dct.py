@@ -263,6 +263,8 @@ def convert(
             landmarks_output_folder.mkdir(exist_ok=True)
             keypoints_output_folder.mkdir(exist_ok=True)
 
+            meta = read_meta(i_case)
+
             landmarks = {
                 0: read_landmarks(
                     landmarks_input_folder / f"{landmarks_base_filename}_T00_xyz.txt"
@@ -283,6 +285,11 @@ def convert(
                     landmarks_input_folder / f"{landmarks_base_filename}_T50_xyz.txt"
                 ),
             }
+
+            # flip landmarks in z-axis
+            for i_phase, _landmarks in landmarks.items():
+                _landmarks[:, 2] = meta["image_shape"][2] - _landmarks[:, 2]
+                landmarks[i_phase] = _landmarks
 
             # write full (300) landmarks
             # landmarks are valid for both directions (5 to 0 and 0 to 5 registration)
@@ -335,7 +342,6 @@ def convert(
                         f"No matching file found for {patient_input_folder=!s}, {i_phase=}"
                     )
 
-                meta = read_meta(i_case)
                 image = read_image_data(image_filepath, meta=meta)
 
                 sitk.WriteImage(
@@ -361,4 +367,13 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
 
-    convert()
+    # convert()
+    convert(
+        [
+            "/datalake/dirlab_4dct/original_data",
+            "--lung-segmenter-weights",
+            "/datalake/learn2reg/runs/models_b6b2234976494eae995af4ab/step_55000.pth",
+            "--gpu-device",
+            "cuda:0",
+        ]
+    )

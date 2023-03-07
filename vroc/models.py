@@ -866,7 +866,6 @@ class VariationalRegistration(BaseIterativeRegistration):
                     i_iteration % self.debug_step_size == 0 or i_iteration < 10
                 ):
                     debug_metrics = {
-                        "tau": decayed_tau,
                         "metric": level_metrics[-1],
                         "level_image_shape": tuple(scaled_moving_image.shape),
                         "vector_field": {},
@@ -889,7 +888,7 @@ class VariationalRegistration(BaseIterativeRegistration):
                         moving_image=scaled_moving_image,
                         fixed_image=scaled_fixed_image,
                         warped_image=warped_moving,
-                        forces=forces,
+                        forces=None,
                         vector_field=vector_field,
                         moving_mask=scaled_moving_mask,
                         fixed_mask=scaled_fixed_mask,

@@ -869,19 +869,9 @@ class VrocRegistration(LoggerMixin):
                         "min": float(
                             torch.min(composed_boosted_vector_field[:, i_dim])
                         ),
-                        # "Q0.05": float(
-                        #     torch.quantile(
-                        #         boosted_vector_field_without_affine[:, i_dim], 0.05
-                        #     )
-                        # ),
                         "mean": float(
                             torch.mean(composed_boosted_vector_field[:, i_dim])
                         ),
-                        # "Q0.95": float(
-                        #     torch.quantile(
-                        #         boosted_vector_field_without_affine[:, i_dim], 0.95
-                        #     )
-                        # ),
                         "max": float(
                             torch.max(composed_boosted_vector_field[:, i_dim])
                         ),
