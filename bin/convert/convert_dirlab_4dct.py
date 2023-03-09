@@ -367,13 +367,4 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
 
-    # convert()
-    convert(
-        [
-            "/datalake/dirlab_4dct/original_data",
-            "--lung-segmenter-weights",
-            "/datalake/learn2reg/runs/models_b6b2234976494eae995af4ab/step_55000.pth",
-            "--gpu-device",
-            "cuda:0",
-        ]
-    )
+    convert()
