@@ -19,24 +19,106 @@ from vroc.loss import mse_loss
 logger = logging.getLogger(__name__)
 
 
-class AffineTransform3d(nn.Module):
-    def __init__(self):
+class AffineTransform(nn.Module):
+    def __init__(
+        self,
+        dimensions: Literal[2, 3],
+        enable_translation: bool = True,
+        enable_scaling: bool = True,
+        enable_rotation: bool = True,
+        enable_shearing: bool = True,
+    ):
         super().__init__()
 
-        self.translation = nn.Parameter(torch.zeros(3))
-        self.scale = nn.Parameter(torch.ones(3))
-        self.rotation = nn.Parameter(torch.zeros(3))
-        self.shear = nn.Parameter(torch.zeros(6))
+        if dimensions not in {2, 3}:
+            raise ValueError("AffineTransform is only implemented for 2D and 3D images")
+        self.dimensions = dimensions
 
-    @property
-    def matrix(self) -> torch.Tensor:
-        return AffineTransform3d.create_affine_matrix_3d(
-            translation=self.translation,
-            scale=self.scale,
-            rotation=self.rotation,
-            shear=self.shear,
-            device=self.translation.device,
+        # set the right create function for affine matrix
+        self._create_affine_matrix = (
+            self.create_affine_matrix_2d
+            if dimensions == 2
+            else self.create_affine_matrix_3d
         )
+
+        # the initial matrix values are identity transform for each transformation
+        self.translation = nn.Parameter(
+            torch.zeros(self.dimensions), requires_grad=enable_translation
+        )
+        self.scale = nn.Parameter(
+            torch.ones(self.dimensions), requires_grad=enable_scaling
+        )
+        _rotation_dims = 3 if self.dimensions == 3 else 1
+        self.rotation = nn.Parameter(
+            torch.zeros(_rotation_dims), requires_grad=enable_rotation
+        )
+
+        _shear_dims = 6 if self.dimensions == 3 else 2
+        self.shear = nn.Parameter(
+            torch.zeros(_shear_dims), requires_grad=enable_shearing
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AffineTransform("
+            f"translation={tuple(self.translation.tolist())}, "
+            f"scale={tuple(self.scale.tolist())}, "
+            f"rotation={tuple(self.rotation.tolist())}, "
+            f"shear={tuple(self.shear.tolist())}"
+            f")>"
+        )
+
+    @staticmethod
+    def create_affine_matrix_2d(
+        translation=(0.0, 0.0),
+        scale=(1.0, 1.0),
+        rotation=0.0,
+        shear=(0.0, 0.0),
+        dtype=torch.float32,
+        device: torch.device = torch.device("cpu"),
+    ):
+        # cast to tensors
+        translation = torch.as_tensor(translation, dtype=dtype, device=device)
+        scale = torch.as_tensor(scale, dtype=dtype, device=device)
+        rotation = torch.as_tensor(rotation, dtype=dtype, device=device)
+        shear = torch.as_tensor(shear, dtype=dtype, device=device)
+
+        # initialize all matrices with identity
+        translation_matrix = torch.diag(torch.ones(3, dtype=dtype, device=device))
+        scale_matrix = torch.diag(torch.ones(3, dtype=dtype, device=device))
+        rotation_matrix = torch.diag(torch.ones(3, dtype=dtype, device=device))
+        shear_matrix = torch.diag(torch.ones(3, dtype=dtype, device=device))
+
+        # translation
+        translation_x, translation_y = translation
+        translation_matrix[0, 2] = translation_x
+        translation_matrix[1, 2] = translation_y
+
+        # scaling
+        scale_x, scale_y = scale
+        scale_matrix[0, 0] = scale_x
+        scale_matrix[1, 1] = scale_y
+
+        # rotation
+        # Elemental rotation around one of the axes of the
+        # coordinate system (right hand rule).
+        rotation_matrix[0, 0] = torch.cos(rotation)
+        rotation_matrix[1, 0] = torch.sin(rotation)
+        rotation_matrix[0, 1] = -torch.sin(rotation)
+        rotation_matrix[1, 1] = torch.cos(rotation)
+
+        # shear
+        shear_x, shear_y = shear
+        # shear along x axis
+        shear_matrix[0, 1] = shear_x
+        # shear along y axis
+        shear_matrix[1, 0] = shear_y
+
+        transformation_matrix = (
+            shear_matrix @ rotation_matrix @ scale_matrix @ translation_matrix
+        )
+
+        return transformation_matrix
 
     @staticmethod
     def create_affine_matrix_3d(
@@ -46,7 +128,7 @@ class AffineTransform3d(nn.Module):
         shear=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),  # yx, zx, xy, zy, xz, yz
         dtype=torch.float32,
         device: torch.device = torch.device("cpu"),
-    ):
+    ) -> torch.Tensor:
         # cast to tensors
         translation = torch.as_tensor(translation, dtype=dtype, device=device)
         scale = torch.as_tensor(scale, dtype=dtype, device=device)
@@ -114,6 +196,16 @@ class AffineTransform3d(nn.Module):
 
         return transformation_matrix
 
+    @property
+    def matrix(self) -> torch.Tensor:
+        return self._create_affine_matrix(
+            translation=self.translation,
+            scale=self.scale,
+            rotation=self.rotation,
+            shear=self.shear,
+            device=self.translation.device,
+        )
+
     def forward(self) -> torch.tensor:
         return self.matrix
 
@@ -126,17 +218,25 @@ class AffineTransform3d(nn.Module):
         )
 
         affine_grid = F.affine_grid(
-            self.matrix[None, :3], size=image.shape, align_corners=True
+            self.matrix[None, : self.dimensions], size=image.shape, align_corners=True
         )
 
+        # rescale from [-1, +1] to spatial displacement values
         affine_grid = (affine_grid / 2 + 0.5) * torch.tensor(
             image_spatial_shape[::-1], device=device
         )
 
-        # move channels dim to last position and reverse channels
-        affine_grid = affine_grid[..., [2, 1, 0]]
-        affine_grid = affine_grid.permute(0, 4, 1, 2, 3)
-        # remove identity
+        # undo torch channel position (cf. SpatialTransformer)
+        if self.dimensions == 2:
+            affine_grid = affine_grid[..., [1, 0]]
+            affine_grid = affine_grid.permute(0, 3, 1, 2)
+
+        elif self.dimensions == 3:
+            affine_grid = affine_grid[..., [2, 1, 0]]
+            affine_grid = affine_grid.permute(0, 4, 1, 2, 3)
+
+        # affine grid is now of shape (batch, n_spatial_dims, x_size, y_size[, z_size])
+        # remove identity to get the displacement
         affine_grid = affine_grid - identity_grid
 
         return affine_grid
@@ -153,9 +253,20 @@ def run_affine_registration(
     step_size_reduce_factor: float = 0.5,
     min_step_size: float = 1e-5,
     retry_threshold: float | None = 0.1,
+    enable_translation: bool = True,
+    enable_scaling: bool = True,
+    enable_rotation: bool = True,
+    enable_shearing: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not any((enable_translation, enable_scaling, enable_rotation, enable_shearing)):
+        raise ValueError(
+            "There is no degree of freedom. "
+            "Please enable at least one of: translation, scaling, rotation, shearing"
+        )
+
     device = moving_image.device
     spatial_image_shape = moving_image.shape[2:]
+    n_spatial_dims = len(spatial_image_shape)
 
     initial_step_size = step_size
 
@@ -177,13 +288,28 @@ def run_affine_registration(
 
     # initialize with moving image so that warped image is defined if n_iterations == 0
     warped_image = moving_image
+    affine_matrix = None
     while True:
         try:
-            affine_transform = AffineTransform3d().to(device)
+            affine_transform = AffineTransform(
+                dimensions=n_spatial_dims,
+                enable_translation=enable_translation,
+                enable_scaling=enable_scaling,
+                enable_rotation=enable_rotation,
+                enable_shearing=enable_shearing,
+            ).to(device)
+            # affine_transform = AffineTransform3d().to(device)
             spatial_transformer = SpatialTransformer(shape=spatial_image_shape).to(
                 device
             )
-            optimizer = Adam(affine_transform.parameters(), lr=step_size)
+            optimizer = Adam(
+                [
+                    param
+                    for param in affine_transform.parameters()
+                    if param.requires_grad
+                ],
+                lr=step_size,
+            )
 
             scheduler = ReduceLROnPlateau(
                 optimizer=optimizer,
@@ -204,6 +330,7 @@ def run_affine_registration(
             for i in range(n_iterations):
                 optimizer.zero_grad()
                 affine_matrix = affine_transform.forward()
+
                 warped_image = spatial_transformer.forward(
                     moving_image, affine_matrix[None]
                 )
@@ -246,7 +373,7 @@ def run_affine_registration(
 
             logger.warning(f"Retry with smaller step size of {step_size}")
     logger.info(
-        f"Finished affine registration. "
+        f"Finished affine registration with {affine_transform!r}. "
         f"Loss {loss_function.__name__} before/after: "
         f"{initial_loss:.6f}/{losses[-1]:.6f}"
     )
@@ -313,7 +440,6 @@ if __name__ == "__main__":
     tres_before = []
     tres_after = []
     for case in range(1, 2):
-
         fixed_landmarks = read_landmarks(
             f"{ROOT_DIR}/{FOLDER}/keypointsTr/LungCT_{case:04d}_0000.csv",
             sep=",",
