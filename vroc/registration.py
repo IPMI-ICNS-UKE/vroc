@@ -202,6 +202,10 @@ class VrocRegistration(LoggerMixin):
         affine_loss_function: Callable | None = None,
         affine_iterations: int = 300,
         affine_step_size: float = 1e-3,
+        affine_enable_translation: bool = True,
+        affine_enable_scaling: bool = True,
+        affine_enable_rotation: bool = True,
+        affine_enable_shearing: bool = True,
         force_type: Literal["demons", "ncc", "ngf"] = "demons",
         gradient_type: Literal["active", "passive", "dual"] = "dual",
         segment_roi: bool = False,
@@ -296,6 +300,10 @@ class VrocRegistration(LoggerMixin):
                 loss_function=affine_loss_function,
                 n_iterations=affine_iterations,
                 step_size=affine_step_size,
+                enable_translation=affine_enable_translation,
+                enable_scaling=affine_enable_scaling,
+                enable_rotation=affine_enable_rotation,
+                enable_shearing=affine_enable_shearing,
             )
 
         # handle ROIs
