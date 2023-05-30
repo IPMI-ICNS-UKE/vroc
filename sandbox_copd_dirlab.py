@@ -13,7 +13,8 @@ from torch.optim import Adam
 
 from vroc import models
 from vroc.decay import half_life_to_lambda
-from vroc.helper import compute_tre_numpy, read_landmarks
+from vroc.helper import compute_tre_numpy, get_bounding_box, read_landmarks
+from vroc.interpolation import resize
 from vroc.keypoints import extract_keypoints
 from vroc.logger import FancyFormatter
 from vroc.loss import mse_loss, ncc_loss
@@ -104,7 +105,7 @@ registration = VrocRegistration(
 tres_before = []
 tres_after = []
 t_start = time.time()
-for case in range(8, 9):
+for case in range(3, 4):
     moving_landmarks = read_landmarks(
         f"{ROOT_DIR}/{FOLDER}/data/copd{case:02d}/extremePhases/landmarks_e.txt",
         sep="\t",
@@ -135,7 +136,7 @@ for case in range(8, 9):
 
     # moving_mask = moving_mask.astype(bool)
     # fixed_mask = fixed_mask.astype(bool)
-    # union_mask = moving_mask | fixed_mask
+    union_mask = moving_mask | fixed_mask
 
     # debug = False
     # reg_result = registration.register(
@@ -157,15 +158,41 @@ for case in range(8, 9):
     #     # debug_step_size=10,
     # )
 
-    # moving_keypoints, fixed_keypoints = extract_keypoints(
-    #     moving_image=torch.as_tensor(moving_image[None, None], device='cuda:0'),
-    #     fixed_image=torch.as_tensor(fixed_image[None, None], device='cuda:0'),
-    #     fixed_mask=torch.as_tensor(fixed_mask[None, None], device='cuda:0'),
-    # )
-    # keypoints_tre = torch.sum((moving_keypoints - fixed_keypoints) ** 2, dim=-1) ** 0.5
-    # print(f'{keypoints_tre.mean()=}')
-    moving_keypoints = torch.as_tensor(moving_landmarks[None], device="cuda:0")
-    fixed_keypoints = torch.as_tensor(fixed_landmarks[None], device="cuda:0")
+    bbox = get_bounding_box(mask=torch.as_tensor(union_mask), padding=10)
+    rescaled_shape = tuple(
+        int(round(size * spacing))
+        for size, spacing in zip(moving_image[bbox].shape, image_spacing)
+    )
+    moving_image_resampled = resize(moving_image[bbox], rescaled_shape)
+    fixed_image_resampled = resize(fixed_image[bbox], rescaled_shape)
+    fixed_mask_resampled = resize(fixed_mask[bbox], rescaled_shape)
+    moving_keypoints_resampled, fixed_keypoints_resampled = extract_keypoints(
+        moving_image=torch.as_tensor(
+            moving_image_resampled[None, None], device="cuda:0"
+        ),
+        fixed_image=torch.as_tensor(fixed_image_resampled[None, None], device="cuda:0"),
+        fixed_mask=torch.as_tensor(fixed_mask_resampled[None, None], device="cuda:0"),
+    )
+    moving_keypoints = moving_keypoints_resampled / torch.as_tensor(
+        image_spacing, device="cuda:0"
+    )
+    fixed_keypoints = fixed_keypoints_resampled / torch.as_tensor(
+        image_spacing, device="cuda:0"
+    )
+    for i_dim in range(len(bbox)):
+        moving_keypoints[:, :, i_dim] += bbox[i_dim].start
+        fixed_keypoints[:, :, i_dim] += bbox[i_dim].start
+
+    keypoints_resampled_tre = (
+        torch.sum((moving_keypoints_resampled - fixed_keypoints_resampled) ** 2, dim=-1)
+        ** 0.5
+    )
+    keypoints_tre = torch.sum((moving_keypoints - fixed_keypoints) ** 2, dim=-1) ** 0.5
+
+    print(f"{keypoints_tre.mean()=},{keypoints_resampled_tre.mean()=}")
+
+    # moving_keypoints = torch.as_tensor(moving_landmarks[None], device="cuda:0")
+    # fixed_keypoints = torch.as_tensor(fixed_landmarks[None], device="cuda:0")
 
     params_init = {
         "iterations": 0,
@@ -180,18 +207,18 @@ for case in range(8, 9):
 
     params_finetune = {
         "iterations": 200,
-        "tau": 1.00,
+        "tau": 2.25,
         "tau_iteration_decay": 0.0,  # half_life_to_lambda(800),
-        "sigma_x": 1.00,
-        "sigma_y": 1.00,
-        "sigma_z": 1.00,
-        "n_levels": 2,
+        "sigma_x": 2.00,
+        "sigma_y": 2.00,
+        "sigma_z": 2.00,
+        "n_levels": 3,
         "largest_scale_factor": 1.0,
     }
 
     debug = True
     if debug:
-        debug_folder = Path(f"/datalake/copd_dirlab2022/debug/{int(time.time())}")
+        debug_folder = Path(f"{ROOT_DIR}/copd_dirlab2022/debug/{int(time.time())}")
     else:
         debug_folder = None
 
@@ -209,7 +236,7 @@ for case in range(8, 9):
         # boosting specific kwargs
         model=model,
         optimizer=optimizer,
-        n_iterations=400,
+        n_iterations=200,
         moving_keypoints=moving_keypoints,
         fixed_keypoints=fixed_keypoints,
         image_loss_function="mse",
@@ -256,7 +283,7 @@ for case in range(8, 9):
         # boosting specific kwargs
         model=model,
         optimizer=optimizer,
-        n_iterations=200,
+        n_iterations=0,
         moving_keypoints=moving_keypoints,
         fixed_keypoints=fixed_keypoints,
         image_loss_function="mse",
@@ -283,7 +310,7 @@ for case in range(8, 9):
         valid_value_range=(-1000, 3071),
         early_stopping_delta=0.00001,
         early_stopping_window=None,
-        default_parameters=params_init,
+        default_parameters=params_finetune,
         debug=debug,
         debug_output_folder=debug_folder / "fine",
         debug_step_size=50,

@@ -22,6 +22,7 @@ def filter1D(img, weight, dim, padding_mode="replicate"):
 
     view = torch.ones(
         5,
+        dtype=torch.float16,
     )
     view[dim + 2] = -1
     view = view.long().tolist()
@@ -35,11 +36,13 @@ def filter1D(img, weight, dim, padding_mode="replicate"):
 def smooth(img, sigma):
     device = img.device
 
-    sigma = torch.tensor([sigma], device=device)
+    sigma = torch.tensor([sigma], device=device, dtype=torch.float16)
     N = torch.ceil(sigma * 3.0 / 2.0).long().item() * 2 + 1
 
     weight = torch.exp(
-        -torch.pow(torch.linspace(-(N // 2), N // 2, N, device=device), 2)
+        -torch.pow(
+            torch.linspace(-(N // 2), N // 2, N, device=device, dtype=torch.float32), 2
+        )
         / (2 * torch.pow(sigma, 2))
     )
     weight /= weight.sum()
@@ -114,12 +117,29 @@ def kpts_world(kpts_pt, shape, align_corners=None):
     return kpts_world_
 
 
+def flow_world(flow_pt, shape, align_corners=None):
+    device = flow_pt.device
+    D, H, W = shape
+
+    if not align_corners:
+        flow_pt /= (torch.tensor([W, H, D], device=device) - 1) / torch.tensor(
+            [W, H, D], device=device
+        )
+    flow_world_ = ((flow_pt / 2) * (torch.tensor([W, H, D], device=device) - 1)).flip(
+        -1
+    )
+
+    return flow_world_
+
+
 def foerstner_kpts(img, mask, sigma=1.4, d=9, thresh=1e-8):
     _, _, D, H, W = img.shape
     device = img.device
 
     filt = torch.tensor(
-        [1.0 / 12.0, -8.0 / 12.0, 0.0, 8.0 / 12.0, -1.0 / 12.0], device=device
+        [1.0 / 12.0, -8.0 / 12.0, 0.0, 8.0 / 12.0, -1.0 / 12.0],
+        device=device,
+        dtype=torch.float32,
     )
     grad = torch.cat(
         [filter1D(img, filt, 0), filter1D(img, filt, 1), filter1D(img, filt, 2)], dim=1
@@ -167,7 +187,7 @@ def mindssc(img, delta=1, sigma=1):
     # define start and end locations for self-similarity pattern
     six_neighbourhood = torch.tensor(
         [[0, 1, 1], [1, 1, 0], [1, 0, 1], [1, 1, 2], [2, 1, 1], [1, 2, 1]],
-        dtype=torch.float,
+        dtype=torch.float32,
         device=device,
     )
 
@@ -176,7 +196,8 @@ def mindssc(img, delta=1, sigma=1):
 
     # define comparison mask
     x, y = torch.meshgrid(
-        torch.arange(6, device=device), torch.arange(6, device=device)
+        torch.arange(6, device=device, dtype=torch.float32),
+        torch.arange(6, device=device, dtype=torch.float32),
     )
     mask = (x > y).view(-1) & (dist == 2).view(-1)
 
@@ -187,14 +208,14 @@ def mindssc(img, delta=1, sigma=1):
     idx_shift2 = (
         six_neighbourhood.unsqueeze(0).repeat(6, 1, 1).view(-1, 3)[mask, :].long()
     )
-    mshift1 = torch.zeros((12, 1, 3, 3, 3), device=device)
+    mshift1 = torch.zeros((12, 1, 3, 3, 3), device=device, dtype=torch.float32)
     mshift1.view(-1)[
         torch.arange(12, device=device) * 27
         + idx_shift1[:, 0] * 9
         + idx_shift1[:, 1] * 3
         + idx_shift1[:, 2]
     ] = 1
-    mshift2 = torch.zeros((12, 1, 3, 3, 3), device=device)
+    mshift2 = torch.zeros((12, 1, 3, 3, 3), device=device, dtype=torch.float32)
     mshift2.view(-1)[
         torch.arange(12, device=device) * 27
         + idx_shift2[:, 0] * 9
@@ -316,7 +337,7 @@ def tbp(cost, edges, level, dist):
 def mean_filter(img, r):
     device = img.device
 
-    weight = torch.ones((2 * r + 1,), device=device) / (2 * r + 1)
+    weight = torch.ones((2 * r + 1,), device=device, dtype=torch.float32) / (2 * r + 1)
 
     img = filter1D(img, weight, 0)
     img = filter1D(img, weight, 1)
@@ -651,156 +672,166 @@ def extract_keypoints(
     # quantization: Sequence[float] = (2, 1),
     # patch_radius: Sequence[float] = (3, 2),
     # transform: Sequence[Literal["rigid", "dense"]] = ("dense", "dense"),
-    alpha: Number = 1.0,
+    alpha: Number = 2.5,
     beta: Number = 150,
     gamma: Number = 5,
     delta: Number = 1,
     lambd: Number = 0,
     sigma_foerstner: Number = 1.4,
     sigma_mind: Number = 0.8,
-    search_radius: Sequence[float] = (16, 8),
+    search_radius: Sequence[float] = (24, 8),
     length: Sequence[float] = (6, 3),
     quantization: Sequence[float] = (2, 1),
     patch_radius: Sequence[float] = (3, 2),
     transform: Sequence[Literal["rigid", "dense"]] = ("rigid", "dense"),
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
-    device = fixed_image.device
-    _, _, D, H, W = fixed_image.shape
+    with torch.autocast(device_type="cuda", dtype=torch.float32):
 
-    # print("Compute fixed MIND features ...", end=" ")
-    torch.cuda.synchronize()
-    t0 = time.time()
-    mind_fix = mindssc(fixed_image, delta, sigma_mind)
-    torch.cuda.synchronize()
-    t1 = time.time()
-    # print("finished ({:.2f} s).".format(t1 - t0))
+        device = fixed_image.device
+        _, _, D, H, W = fixed_image.shape
 
-    dense_flow = torch.zeros((1, D, H, W, 3), device=device)
-    img_mov_warped = moving_image
-    for i in range(len(search_radius)):
-        # print("Stage {}/{}".format(i + 1, len(search_radius)))
-        # print("    search radius: {}".format(search_radius[i]))
-        # print("      cube length: {}".format(length[i]))
-        # print("     quantisation: {}".format(quantization[i]))
-        # print("     patch radius: {}".format(patch_radius[i]))
-        # print("        transform: {}".format(transform[i]))
-
-        disp = get_disp(quantization[i], search_radius[i], (D, H, W), device=device)
-
-        # print("    Compute moving MIND features ...", end=" ")
+        # print("Compute fixed MIND features ...", end=" ")
         torch.cuda.synchronize()
         t0 = time.time()
-        mind_mov = mindssc(img_mov_warped, delta, sigma_mind)
+        mind_fix = mindssc(fixed_image, delta, sigma_mind)
         torch.cuda.synchronize()
         t1 = time.time()
         # print("finished ({:.2f} s).".format(t1 - t0))
 
-        torch.cuda.synchronize()
-        t0 = time.time()
-        kpts_fix = foerstner_kpts(fixed_image, fixed_mask, sigma_foerstner, length[i])
-        torch.cuda.synchronize()
-        t1 = time.time()
-        # print(
-        #     "    {} fixed keypoints extracted ({:.2f} s).".format(
-        #         kpts_fix.shape[1], t1 - t0
-        #     )
-        # )
+        dense_flow = torch.zeros((1, D, H, W, 3), device=device)
+        img_mov_warped = moving_image
+        for i in range(len(search_radius)):
+            # print("Stage {}/{}".format(i + 1, len(search_radius)))
+            # print("    search radius: {}".format(search_radius[i]))
+            # print("      cube length: {}".format(length[i]))
+            # print("     quantisation: {}".format(quantization[i]))
+            # print("     patch radius: {}".format(patch_radius[i]))
+            # print("        transform: {}".format(transform[i]))
 
-        # print("    Compute forward marginals ...", end=" ")
-        torch.cuda.synchronize()
-        t0 = time.time()
-        marginalsf = compute_marginals(
-            kpts_fix,
-            fixed_image,
-            mind_fix,
-            mind_mov,
-            alpha,
-            beta,
-            search_radius[i],
-            quantization[i],
-            patch_radius[i],
-        )
-        torch.cuda.synchronize()
-        t1 = time.time()
-        # print("finished ({:.2f} s).".format(t1 - t0))
+            disp = get_disp(quantization[i], search_radius[i], (D, H, W), device=device)
 
-        flow = (
-            F.softmax(-gamma * marginalsf.view(1, kpts_fix.shape[1], -1, 1), dim=2)
-            * disp.view(1, 1, -1, 3)
-        ).sum(2)
+            # print("    Compute moving MIND features ...", end=" ")
+            torch.cuda.synchronize()
+            t0 = time.time()
+            mind_mov = mindssc(img_mov_warped, delta, sigma_mind)
+            torch.cuda.synchronize()
+            t1 = time.time()
+            # print("finished ({:.2f} s).".format(t1 - t0))
 
-        kpts_mov = kpts_fix + flow
+            torch.cuda.synchronize()
+            t0 = time.time()
+            kpts_fix = foerstner_kpts(
+                fixed_image, fixed_mask, sigma_foerstner, length[i]
+            )
+            torch.cuda.synchronize()
+            t1 = time.time()
+            # print(
+            #     "    {} fixed keypoints extracted ({:.2f} s).".format(
+            #         kpts_fix.shape[1], t1 - t0
+            #     )
+            # )
 
-        # print("    Compute symmetric backward marginals ...", end=" ")
-        torch.cuda.synchronize()
-        t0 = time.time()
-        marginalsb = compute_marginals(
-            kpts_mov,
-            fixed_image,
-            mind_mov,
-            mind_fix,
-            alpha,
-            beta,
-            search_radius[i],
-            quantization[i],
-            patch_radius[i],
-        )
-        torch.cuda.synchronize()
-        t1 = time.time()
-        # print("finished ({:.2f} s).".format(t1 - t0))
+            # print("    Compute forward marginals ...", end=" ")
+            torch.cuda.synchronize()
+            t0 = time.time()
+            marginalsf = compute_marginals(
+                kpts_fix,
+                fixed_image,
+                mind_fix,
+                mind_mov,
+                alpha,
+                beta,
+                search_radius[i],
+                quantization[i],
+                patch_radius[i],
+            )
+            torch.cuda.synchronize()
+            t1 = time.time()
+            # print("finished ({:.2f} s).".format(t1 - t0))
 
-        marginals = 0.5 * (
-            marginalsf.view(1, kpts_fix.shape[1], -1)
-            + marginalsb.view(1, kpts_fix.shape[1], -1).flip(2)
-        )
+            flow = (
+                F.softmax(-gamma * marginalsf.view(1, kpts_fix.shape[1], -1, 1), dim=2)
+                * disp.view(1, 1, -1, 3)
+            ).sum(2)
 
-        flow = (
-            F.softmax(-gamma * marginals.view(1, kpts_fix.shape[1], -1, 1), dim=2)
-            * disp.view(1, 1, -1, 3)
-        ).sum(2)
+            kpts_mov = kpts_fix + flow
 
-        torch.cuda.synchronize()
-        t0 = time.time()
-        if transform[i] == "rigid":
-            # print("    Find rigid transform ...", end=" ")
-            rigid = compute_rigid_transform(kpts_fix, kpts_fix + flow)
-            dense_flow_ = F.affine_grid(
-                rigid[:, :3, :] - torch.eye(3, 4, device=device).unsqueeze(0),
-                (1, 1, D, H, W),
+            # print("    Compute symmetric backward marginals ...", end=" ")
+            torch.cuda.synchronize()
+            t0 = time.time()
+            marginalsb = compute_marginals(
+                kpts_mov,
+                fixed_image,
+                mind_mov,
+                mind_fix,
+                alpha,
+                beta,
+                search_radius[i],
+                quantization[i],
+                patch_radius[i],
+            )
+            torch.cuda.synchronize()
+            t1 = time.time()
+            # print("finished ({:.2f} s).".format(t1 - t0))
+
+            marginals = 0.5 * (
+                marginalsf.view(1, kpts_fix.shape[1], -1)
+                + marginalsb.view(1, kpts_fix.shape[1], -1).flip(2)
+            )
+
+            flow = (
+                F.softmax(-gamma * marginals.view(1, kpts_fix.shape[1], -1, 1), dim=2)
+                * disp.view(1, 1, -1, 3)
+            ).sum(2)
+
+            torch.cuda.synchronize()
+            t0 = time.time()
+            if transform[i] == "rigid":
+                # print("    Find rigid transform ...", end=" ")
+                rigid = compute_rigid_transform(kpts_fix, kpts_fix + flow)
+                dense_flow_ = F.affine_grid(
+                    rigid[:, :3, :] - torch.eye(3, 4, device=device).unsqueeze(0),
+                    (1, 1, D, H, W),
+                    align_corners=True,
+                )
+            elif transform[i] == "dense":
+                # print("    Dense thin plate spline interpolation ...", end=" ")
+                dense_flow_ = thin_plate_dense(kpts_fix, flow, (D, H, W), 2, lambd)
+            torch.cuda.synchronize()
+            t1 = time.time()
+            # print("finished ({:.2f} s).".format(t1 - t0))
+
+            dense_flow += dense_flow_
+
+            img_mov_warped = F.grid_sample(
+                moving_image,
+                F.affine_grid(
+                    torch.eye(3, 4, dtype=moving_image.dtype, device=device).unsqueeze(
+                        0
+                    ),
+                    (1, 1, D, H, W),
+                    align_corners=True,
+                )
+                + dense_flow.to(moving_image.dtype),
                 align_corners=True,
             )
-        elif transform[i] == "dense":
-            # print("    Dense thin plate spline interpolation ...", end=" ")
-            dense_flow_ = thin_plate_dense(kpts_fix, flow, (D, H, W), 3, lambd)
-        torch.cuda.synchronize()
-        t1 = time.time()
-        # print("finished ({:.2f} s).".format(t1 - t0))
 
-        dense_flow += dense_flow_
-
-        img_mov_warped = F.grid_sample(
-            moving_image,
-            F.affine_grid(
-                torch.eye(3, 4, dtype=moving_image.dtype, device=device).unsqueeze(0),
-                (1, 1, D, H, W),
+        flow = (
+            F.grid_sample(
+                dense_flow.permute(0, 4, 1, 2, 3),
+                kpts_fix.view(1, 1, 1, -1, 3),
                 align_corners=True,
             )
-            + dense_flow.to(moving_image.dtype),
-            align_corners=True,
+            .view(1, 3, -1)
+            .permute(0, 2, 1)
         )
 
-    flow = (
-        F.grid_sample(
-            dense_flow.permute(0, 4, 1, 2, 3),
-            kpts_fix.view(1, 1, 1, -1, 3),
-            align_corners=True,
+        return (
+            kpts_world(kpts_fix + flow, (D, H, W), align_corners=True),
+            kpts_world(kpts_fix, (D, H, W), align_corners=True),
+            flow_world(dense_flow.view(1, -1, 3), (D, H, W), align_corners=True).view(
+                1, D, H, W, 3
+            ),
+            img_mov_warped,
         )
-        .view(1, 3, -1)
-        .permute(0, 2, 1)
-    )
-
-    return (
-        kpts_world(kpts_fix + flow, (D, H, W), align_corners=True),
-        kpts_world(kpts_fix, (D, H, W), align_corners=True),
-    )

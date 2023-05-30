@@ -440,6 +440,7 @@ class Lung4DCTRegistrationDataset(DatasetMixin, LoggerMixin, Dataset):
                 "folder": folder,
                 "images": {},
                 "masks": {},
+                "additional_masks": {},
                 "keypoints": {},
                 "landmarks": {},
                 "meta": {},
@@ -458,6 +459,14 @@ class Lung4DCTRegistrationDataset(DatasetMixin, LoggerMixin, Dataset):
             for phase in self.phases:
                 _collected["masks"][phase] = self._assert_exists(
                     masks_folder / f"lung_phase_{phase:02d}.nii.gz",
+                    ignore_missing_files=self.ignore_missing_files,
+                )
+
+            # add masks
+            for phase in self.phases:
+                _collected["additional_masks"][phase] = self._assert_exists(
+                    # masks_folder / f"lung_phase_{phase:02d}.nii.gz",
+                    masks_folder / f"lung_phase_{phase:02d}" / "lung_vessels.nii.gz",
                     ignore_missing_files=self.ignore_missing_files,
                 )
 
@@ -591,6 +600,7 @@ class Lung4DCTRegistrationDataset(DatasetMixin, LoggerMixin, Dataset):
             "meta": self.filepaths[item]["meta"],
             "images": {},
             "masks": {},
+            "additional_masks": {},
             "keypoints": {},
             "landmarks": {},
         }
@@ -603,6 +613,11 @@ class Lung4DCTRegistrationDataset(DatasetMixin, LoggerMixin, Dataset):
                 self.filepaths[item]["masks"][phase], is_mask=True
             )
             data["masks"][phase] = {"data": mask, "meta": meta}
+
+            add_mask, meta = self._load_image(
+                self.filepaths[item]["additional_masks"][phase], is_mask=True
+            )
+            data["additional_masks"][phase] = {"data": add_mask, "meta": meta}
 
             for other_phase in self.phases:
                 if phase == other_phase:

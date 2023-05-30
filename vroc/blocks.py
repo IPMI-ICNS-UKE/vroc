@@ -740,6 +740,7 @@ class NCCForces(BaseForces):
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         epsilon: float = 1e-10,
         radius: Tuple[int, ...] = (5, 5, 5),
+        use_masks: bool = True,
     ):
         # normalizer = sum(i * i for i in original_image_spacing) / len(original_image_spacing)
 
@@ -782,8 +783,13 @@ class NCCForces(BaseForces):
         )
 
         total_grad = self._compute_total_grad(
-            moving_image, fixed_image, moving_mask, fixed_mask
+            moving_image=moving_image,
+            fixed_image=fixed_image,
+            moving_mask=moving_mask,
+            fixed_mask=fixed_mask,
+            use_masks=use_masks,
         )
+
         if self.method == "dual":
             total_grad = total_grad * 0.5
 
@@ -797,7 +803,7 @@ class NCCForces(BaseForces):
             & (moving_mean_centered != 0.0)
         )
 
-        factor = torch.zeros_like(cross)
+        factor = torch.zeros_like(cross, dtype=fixed_mean_centered.dtype)
         factor[mask] = (2.0 * cross[mask] / var_mf[mask]) * (
             moving_mean_centered[mask]
             - cross[mask] / (var_f[mask] * fixed_mean_centered[mask])
@@ -812,6 +818,7 @@ class NCCForces(BaseForces):
         moving_mask: torch.Tensor,
         fixed_mask: torch.Tensor,
         original_image_spacing: FloatTuple3D,
+        use_masks: bool = True,
     ):
         return self._calculate_ncc_forces_3d(
             moving_image=moving_image,
@@ -820,6 +827,7 @@ class NCCForces(BaseForces):
             fixed_mask=fixed_mask,
             method=self.method,
             original_image_spacing=original_image_spacing,
+            use_masks=use_masks,
         )
 
 

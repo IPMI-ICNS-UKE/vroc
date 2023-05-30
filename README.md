@@ -17,12 +17,26 @@ Varreg on Crack(only GPU boost, no DL-based hyperparameter optimization -> Param
 |  10  | 1.12 (1.36) |  1.41 (1.69)  |      1.50 (1.54)      |      0.15      |
 | mean |    0.94     |     1.26      |         1.36          |      0.14      |
 
+| Case | voxel TRE | 4dct world TRE[mm] w/ affine | 4dct world TRE[mm]  w/o affine | dirlab copd world TRE[mm] w/ affine |
+|:----:|:---------:|:----------------------------:|:------------------------------:|:-----------------------------------:|
+|  01  |    xxx    |             0.79             |              0.78              |                13.33                |
+|  02  |    xxx    |             0.77             |              0.79              |                12.45                |
+|  03  |    xxx    |             0.90             |              0.95              |                3.04                 |
+|  04  |    xxx    |             1.42             |              1.42              |                9.94                 |
+|  05  |    xxx    |             1.41             |              1.41              |                15.35                |
+|  06  |    xxx    |             1.50             |              1.60              |                12.68                |
+|  07  |    xxx    |             1.47             |              1.52              |                4.71                 |
+|  08  |    xxx    |             1.41             |              3.69              |                7.97                 |
+|  09  |    xxx    |             1.27             |              1.32              |                4.55                 |
+|  10  |    xxx    |             1.41             |              1.70              |                9.37                 |
+| mean |    xxx    |            1.235             |              xxx               |                 xxx                 |
+
 ITK Variational Registration (Parameter as defined in PMB paper of RW):
 
-Call: 
+Call:
 
 ```
-VariationalRegistration -F fixed.mha -M moving.mha -S mask.mha -i 800 -l 4 -t 2 -u 0 -r 0 -v 4 -d 2 -g 0.00005 -h 1 
+VariationalRegistration -F fixed.mha -M moving.mha -S mask.mha -i 800 -l 4 -t 2 -u 0 -r 0 -v 4 -d 2 -g 0.00005 -h 1
 ```
 
 | Case |  voxel TRE  | world TRE[mm] | no snap world TRE[mm] | sigma jacobian |

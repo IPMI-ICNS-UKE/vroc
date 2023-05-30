@@ -89,6 +89,7 @@ def match_vector_field(
     vector_field: torch.Tensor,
     image: torch.Tensor | None = None,
     image_shape: IntTuple3D | None = None,
+    return_scale_factor: bool = False,
 ) -> torch.Tensor:
     if image is not None and vector_field.ndim != image.ndim:
         raise ValueError("Dimension mismatch")
@@ -101,18 +102,22 @@ def match_vector_field(
     else:
         image_shape = (1, 1, *image_shape)
 
+    # scale factor to scale the vector field values
+    scale_factor = torch.tensor(
+        [s1 / s2 for (s1, s2) in zip(image_shape[2:], vector_field_shape[2:])]
+    )
+
+    if return_scale_factor:
+        return scale_factor
+
+    # 5D shape: (1, 3, 1, 1, 1), 4D shape: (1, 2, 1, 1)
+    scale_factor = torch.reshape(scale_factor, (1, -1) + (1,) * (len(image_shape) - 2))
+
     if vector_field_shape[2:] == image_shape[2:]:
         # vector field and image are already the same size
         return vector_field
 
     vector_field = resize(vector_field, output_shape=image_shape[2:], order=1)
-
-    # scale factor to scale the vector field values
-    scale_factor = torch.tensor(
-        [s1 / s2 for (s1, s2) in zip(image_shape[2:], vector_field_shape[2:])]
-    )
-    # 5D shape: (1, 3, 1, 1, 1), 4D shape: (1, 2, 1, 1)
-    scale_factor = torch.reshape(scale_factor, (1, -1) + (1,) * (len(image_shape) - 2))
 
     return vector_field * scale_factor.to(vector_field)
 

@@ -325,3 +325,5 @@ $RECYCLE.BIN/
 
 l2r_submission/*.zip
 l2r_submission/*.tar.gz
+/vtk_test.py
+/platipy_test.py

@@ -27,13 +27,12 @@ class TRELoss(nn.Module):
             self.reduction, self.quantile = self.reduction.split("_")
             self.quantile = float(self.quantile)
 
-    def forward(
-        self,
+    @staticmethod
+    def _warped_fixed_landmarks(
         vector_field: torch.Tensor,
-        moving_landmarks: torch.Tensor,
         fixed_landmarks: torch.Tensor,
-        image_spacing: torch.Tensor | FloatTuple3D,
-    ):
+    ) -> torch.Tensor:
+
         # vector_field: shape of (1, 3, x_dim, y_dim, z_dim), values are in voxel
         # displacement (i.e. not torch grid_sample convention [-1, 1])
         # {moving,fixed}_landmarks: shape of (1, n_landmarks, 3)
@@ -41,8 +40,6 @@ class TRELoss(nn.Module):
         # currently only implemented for batch size of 1
         # get rid of batch dimension
         vector_field = torch.as_tensor(vector_field[0], dtype=torch.float32)
-        moving_landmarks = moving_landmarks[0]
-        fixed_landmarks = fixed_landmarks[0]
 
         # round fixed_landmarks coordinates if dtype is float,
         # i.e. NN interpolation of vector_field
@@ -52,12 +49,30 @@ class TRELoss(nn.Module):
         x_coordinates = fixed_landmarks[..., 0]
         y_coordinates = fixed_landmarks[..., 1]
         z_coordinates = fixed_landmarks[..., 2]
-        # displacements is of shape (3, n_landmarks) after transposing
+        # displacement is of shape (3, n_landmarks) after transposing
         displacements = vector_field[:, x_coordinates, y_coordinates, z_coordinates].T
 
+        return fixed_landmarks + displacements
+
+    def forward(
+        self,
+        vector_field: torch.Tensor,
+        moving_landmarks: torch.Tensor,
+        fixed_landmarks: torch.Tensor,
+        image_spacing: torch.Tensor | FloatTuple3D,
+    ):
+
+        fixed_landmarks = fixed_landmarks[0]
+        moving_landmarks = moving_landmarks[0]
         # warp fixed_landmarks and compare to moving_landmarks (euclidean distance)
         # distances will be float32 as displacements is float32
-        distances = (fixed_landmarks + displacements) - moving_landmarks
+
+        distances = (
+            TRELoss._warped_fixed_landmarks(
+                fixed_landmarks=fixed_landmarks, vector_field=vector_field
+            )
+            - moving_landmarks
+        )
         # scale x, x, z distance component with image spacing
         image_spacing = torch.as_tensor(
             image_spacing, dtype=torch.float32, device=distances.device

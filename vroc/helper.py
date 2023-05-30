@@ -13,7 +13,12 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 import torch.nn.functional as F
+from mayavi import mlab
+from mayavi.core.api import PipelineBase
+from mayavi.core.ui.api import MayaviScene, MlabSceneModel, SceneEditor
 from scipy.ndimage import map_coordinates
+from traits.api import HasTraits, Instance, Range, on_trait_change
+from traitsui.api import Group, Item, View
 
 from vroc.common_types import (
     ArrayOrTensor,
@@ -23,6 +28,7 @@ from vroc.common_types import (
     PathLike,
 )
 from vroc.decorators import convert
+from vroc.interpolation import resize_spacing
 
 if TYPE_CHECKING:
     from vroc.registration import RegistrationResult
@@ -145,7 +151,7 @@ def compute_tre_numpy(
     snap_to_voxel: bool = False,
     fixed_bounding_box: Tuple[slice, slice, slice] | None = None,
     axis: int | None = None,
-) -> np.ndarray | None:
+) -> (np.ndarray | None, np.ndarray | None):
     if fixed_bounding_box:
         _, keypoint_mask = mask_keypoints(
             keypoints=fixed_landmarks, bounding_box=fixed_bounding_box
@@ -175,9 +181,10 @@ def compute_tre_numpy(
         moving_landmarks = moving_landmarks[axis_slicing]
         image_spacing = image_spacing[axis]
 
-    return np.linalg.norm(
+    tre = np.linalg.norm(
         (fixed_landmarks_warped - moving_landmarks) * image_spacing, axis=1
     )
+    return tre, fixed_landmarks_warped
 
 
 def compute_dice(moving_mask, fixed_mask, moving_warped_mask, labels):
@@ -641,14 +648,112 @@ def calculate_sha256_checksum(filepath: PathLike) -> str:
     return hasher.hexdigest()
 
 
-if __name__ == "__main__":
-    from pprint import pprint
+def plot_landmarks(moving_landmarks, fixed_landmarks, image_spacing, fixed_mask):
+    lm_f = fixed_landmarks * image_spacing
+    lm_m = moving_landmarks * image_spacing
+    difference = lm_f - lm_m
+    mlab.figure(bgcolor=(1, 1, 1), fgcolor=(0, 0, 0))
 
-    hashes = {
-        i: calculate_sha256_checksum(
-            f"/datalake/dirlab_copdgene/original_data/copd{i}.zip"
+    mlab.points3d(lm_m[:, 0], lm_m[:, 1], lm_m[:, 2], scale_factor=3, color=(1, 0, 0))
+    mlab.points3d(lm_f[:, 0], lm_f[:, 1], lm_f[:, 2], scale_factor=3, color=(0, 1, 0))
+    mlab.quiver3d(
+        lm_m[:, 0],
+        lm_m[:, 1],
+        lm_m[:, 2],
+        difference[:, 0],
+        difference[:, 1],
+        difference[:, 2],
+        scale_factor=1,
+        mode="arrow",
+    )
+
+    mlab.contour3d(
+        resize_spacing(fixed_mask, image_spacing, (1, 1, 1)).astype(np.uint8),
+        colormap="gray",
+        opacity=0.1,
+    )
+
+    # mlab.points3d(lm_f[:, 0], lm_f[:, 1], lm_f[:, 2], scale_factor=3, color=(0, 1, 0))
+
+    mlab.xlabel("X")
+    mlab.ylabel("Y")
+    mlab.zlabel("Z")
+    mlab.show()
+
+
+def plot_changing_landmarks(
+    moving_landmarks, fixed_landmarks_list, image_spacing, fixed_mask
+):
+    lm_m = moving_landmarks * image_spacing
+    lms_f = fixed_landmarks_list
+
+    def lms(step):
+        lm_f = lms_f[step]
+        return lm_f * image_spacing
+
+    class MyModel(HasTraits):
+        n_step = Range(
+            0,
+            len(lms_f) - 1,
+            0,
+        )  # mode='spinner')
+
+        scene = Instance(MlabSceneModel, ())
+
+        plot = Instance(PipelineBase)
+        plot2 = Instance(PipelineBase)
+
+        # mlab.points3d(lm_m[:, 0], lm_m[:, 1], lm_m[:, 2], scale_factor=1, color=(1, 0, 0))
+
+        # When the scene is activated, or when the parameters are changed, we
+        # update the plot.
+        @on_trait_change("n_step,scene.activated")
+        def update_plot(self):
+            lm_f = lms(self.n_step)
+            difference = lm_f - lm_m
+            x, y, z, u, v, w = (
+                lm_m[:, 0],
+                lm_m[:, 1],
+                lm_m[:, 2],
+                difference[:, 0],
+                difference[:, 1],
+                difference[:, 2],
+            )
+            x_2, y_2, z_2 = lm_f[:, 0], lm_f[:, 1], lm_f[:, 2]
+            if self.plot is None:
+                mlab.contour3d(
+                    resize_spacing(fixed_mask, image_spacing, (1, 1, 1)).astype(
+                        np.uint8
+                    ),
+                    colormap="gray",
+                    opacity=0.1,
+                )
+                mlab.points3d(x, y, z, scale_factor=1, color=(1, 0, 0))
+                self.plot = mlab.quiver3d(
+                    x, y, z, u, v, w, scale_factor=1, mode="arrow"
+                )
+                self.plot2 = mlab.points3d(
+                    x_2, y_2, z_2, scale_factor=1, color=(0, 1, 0)
+                )
+            else:
+                self.plot.mlab_source.trait_set(x=x, y=y, z=z, u=u, v=v, w=w)
+                self.plot2.mlab_source.trait_set(x=x_2, y=y_2, z=z_2)
+
+        # The layout of the dialog created
+        view = View(
+            Item(
+                "scene",
+                editor=SceneEditor(scene_class=MayaviScene),
+                height=250,
+                width=300,
+                show_label=False,
+            ),
+            Group(
+                "_",
+                "n_step",
+            ),
+            resizable=True,
         )
-        for i in range(1, 11)
-    }
 
-    pprint(hashes)
+    my_model = MyModel()
+    my_model.configure_traits()

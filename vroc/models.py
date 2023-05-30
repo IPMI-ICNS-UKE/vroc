@@ -34,9 +34,10 @@ from vroc.common_types import (
 )
 from vroc.decay import exponential_decay
 from vroc.decorators import timing
-from vroc.helper import get_bounding_box
+from vroc.helper import get_bounding_box, write_landmarks
 from vroc.interpolation import match_vector_field, rescale, resize
 from vroc.logger import LoggerMixin
+from vroc.loss import TRELoss
 
 
 # TODO: channel bug with skip_connections=False
@@ -675,6 +676,8 @@ class VariationalRegistration(BaseIterativeRegistration):
         fixed_image: torch.Tensor,
         moving_mask: torch.Tensor | None = None,
         fixed_mask: torch.Tensor | None = None,
+        moving_landmarks: torch.Tensor | None = None,
+        fixed_landmarks: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         initial_vector_field: torch.Tensor | None = None,
         yield_each_step: bool = False,
@@ -735,6 +738,7 @@ class VariationalRegistration(BaseIterativeRegistration):
         # for tracking level-wise metrics (used for early stopping, if enabled)
         metrics = []
         vector_field = None
+        warped_fixed_landmarks = None
 
         metric_before = self._calculate_metric(
             moving_image=moving_image, fixed_image=fixed_image, fixed_mask=fixed_mask
@@ -805,6 +809,28 @@ class VariationalRegistration(BaseIterativeRegistration):
                 warped_scaled_moving_mask = spatial_transformer(
                     scaled_moving_mask, composed_vector_field
                 )
+                if self.debug:
+                    cropped_fixed_landmarks = fixed_landmarks - [
+                        bbox[i].start for i in range(2, n_image_dimensions)
+                    ]
+                    exact_scale_factor = match_vector_field(
+                        vector_field=composed_vector_field,
+                        image=fixed_image,
+                        return_scale_factor=True,
+                    )
+                    scaled_fixed_landmarks = torch.as_tensor(
+                        cropped_fixed_landmarks / exact_scale_factor
+                    ).to(device)
+                    warped_fixed_landmarks = TRELoss._warped_fixed_landmarks(
+                        fixed_landmarks=scaled_fixed_landmarks,
+                        vector_field=composed_vector_field,
+                    )
+                    warped_fixed_landmarks = (
+                        warped_fixed_landmarks.detach().cpu() * exact_scale_factor
+                    ).numpy()
+                    warped_fixed_landmarks = warped_fixed_landmarks + [
+                        bbox[i].start for i in range(2, n_image_dimensions)
+                    ]
 
                 level_metrics.append(
                     self._calculate_metric(
@@ -901,6 +927,17 @@ class VariationalRegistration(BaseIterativeRegistration):
                         metrics=debug_metrics,
                         output_folder=self.debug_output_folder,
                     )
+                    write_landmarks(
+                        landmarks=fixed_landmarks,
+                        filepath=self.debug_output_folder
+                        / f"warped_landmarks_initial.csv",
+                    )
+                    write_landmarks(
+                        landmarks=warped_fixed_landmarks,
+                        filepath=self.debug_output_folder
+                        / f"warped_landmarks_level_{i_level:02d}_iteration_{i_iteration:04d}.csv",
+                    )
+
                     self.logger.debug(
                         f"Created snapshot of registration at level={i_level}, iteration={i_iteration}"
                     )
@@ -991,6 +1028,8 @@ class VariationalRegistration(BaseIterativeRegistration):
         fixed_image: torch.Tensor,
         moving_mask: torch.Tensor | None = None,
         fixed_mask: torch.Tensor | None = None,
+        moving_landmarks: torch.Tensor | None = None,
+        fixed_landmarks: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         initial_vector_field: torch.Tensor | None = None,
         yield_each_step: bool = False,
@@ -1002,6 +1041,8 @@ class VariationalRegistration(BaseIterativeRegistration):
             fixed_image=fixed_image,
             moving_mask=moving_mask,
             fixed_mask=fixed_mask,
+            moving_landmarks=moving_landmarks,
+            fixed_landmarks=fixed_landmarks,
             original_image_spacing=original_image_spacing,
             initial_vector_field=initial_vector_field,
             yield_each_step=yield_each_step,
