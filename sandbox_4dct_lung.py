@@ -14,13 +14,12 @@ from vroc.loss import ncc_loss
 from vroc.registration import VrocRegistration
 
 if __name__ == "__main__":
-
     init_fancy_logging()
 
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG)
-    logging.getLogger("vroc").setLevel(logging.INFO)
-    logging.getLogger("vroc.models").setLevel(logging.INFO)
+    logging.getLogger("vroc").setLevel(logging.DEBUG)
+    # logging.getLogger("vroc.models").setLevel(logging.INFO)
 
     ROOT_DIR = (
         Path("/home/tsentker/data"),
@@ -28,11 +27,11 @@ if __name__ == "__main__":
     )
     ROOT_DIR = next(p for p in ROOT_DIR if p.exists())
     DATASET = "dirlab_4dct"
-    DATASET = "dirlab_copdgene"
+    # DATASET = "dirlab_copdgene"
 
     DATA_FOLDER = ROOT_DIR / DATASET / "converted"
 
-    device = "cuda:0"
+    DEVICE = "cuda:1"
 
     dataset = Lung4DCTRegistrationDataset.from_folder(
         DATA_FOLDER, phases=(0, 5), output_image_spacing=None
@@ -46,7 +45,7 @@ if __name__ == "__main__":
     # parameter_guesser.fit()
 
     params = {
-        "iterations": 100,
+        "iterations": 0,
         "tau": 2.25,
         "tau_level_decay": 0.0,
         "tau_iteration_decay": 0.0,
@@ -62,13 +61,17 @@ if __name__ == "__main__":
         roi_segmenter=None,
         feature_extractor=None,
         parameter_guesser=None,
-        device="cuda:0",
+        device=DEVICE,
     )
 
     tres_before = []
     tres_after = []
     t_start = time.time()
-    for data in dataset:
+    cases = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    cases = [6, 7, 8, 9, 10]
+    cases = [1]
+    for case in cases:
+        data = dataset[case - 1]
         moving_phase = 5  # == max exhale
         fixed_phase = 0  # == max inhale
 
@@ -96,7 +99,7 @@ if __name__ == "__main__":
             moving_mask=moving_mask,
             fixed_mask=fixed_mask,
             image_spacing=image_spacing,
-            register_affine=False,
+            register_affine=True,
             affine_loss_function=ncc_loss,
             force_type="demons",
             gradient_type="dual",
@@ -107,6 +110,12 @@ if __name__ == "__main__":
             debug=False,
             debug_output_folder=DATA_FOLDER.parent / "debug",
             debug_step_size=1,
+            # mode='model_based',
+            mode="standard",
+            affine_enable_rotation=True,
+            affine_enable_scaling=True,
+            affine_enable_shearing=True,
+            affine_enable_translation=True,
         )
 
         tre_before = compute_tre_numpy(

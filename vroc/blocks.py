@@ -452,7 +452,7 @@ class SpatialTransformer(nn.Module):
         if not torch.is_floating_point(image):
             # everything like bool, uint8, ...
             mode = "nearest"
-            # warning: No gradients with nearest interpolation. Unsure why.
+            # warning: No gradients with nearest interpolation
 
         # convert to float32 as needed for grid_sample
         image = torch.as_tensor(image, dtype=torch.float32)
@@ -485,44 +485,54 @@ class SpatialTransformer(nn.Module):
         default_value: Number = 0,
         mode: str = "bilinear",
     ) -> torch.Tensor:
-        # transformation can be an affine 4x4 matrix or a dense vector field:
-        # shape affine matrix: (batch, 4, 4)
-        # shape dense vector field: (batch, 3, x_size, y_size, z_size)
+        # transformation can be an affine matrix or a dense vector field:
+        # n_spatial_dims = 2 or 3
+        # shape affine matrix: (batch, n_spatial_dims + 1, n_spatial_dims + 1)
+        # shape dense vector field: (batch, n_spatial_dims, x_size, y_size[, z_size)]
 
-        image_spatial_shape = image.shape[2:]
-        n_spatial_dims = len(image_spatial_shape)
-        is_affine_transformation = transformation.shape[-2:] == (4, 4)
+        spatial_image_shape = image.shape[2:]
+        n_spatial_dims = len(spatial_image_shape)
+
+        if n_spatial_dims not in {2, 3}:
+            raise NotImplementedError(
+                f"SpatialTransformer for {n_spatial_dims}D images is currently "
+                f"not supported"
+            )
+
+        # check for dense transformation (i.e. matching spatial dimensions)
+        is_dense_transformation = (
+            spatial_image_shape == transformation.shape[-n_spatial_dims:]
+        )
 
         if self.identity_grid is None:
             # create identity grid dynamically
             identity_grid = self.create_identity_grid(
-                image_spatial_shape, device=image.device
+                spatial_image_shape, device=image.device
             )
             self.identity_grid = identity_grid
-        elif self.identity_grid.shape[1:] != image_spatial_shape:
+        elif self.identity_grid.shape[1:] != spatial_image_shape:
             # mismatch: create new identity grid
             identity_grid = self.create_identity_grid(
-                image_spatial_shape, device=image.device
+                spatial_image_shape, device=image.device
             )
             self.identity_grid = identity_grid
         else:
             identity_grid = self.identity_grid
 
-        if is_affine_transformation:
+        if not is_dense_transformation:
             # transformation is affine matrix
-            # discard last row of 4x4 matrix to get 3x4 matrix
+            # discard last row of 4x4/3x3 matrix
             # (last low of affine matrix is not used by PyTorch)
             grid = F.affine_grid(
-                transformation[:, :3], size=image.shape, align_corners=True
+                transformation[:, :n_spatial_dims], size=image.shape, align_corners=True
             )
         else:
             # transformation is dense vector field
             grid = identity_grid + transformation
-            # need to normalize grid values to [-1, 1] for PyTorch's grid_sample
-            for i in range(n_spatial_dims):
-                grid[:, i, ...] = 2 * (
-                    grid[:, i, ...] / (image_spatial_shape[i] - 1) - 0.5
-                )
+
+            grid = SpatialTransformer.scale_grid(
+                grid, spatial_image_shape=spatial_image_shape
+            )
 
             # move channels dim to last position and reverse channels
             if n_spatial_dims == 2:
@@ -535,6 +545,25 @@ class SpatialTransformer(nn.Module):
         return self._warp(
             image=image, grid=grid, default_value=default_value, mode=mode
         )
+
+    @staticmethod
+    def scale_grid(
+        grid: torch.Tensor, spatial_image_shape: IntTuple | torch.Tensor | torch.Size
+    ) -> torch.Tensor:
+        spatial_image_shape = torch.as_tensor(spatial_image_shape, device=grid.device)
+        if (n_spatial_dims := len(spatial_image_shape)) == 2:
+            spatial_image_shape = spatial_image_shape[None, :, None, None]
+        elif n_spatial_dims == 3:
+            spatial_image_shape = spatial_image_shape[None, :, None, None, None]
+        else:
+            raise NotImplementedError(
+                f"SpatialTransformer for {n_spatial_dims}D images is currently "
+                f"not supported"
+            )
+        # scale grid values to [-1, 1] for PyTorch's grid_sample
+        grid = 2 * (grid / (spatial_image_shape - 1) - 0.5)
+
+        return grid
 
     def compose_vector_fields(
         self, vector_field_1: torch.Tensor, vector_field_2: torch.Tensor
