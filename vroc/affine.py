@@ -257,6 +257,7 @@ def run_affine_registration(
     enable_scaling: bool = True,
     enable_rotation: bool = True,
     enable_shearing: bool = True,
+    default_voxel_value: Number = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if not any((enable_translation, enable_scaling, enable_rotation, enable_shearing)):
         raise ValueError(
@@ -299,9 +300,9 @@ def run_affine_registration(
                 enable_shearing=enable_shearing,
             ).to(device)
             # affine_transform = AffineTransform3d().to(device)
-            spatial_transformer = SpatialTransformer(shape=spatial_image_shape).to(
-                device
-            )
+            spatial_transformer = SpatialTransformer(
+                shape=spatial_image_shape, default_value=default_voxel_value
+            ).to(device)
             optimizer = Adam(
                 [
                     param

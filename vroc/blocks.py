@@ -417,10 +417,12 @@ class SpatialTransformer(nn.Module):
     def __init__(
         self,
         shape: IntTuple | None = None,
+        default_value: Number = 0,
     ):
         super().__init__()
 
         self.shape = shape
+        self.default_value = default_value
 
         # create sampling grid if shape is given
         if self.shape:
@@ -444,9 +446,11 @@ class SpatialTransformer(nn.Module):
         self,
         image: torch.Tensor,
         grid: torch.Tensor,
-        default_value: Number = 0,
+        default_value: Number | None = None,
         mode: str = "bilinear",
     ) -> torch.Tensor:
+        # initial default value can be overwritten by warp method
+        default_value = default_value or self.default_value
         # save initial dtype
         image_dtype = image.dtype
         if not torch.is_floating_point(image):
@@ -482,7 +486,7 @@ class SpatialTransformer(nn.Module):
         self,
         image,
         transformation: torch.Tensor,
-        default_value: Number = 0,
+        default_value: Number | None = None,
         mode: str = "bilinear",
     ) -> torch.Tensor:
         # transformation can be an affine matrix or a dense vector field:
@@ -1277,6 +1281,23 @@ class NormedConv3d(nn.Conv3d):
         result = self._conv_forward(input, self.weight / kernel_norm, self.bias)
 
         return result
+
+
+def separable_normed_conv_3d(
+    input: Tensor, kernel_x: Tensor, kernel_y: Tensor, kernel_z: Tensor
+):
+    kernels = (
+        kernel_x[None, None, :, None, None],
+        kernel_y[None, None, :, None, None],
+        kernel_z[None, None, :, None, None],
+    )
+
+    output = input
+    for kernel in kernels:
+        output = output.permute(0, 1, 4, 2, 3)
+        output = F.conv3d(output, kernel, stride=1, padding="same")
+
+    return output
 
 
 if __name__ == "__main__":

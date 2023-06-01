@@ -29,8 +29,8 @@ from vroc.interpolation import rescale, resize
 from vroc.logger import LoggerMixin, RegistrationLogEntry
 from vroc.loss import DiceLoss, TRELoss, WarpedMSELoss, smooth_vector_field_loss
 from vroc.models import (
+    ModelBasedVariationalRegistration,
     VariationalRegistration,
-    VariationalRegistrationBooster,
     VariationalRegistrationWithForceEstimation,
 )
 
@@ -122,7 +122,6 @@ class RegistrationResult:
 
 
 class VrocRegistration(LoggerMixin):
-
     DEFAULT_REGISTRATION_PARAMETERS = {
         "iterations": 800,
         "tau": 2.25,
@@ -215,6 +214,7 @@ class VrocRegistration(LoggerMixin):
         early_stopping_delta: float = 0.0,
         early_stopping_window: int | None = None,
         default_parameters: dict | None = None,
+        default_voxel_value: Number = 0.0,
         return_as_tensor: bool = False,
         debug: bool = False,
         debug_output_folder: PathLike | None = None,
@@ -373,8 +373,8 @@ class VrocRegistration(LoggerMixin):
         )
         self.logger.debug(f"Using image pyramid scale factors: {scale_factors}")
 
-        if mode == "boost":
-            varreg_class = VariationalRegistrationBooster
+        if mode == "model_based":
+            varreg_class = ModelBasedVariationalRegistration
         elif mode == "force_estimation":
             varreg_class = VariationalRegistrationWithForceEstimation
         else:
@@ -699,7 +699,6 @@ class VrocRegistration(LoggerMixin):
                 optimizer.zero_grad()
                 # composed_boosted_vector_field = composed_boosted_vector_field.detach()
                 with torch.autocast(device_type="cuda", enabled=True):
-
                     original_shape = moving_image.shape[2:]
                     boosting_shape = tuple(
                         int(round(s * boost_scale)) for s in moving_image.shape[2:]
@@ -1163,7 +1162,6 @@ class VrocRegistration(LoggerMixin):
                 optimizer.zero_grad()
                 # composed_boosted_vector_field = composed_boosted_vector_field.detach()
                 with torch.autocast(device_type="cuda", enabled=True):
-
                     original_shape = moving_image.shape[2:]
                     boosting_shape = tuple(
                         int(round(s * boost_scale)) for s in moving_image.shape[2:]

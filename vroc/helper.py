@@ -7,7 +7,7 @@ from collections.abc import MutableSequence
 from math import ceil
 from multiprocessing import Queue
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Hashable, Sequence, Tuple
 
 import numpy as np
 import SimpleITK as sitk
@@ -646,6 +646,17 @@ def calculate_sha256_checksum(filepath: PathLike) -> str:
         for chunk in iter(lambda: f.read(4096), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def get_mode_from_alternation_scheme(
+    alternation_scheme: dict[Hashable, int], iteration: int
+) -> Hashable:
+    total_iterations = sum(alternation_scheme.values())
+    residual = iteration % total_iterations
+    for mode, mode_iterations in alternation_scheme.items():
+        residual -= mode_iterations
+        if residual < 0:
+            return mode
 
 
 def plot_landmarks(moving_landmarks, fixed_landmarks, image_spacing, fixed_mask):

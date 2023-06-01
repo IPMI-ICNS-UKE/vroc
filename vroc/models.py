@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Generator, List, Literal, Optional, Sequence, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -23,6 +24,7 @@ from vroc.blocks import (
     NormedConv3d,
     SpatialTransformer,
     UpBlock,
+    separable_normed_conv_3d,
 )
 from vroc.checks import are_of_same_length, is_tuple, is_tuple_of_tuples
 from vroc.common_types import (
@@ -31,10 +33,15 @@ from vroc.common_types import (
     IntTuple2D,
     IntTuple3D,
     MaybeSequence,
+    Number,
 )
 from vroc.decay import exponential_decay
 from vroc.decorators import timing
-from vroc.helper import get_bounding_box, write_landmarks
+from vroc.helper import (
+    get_bounding_box,
+    get_mode_from_alternation_scheme,
+    write_landmarks,
+)
 from vroc.interpolation import match_vector_field, rescale, resize
 from vroc.logger import LoggerMixin
 from vroc.loss import TRELoss
@@ -99,7 +106,6 @@ class FlexUNet(nn.Module):
         return DecoderBlock
 
     def _build_layers(self):
-
         if self.filter_base:
             n_filters = {
                 "init": self.filter_base,
@@ -156,7 +162,6 @@ class FlexUNet(nn.Module):
             previous_out_channels = out_channels
 
         for i, i_level in enumerate(reversed(range(self.n_levels))):
-
             out_channels = n_filters["dec"][i]
 
             if i_level > 0:  # deeper levels
@@ -353,7 +358,7 @@ class BaseIterativeRegistration(ABC, nn.Module, LoggerMixin):
         if not image_shape == self._image_shape:
             self._image_shape = image_shape
             self._full_size_spatial_transformer = SpatialTransformer(
-                shape=image_shape
+                shape=image_shape, default_value=self.default_voxel_value
             ).to(device)
 
             for i_level, scale_factor in enumerate(self.scale_factors):
@@ -368,13 +373,14 @@ class BaseIterativeRegistration(ABC, nn.Module, LoggerMixin):
                     pass
                 self.add_module(
                     name=f"spatial_transformer_level_{i_level}",
-                    module=SpatialTransformer(shape=scaled_image_shape).to(device),
+                    module=SpatialTransformer(
+                        shape=scaled_image_shape, default_value=self.default_voxel_value
+                    ).to(device),
                 )
 
     def _perform_scaling(
         self, *images, scale_factor: float = 1.0
     ) -> List[torch.Tensor]:
-
         scaled = []
         for image in images:
             if image is not None:
@@ -447,6 +453,7 @@ class BaseIterativeRegistration(ABC, nn.Module, LoggerMixin):
         scale_factor: float,
         vector_field: torch.Tensor,
         moving_image: torch.Tensor,
+        warped_image: torch.Tensor,
         fixed_image: torch.Tensor,
         moving_mask: torch.Tensor | None = None,
         fixed_mask: torch.Tensor | None = None,
@@ -514,6 +521,7 @@ class VariationalRegistration(BaseIterativeRegistration):
         early_stopping_delta: float = 0.0,
         early_stopping_window: int | None = 20,
         boosting_model: nn.Module | None = None,
+        default_voxel_value: Number = 0.0,
         debug: bool = False,
         debug_output_folder: Path | None = None,
         debug_step_size: int = 10,
@@ -561,6 +569,7 @@ class VariationalRegistration(BaseIterativeRegistration):
             early_stopping_window, n_levels=self.n_levels, expand_none=True
         )
         self.boosting_model = boosting_model
+        self.default_voxel_value = default_voxel_value
         self.debug = debug
         self.debug_output_folder = debug_output_folder
         self.debug_step_size = debug_step_size
@@ -620,15 +629,15 @@ class VariationalRegistration(BaseIterativeRegistration):
         scale_factor: float,
         vector_field: torch.Tensor,
         moving_image: torch.Tensor,
+        warped_image: torch.Torch,
         fixed_image: torch.Tensor,
         moving_mask: torch.Tensor | None = None,
         fixed_mask: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         initial_vector_field: torch.Tensor | None = None,
     ) -> torch.Tensor:
-
         forces = self._forces_layer(
-            moving_image,
+            warped_image,
             fixed_image,
             moving_mask,
             fixed_mask,
@@ -849,7 +858,8 @@ class VariationalRegistration(BaseIterativeRegistration):
                     iteration=i_iteration,
                     scale_factor=scale_factor,
                     vector_field=vector_field,
-                    moving_image=warped_moving,
+                    moving_image=scaled_moving_image,
+                    warped_image=warped_moving,
                     fixed_image=scaled_fixed_image,
                     moving_mask=warped_scaled_moving_mask,
                     fixed_mask=scaled_fixed_mask,
@@ -955,9 +965,9 @@ class VariationalRegistration(BaseIterativeRegistration):
             _vector_field[(...,) + bbox[2:]] = vector_field
             vector_field = _vector_field
 
-        spatial_transformer = SpatialTransformer(shape=full_uncropped_shape[2:]).to(
-            fixed_image.device
-        )
+        spatial_transformer = SpatialTransformer(
+            shape=full_uncropped_shape[2:], default_value=self.default_voxel_value
+        ).to(fixed_image.device)
 
         result = {"type": "final"}
 
@@ -1075,17 +1085,30 @@ class VariationalRegistration(BaseIterativeRegistration):
         )
 
 
-class VariationalRegistrationBooster(VariationalRegistration):
+class ModelBasedVariationalRegistration(VariationalRegistration):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        model = DemonsVectorFieldBoosterStable(n_iterations=1)
-        state = torch.load(
-            "/home/fmadesta/research/varreg_on_crack/data/adv_boost_all_levels.pth"
-        )
-        model.load_state_dict(state["model"])
+        models = {}
+        for i_level in range(3):
+            # state = torch.load(
+            #     f"/datalake/dirlab_4dct/output/models/f303bb5a2cde4442bd76ef69/level_{i_level}_step_041.pth",
+            # )
+            #
+            # model = DemonsVectorFieldBoosterStable()
 
-        self.model = model
+            state = torch.load(
+                f"/datalake/dirlab_4dct/output/models/37a25ccdc294401593b0f7e4/level_{i_level}_step_5379.pth",
+            )
+
+            model = DemonsForceModulator()
+            model.load_state_dict(state["model"])
+            model.eval()
+            models[f"level_{i_level}"] = model
+
+        self.models = nn.ModuleDict(models)
+
+        self.alternation_scheme = {"standard": 0, "model": 1}
 
     def _update_step(
         self,
@@ -1094,30 +1117,55 @@ class VariationalRegistrationBooster(VariationalRegistration):
         scale_factor: float,
         vector_field: torch.Tensor,
         moving_image: torch.Tensor,
+        warped_image: torch.Tensor,
         fixed_image: torch.Tensor,
         moving_mask: torch.Tensor | None = None,
         fixed_mask: torch.Tensor | None = None,
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         initial_vector_field: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        mode = get_mode_from_alternation_scheme(
+            alternation_scheme=self.alternation_scheme, iteration=iteration
+        )
+        if level > 0:
+            mode = "standard"
 
-        with torch.inference_mode(), torch.autocast(device_type="cuda", enabled=True):
-            vector_field_boost = self.model(
+        if mode == "standard":
+            vector_field = super()._update_step(
+                level=level,
+                iteration=iteration,
+                scale_factor=scale_factor,
+                vector_field=vector_field,
                 moving_image=moving_image,
+                warped_image=warped_image,
                 fixed_image=fixed_image,
                 moving_mask=moving_mask,
                 fixed_mask=fixed_mask,
-                vector_field=vector_field,
-                image_spacing=None,
+                original_image_spacing=original_image_spacing,
+                initial_vector_field=initial_vector_field,
             )
 
-        spatial_transformer = SpatialTransformer()
-        vector_field_after_boost = spatial_transformer.compose_vector_fields(
-            vector_field_1=vector_field,
-            vector_field_2=vector_field_boost,
-        )
+        elif mode == "model":
+            model = self.models[f"level_{level}"]
 
-        return vector_field_after_boost
+            with torch.autocast(
+                device_type="cuda", dtype=torch.float16, enabled=True
+            ), torch.inference_mode():
+                vector_field = model(
+                    moving_image=moving_image,
+                    warped_image=warped_image,
+                    fixed_image=fixed_image,
+                    moving_mask=moving_mask,
+                    fixed_mask=fixed_mask,
+                    vector_field=vector_field,
+                    image_spacing=None,
+                )
+        else:
+            raise ValueError(f"Unknown {mode=}")
+
+        self.logger.debug(f"Using {mode} vector field update step")
+
+        return vector_field
 
 
 class VariationalRegistrationWithForceEstimation(VariationalRegistration):
@@ -1165,7 +1213,6 @@ class VariationalRegistrationWithForceEstimation(VariationalRegistration):
         original_image_spacing: FloatTuple3D = (1.0, 1.0, 1.0),
         initial_vector_field: torch.Tensor | None = None,
     ) -> torch.Tensor:
-
         level_model = self.models[f"level_{level}"]
 
         with torch.inference_mode(), torch.autocast(device_type="cuda", enabled=True):
@@ -1313,7 +1360,6 @@ class DemonsVectorFieldBooster(nn.Module, LoggerMixin):
         image_spacing: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-
         spatial_image_shape = moving_image.shape[2:]
         vector_field_boost = torch.zeros(
             (1, 3) + spatial_image_shape, device=moving_image.device
@@ -1452,7 +1498,6 @@ class DemonsVectorFieldBooster2(nn.Module, LoggerMixin):
         image_spacing: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-
         spatial_image_shape = moving_image.shape[2:]
         vector_field_boost = torch.zeros(
             (1, 3) + spatial_image_shape, device=moving_image.device
@@ -1574,7 +1619,6 @@ class DemonsVectorFieldBooster3(nn.Module, LoggerMixin):
         image_spacing: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-
         spatial_image_shape = moving_image.shape[2:]
         vector_field_boost = torch.zeros(
             (1, 3) + spatial_image_shape, device=moving_image.device
@@ -1714,7 +1758,6 @@ class DemonsVectorFieldBooster4(nn.Module, LoggerMixin):
         image_spacing: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-
         spatial_image_shape = moving_image.shape[2:]
         vector_field_boost = torch.zeros(
             (1, 3) + spatial_image_shape, device=moving_image.device
@@ -1890,7 +1933,6 @@ class DemonsVectorFieldBooster5(nn.Module, LoggerMixin):
         image_spacing: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-
         spatial_image_shape = moving_image.shape[2:]
         vector_field_boost = torch.zeros(
             (1, 3) + spatial_image_shape, device=moving_image.device
@@ -1929,27 +1971,25 @@ class DemonsVectorFieldBooster5(nn.Module, LoggerMixin):
 class DemonsVectorFieldBoosterStable(nn.Module, LoggerMixin):
     def __init__(
         self,
-        n_iterations: int = 1,
         gradient_type: Literal["active", "passive", "dual"] = "dual",
     ):
         super().__init__()
 
-        self.n_iterations = n_iterations
         self.forces = DemonForces(method=gradient_type)
 
         kernel_guesser_1 = [
             nn.Conv3d(
                 in_channels=3,
-                out_channels=27,
+                out_channels=32,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
                 bias=True,
             ),
-            nn.Mish(inplace=True),
+            nn.Mish(),
             nn.Conv3d(
-                in_channels=27,
-                out_channels=81,
+                in_channels=32,
+                out_channels=9 * 7,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
@@ -1960,16 +2000,16 @@ class DemonsVectorFieldBoosterStable(nn.Module, LoggerMixin):
         kernel_guesser_2 = [
             nn.Conv3d(
                 in_channels=3,
-                out_channels=27,
+                out_channels=32,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
                 bias=True,
             ),
-            nn.Mish(inplace=True),
+            nn.Mish(),
             nn.Conv3d(
-                in_channels=27,
-                out_channels=81,
+                in_channels=32,
+                out_channels=9 * 7,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
@@ -1977,16 +2017,16 @@ class DemonsVectorFieldBoosterStable(nn.Module, LoggerMixin):
             ),
         ]
 
-        tau = [
+        force_weighter = [
             nn.Conv3d(
-                in_channels=6,
+                in_channels=2,
                 out_channels=16,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
                 bias=True,
             ),
-            nn.Mish(inplace=True),
+            nn.Mish(),
             nn.Conv3d(
                 in_channels=16,
                 out_channels=3,
@@ -1999,13 +2039,14 @@ class DemonsVectorFieldBoosterStable(nn.Module, LoggerMixin):
 
         self.kernel_guesser_1 = nn.Sequential(*kernel_guesser_1)
         self.kernel_guesser_2 = nn.Sequential(*kernel_guesser_2)
+        self.force_weighter = nn.Sequential(*force_weighter)
 
-        self.tau = nn.Sequential(*tau)
         self.spatial_transformer = SpatialTransformer()
 
     def forward(
         self,
         moving_image: torch.Tensor,
+        warped_image: torch.Tensor,
         fixed_image: torch.Tensor,
         moving_mask: torch.Tensor,
         fixed_mask: torch.Tensor,
@@ -2013,84 +2054,99 @@ class DemonsVectorFieldBoosterStable(nn.Module, LoggerMixin):
         image_spacing: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        # warped_moving_image = self.spatial_transformer(moving_image, vector_field)
 
-        spatial_image_shape = moving_image.shape[2:]
-        vector_field_boost = torch.zeros(
-            (1, 3) + spatial_image_shape, device=moving_image.device
+        forces = self.forces(
+            warped_image,
+            fixed_image,
+            moving_mask,
+            fixed_mask,
+            image_spacing,
         )
 
-        for _ in range(self.n_iterations):
-            composed_vector_field = vector_field_boost + self.spatial_transformer(
-                vector_field, vector_field_boost
-            )
-            warped_moving_image = self.spatial_transformer(
-                moving_image, composed_vector_field
-            )
+        full_shape = forces.shape[2:]
 
-            forces = self.forces(
-                warped_moving_image,
-                fixed_image,
-                moving_mask,
-                fixed_mask,
-                image_spacing,
-            )
+        kernel_1 = self.kernel_guesser_1(forces)
+        kernel_1 = torch.mean(kernel_1, dim=(-3, -2, -1))
+        kernel_1 = kernel_1.reshape((3, 3, 7))
+        kernel_1 = torch.softmax(kernel_1, dim=-1)
 
-            full_shape = forces.shape[2:]
-            forces_pooled_1 = forces
-            forces_pooled_2 = F.avg_pool3d(forces, 2)
+        # kernel_2 = self.kernel_guesser_2(forces)
+        # kernel_2 = torch.mean(kernel_2, dim=(-3, -2, -1))
+        # kernel_2 = kernel_2.reshape((3, 3, 7))
+        # kernel_2 = torch.softmax(kernel_2, dim=-1)
 
-            kernel_1 = self.kernel_guesser_1(forces_pooled_1)
-            kernel_1 = torch.mean(kernel_1, dim=(-3, -2, -1))
-            kernel_1 = torch.sigmoid(kernel_1)
-            kernel_1 = kernel_1.reshape((3, 1, 3, 3, 3))
+        regularized_forces_1 = torch.concat(
+            (
+                separable_normed_conv_3d(
+                    forces[:, 0:1],
+                    kernel_x=kernel_1[0, 0],
+                    kernel_y=kernel_1[0, 1],
+                    kernel_z=kernel_1[0, 2],
+                ),
+                separable_normed_conv_3d(
+                    forces[:, 1:2],
+                    kernel_x=kernel_1[1, 0],
+                    kernel_y=kernel_1[1, 1],
+                    kernel_z=kernel_1[1, 2],
+                ),
+                separable_normed_conv_3d(
+                    forces[:, 2:3],
+                    kernel_x=kernel_1[2, 0],
+                    kernel_y=kernel_1[2, 1],
+                    kernel_z=kernel_1[2, 2],
+                ),
+            ),
+            dim=1,
+        )
 
-            # normalize kernel_1
-            kernel_1 = kernel_1 / kernel_1.sum(dim=(-3, -2, -1), keepdim=True)
+        # regularized_forces_2 = torch.concat(
+        #     (
+        #         separable_normed_conv_3d(
+        #             forces[:, 0:1],
+        #             kernel_x=kernel_2[0, 0],
+        #             kernel_y=kernel_2[0, 1],
+        #             kernel_z=kernel_2[0, 2],
+        #         ),
+        #         separable_normed_conv_3d(
+        #             forces[:, 1:2],
+        #             kernel_x=kernel_2[1, 0],
+        #             kernel_y=kernel_2[1, 1],
+        #             kernel_z=kernel_2[1, 2],
+        #         ),
+        #         separable_normed_conv_3d(
+        #             forces[:, 2:3],
+        #             kernel_x=kernel_2[2, 0],
+        #             kernel_y=kernel_2[2, 1],
+        #             kernel_z=kernel_2[2, 2],
+        #         ),
+        #     ),
+        #     dim=1,
+        # )
 
-            kernel_2 = self.kernel_guesser_1(forces_pooled_2)
-            kernel_2 = torch.mean(kernel_2, dim=(-3, -2, -1))
-            kernel_2 = torch.sigmoid(kernel_2)
-            kernel_2 = kernel_2.reshape((3, 1, 3, 3, 3))
+        # global_min = min(warped_moving_image.min(), fixed_image.min())
+        # global_max = min(warped_moving_image.max(), fixed_image.max())
+        #
+        # warped_moving_image = (warped_moving_image - global_min) / (
+        #     global_max - global_min
+        # )
+        # fixed_image = (fixed_image - global_min) / (global_max - global_min)
+        #
+        # force_weighting = self.force_weighter(
+        #     torch.concat((warped_moving_image, fixed_image), dim=1)
+        # )
+        # force_weighting = torch.softmax(force_weighting, dim=1)
+        #
+        # regularized_forces = (
+        #     torch.zeros_like(regularized_forces_1) * force_weighting[:, 0:1]
+        #     + regularized_forces_1 * force_weighting[:, 1:2]
+        #     # + regularized_forces_2 * force_weighting[:, 2:3]
+        # )
 
-            # normalize kernel_2
-            kernel_2 = kernel_2 / kernel_2.sum(dim=(-3, -2, -1), keepdim=True)
+        tau = 2.25
+        vector_field = vector_field + tau * regularized_forces_1
 
-            regularized_forces_1 = F.conv3d(
-                forces_pooled_1, weight=kernel_1, padding="same", groups=3
-            )
-            regularized_forces_2 = F.conv3d(
-                forces_pooled_2, weight=kernel_2, padding="same", groups=3
-            )
-
-            regularized_forces_1 = F.interpolate(
-                input=regularized_forces_1,
-                size=full_shape,
-                mode="trilinear",
-                align_corners=False,
-            )
-
-            regularized_forces_2 = F.interpolate(
-                input=regularized_forces_2,
-                size=full_shape,
-                mode="trilinear",
-                align_corners=False,
-            )
-
-            regularized_forces = (regularized_forces_1 + regularized_forces_2) / 2.0
-
-            tau = self.tau(
-                torch.concat([regularized_forces_1, regularized_forces_2], dim=1)
-            )
-            tau = 10.0 * torch.sigmoid(tau)
-            # tau = tau.mean(dim=(-3, -2, -1), keepdim=True)
-
-            print(
-                f"mean tau x/y/z: {tau[:, 0].mean()}/{tau[:, 1].mean()}/{tau[:, 2].mean()}"
-            )
-
-            vector_field_boost = vector_field_boost + tau * regularized_forces
-
-        return vector_field_boost
+        return vector_field
 
 
 class DemonsVectorFieldBoosterForceLearning(nn.Module, LoggerMixin):
@@ -2104,34 +2160,34 @@ class DemonsVectorFieldBoosterForceLearning(nn.Module, LoggerMixin):
                 kernel_size=3,
                 dilation=1,
                 padding="same",
-                bias=False,
+                bias=True,
             ),
-            nn.Mish(inplace=True),
+            nn.Mish(),
             nn.Conv3d(
                 in_channels=16,
                 out_channels=32,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
-                bias=False,
+                bias=True,
             ),
-            nn.Mish(inplace=True),
+            nn.Mish(),
             nn.Conv3d(
                 in_channels=32,
                 out_channels=16,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
-                bias=False,
+                bias=True,
             ),
-            nn.Mish(inplace=True),
+            nn.Mish(),
             nn.Conv3d(
                 in_channels=16,
                 out_channels=3,
                 kernel_size=3,
                 dilation=1,
                 padding="same",
-                bias=False,
+                bias=True,
             ),
         ]
 
@@ -2148,7 +2204,6 @@ class DemonsVectorFieldBoosterForceLearning(nn.Module, LoggerMixin):
         image_spacing: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-
         warped_moving_image = self.spatial_transformer(moving_image, vector_field)
 
         global_min = min(warped_moving_image.min(), fixed_image.min())
@@ -2163,13 +2218,12 @@ class DemonsVectorFieldBoosterForceLearning(nn.Module, LoggerMixin):
             torch.cat((warped_moving_image, fixed_image), dim=1)
         )
         forces = F.softsign(forces)
+        vector_field = vector_field + forces
 
-        vector_field_boost = vector_field + forces
-
-        return vector_field_boost
+        return vector_field
 
 
-class DemonsForceEstimator(nn.Module, LoggerMixin):
+class DemonsForceCorrector(nn.Module, LoggerMixin):
     def __init__(
         self,
         gradient_type: Literal["active", "passive", "dual"] = "dual",
@@ -2178,9 +2232,9 @@ class DemonsForceEstimator(nn.Module, LoggerMixin):
 
         self.gradient_type = gradient_type
 
-        force_estimator = [
+        force_corrector = [
             nn.Conv3d(
-                in_channels=5,
+                in_channels=3,
                 out_channels=16,
                 kernel_size=3,
                 dilation=1,
@@ -2208,12 +2262,13 @@ class DemonsForceEstimator(nn.Module, LoggerMixin):
         ]
 
         self.demon_forces = DemonForces(method=gradient_type)
-        self.force_estimator = nn.Sequential(*force_estimator)
+        self.force_corrector = nn.Sequential(*force_corrector)
         self.spatial_transformer = SpatialTransformer()
 
     def forward(
         self,
         moving_image: torch.Tensor,
+        warped_image: torch.Tensor,
         fixed_image: torch.Tensor,
         moving_mask: torch.Tensor,
         fixed_mask: torch.Tensor,
@@ -2221,32 +2276,122 @@ class DemonsForceEstimator(nn.Module, LoggerMixin):
         image_spacing: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-
-        warped_moving_image = self.spatial_transformer(moving_image, vector_field)
+        # warped_moving_image = self.spatial_transformer(moving_image, vector_field)
 
         demon_forces = self.demon_forces(
-            warped_moving_image,
+            warped_image,
             fixed_image,
             moving_mask,
             fixed_mask,
             image_spacing,
         )
 
-        global_min = min(warped_moving_image.min(), fixed_image.min())
-        global_max = min(warped_moving_image.max(), fixed_image.max())
+        corrected_forces = self.force_corrector(demon_forces)
 
-        warped_moving_image = (warped_moving_image - global_min) / (
-            global_max - global_min
+        corrected_forces = 0.5 * torch.tanh(corrected_forces)
+
+        tau = 2.25
+        vector_field = vector_field + tau * corrected_forces
+
+        sigma_cutoff = (2.0, 2.0, 2.0)
+        _regularization_layer = GaussianSmoothing3d(
+            sigma=(1.25, 1.25, 1.25), sigma_cutoff=sigma_cutoff, force_same_size=True
+        ).to(vector_field)
+
+        vector_field = _regularization_layer(vector_field)
+
+        return vector_field
+
+
+class DemonsForceModulator(nn.Module, LoggerMixin):
+    def __init__(
+        self,
+        gradient_type: Literal["active", "passive", "dual"] = "dual",
+    ):
+        super().__init__()
+
+        self.gradient_type = gradient_type
+
+        modulator = [
+            nn.Conv3d(
+                in_channels=3,
+                out_channels=16,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.Mish(inplace=True),
+            nn.Conv3d(
+                in_channels=16,
+                out_channels=32,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+            nn.Mish(inplace=True),
+            nn.Conv3d(
+                in_channels=32,
+                out_channels=3,
+                kernel_size=3,
+                dilation=1,
+                padding="same",
+                bias=True,
+            ),
+        ]
+
+        self.demon_forces = DemonForces(method=gradient_type)
+        self.modulator = nn.Sequential(*modulator)
+        self.spatial_transformer = SpatialTransformer()
+
+    def forward(
+        self,
+        moving_image: torch.Tensor,
+        warped_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        moving_mask: torch.Tensor,
+        fixed_mask: torch.Tensor,
+        vector_field: torch.Tensor,
+        image_spacing: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        # moving image is warped image
+        demon_forces = self.demon_forces(
+            warped_image,
+            fixed_image,
+            moving_mask,
+            fixed_mask,
+            image_spacing,
         )
-        fixed_image = (fixed_image - global_min) / (global_max - global_min)
 
-        estimated_forces = self.force_estimator(
-            torch.cat((warped_moving_image, fixed_image, demon_forces), dim=1)
-        )
-        estimated_forces = demon_forces + torch.tanh(estimated_forces)
-        estimated_forces = torch.clip(estimated_forces, min=-0.5, max=0.5)
+        max_modulation = 0.10
+        modulation = self.modulator(demon_forces)
+        modulation = torch.tanh(modulation)
+        modulation = 1.0 + modulation * max_modulation
 
-        return estimated_forces, demon_forces
+        modulated_forces = demon_forces * modulation
+        modulated_forces = torch.clip(modulated_forces, -0.5, 0.5)
+
+        # fig, ax = plt.subplots(1, 3)
+        # i_slice = 90
+        # ax[0].imshow(demon_forces.detach().cpu().numpy()[0, 2, :, i_slice, :])
+        # ax[1].imshow(modulation.detach().cpu().numpy()[0, 2, :, i_slice, :])
+        # ax[2].imshow(modulated_forces.detach().cpu().numpy()[0, 2, :, i_slice, :])
+        # plt.show()
+
+        tau = 2.25
+        sigma = (1.25, 1.25, 1.25)
+        sigma_cutoff = (2.0, 2.0, 2.0)
+        vector_field = vector_field + tau * modulated_forces
+
+        _regularization_layer = GaussianSmoothing3d(
+            sigma=sigma, sigma_cutoff=sigma_cutoff, force_same_size=True
+        ).to(vector_field)
+
+        vector_field = _regularization_layer(vector_field)
+
+        return vector_field
 
 
 # class DemonsVectorFieldBooster(nn.Module, LoggerMixin):
