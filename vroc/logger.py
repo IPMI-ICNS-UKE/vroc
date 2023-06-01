@@ -21,7 +21,6 @@ class LoggerMixin:
 
 
 class FancyFormatter(logging.Formatter):
-
     bold = "\033[1m"
     reset = "\033[0m"
 
@@ -102,7 +101,6 @@ class FancyFormatter(logging.Formatter):
         return s
 
     def format(self, record: logging.LogRecord) -> str:
-
         record.name = self._shorten_left(
             record.name, max_length=self.max_module_name_length
         )
@@ -175,7 +173,6 @@ class RegistrationLogEntry:
         ordering: Sequence["str"] | None = None,
         **kwargs,
     ):
-
         self.stage = stage
         self.level = level
         self.iteration = iteration

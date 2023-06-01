@@ -12,7 +12,7 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from vroc.blocks import SpatialTransformer
-from vroc.helper import compute_tre_numpy, read_landmarks
+from vroc.helper import compute_tre_numpy
 from vroc.logger import RegistrationLogEntry
 from vroc.loss import mse_loss
 
@@ -272,10 +272,6 @@ def run_affine_registration(
     initial_step_size = step_size
 
     if moving_mask is not None and fixed_mask is not None:
-        # ROI is union mask
-        # roi = moving_mask | fixed_mask
-        # print("Using union mask (not for LungCT dataset)")
-
         roi = fixed_mask
         logger.info("Using fixed mask for affine registration")
     else:
@@ -289,7 +285,7 @@ def run_affine_registration(
 
     # initialize with moving image so that warped image is defined if n_iterations == 0
     warped_image = moving_image
-    affine_matrix = None
+
     while True:
         try:
             affine_transform = AffineTransform(
@@ -380,158 +376,3 @@ def run_affine_registration(
     )
 
     return warped_image, affine_transform.get_vector_field(moving_image)
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    import SimpleITK as sitk
-
-    from vroc.logger import LogFormatter
-
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(LogFormatter())
-    logging.basicConfig(handlers=[handler])
-
-    logging.getLogger(__name__).setLevel(logging.DEBUG)
-    logging.getLogger("vroc").setLevel(logging.DEBUG)
-
-    def load(
-        moving_image_filepath,
-        fixed_image_filepath,
-        moving_mask_filepath,
-        fixed_mask_filepath,
-    ):
-        moving_image = sitk.ReadImage(moving_image_filepath)
-        fixed_image = sitk.ReadImage(fixed_image_filepath)
-        moving_mask = sitk.ReadImage(moving_mask_filepath)
-        fixed_mask = sitk.ReadImage(fixed_mask_filepath)
-
-        reference_image = fixed_image
-
-        image_spacing = fixed_image.GetSpacing()[::-1]
-
-        moving_image = sitk.GetArrayFromImage(moving_image)
-        fixed_image = sitk.GetArrayFromImage(fixed_image)
-        moving_mask = sitk.GetArrayFromImage(moving_mask)
-        fixed_mask = sitk.GetArrayFromImage(fixed_mask)
-
-        moving_image = np.swapaxes(moving_image, 0, 2)
-        fixed_image = np.swapaxes(fixed_image, 0, 2)
-        moving_mask = np.swapaxes(moving_mask, 0, 2)
-        fixed_mask = np.swapaxes(fixed_mask, 0, 2)
-
-        return (
-            moving_image,
-            fixed_image,
-            moving_mask,
-            fixed_mask,
-            image_spacing,
-            reference_image,
-        )
-
-    DEVICE = "cuda:0"
-    ROOT_DIR = (
-        Path("/home/tsentker/data/learn2reg"),
-        Path("/datalake/learn2reg"),
-    )
-    ROOT_DIR = next(p for p in ROOT_DIR if p.exists())
-    FOLDER = "LungCT"
-
-    tres_before = []
-    tres_after = []
-    for case in range(1, 2):
-        fixed_landmarks = read_landmarks(
-            f"{ROOT_DIR}/{FOLDER}/keypointsTr/LungCT_{case:04d}_0000.csv",
-            sep=",",
-        )
-        moving_landmarks = read_landmarks(
-            f"{ROOT_DIR}/{FOLDER}/keypointsTr/LungCT_{case:04d}_0001.csv",
-            sep=",",
-        )
-
-        (
-            _moving_image,
-            _fixed_image,
-            _moving_mask,
-            _fixed_mask,
-            _image_spacing,
-            _reference_image,
-        ) = load(
-            moving_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/LungCT_{case:04d}_0001.nii.gz",
-            fixed_image_filepath=f"{ROOT_DIR}/{FOLDER}/imagesTr/LungCT_{case:04d}_0000.nii.gz",
-            moving_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/LungCT_{case:04d}_0001.nii.gz",
-            fixed_mask_filepath=f"{ROOT_DIR}/{FOLDER}/masksTr/LungCT_{case:04d}_0000.nii.gz",
-        )
-
-        # _moving_mask = binary_dilation(
-        #     _moving_mask.astype(np.uint8), iterations=1
-        # ).astype(bool)
-        # _fixed_mask = binary_dilation(
-        #     _fixed_mask.astype(np.uint8), iterations=1
-        # ).astype(bool)
-
-        moving_image = torch.as_tensor(_moving_image[None, None], device=DEVICE)
-        fixed_image = torch.as_tensor(_fixed_image[None, None], device=DEVICE)
-        moving_mask = torch.as_tensor(
-            _moving_mask[None, None], dtype=torch.bool, device=DEVICE
-        )
-        fixed_mask = torch.as_tensor(
-            _fixed_mask[None, None], dtype=torch.bool, device=DEVICE
-        )
-
-        warped_image, vector_field = run_affine_registration(
-            moving_image=moving_image,
-            fixed_image=fixed_image,
-            moving_mask=moving_mask,
-            fixed_mask=fixed_mask,
-            loss_function=mse_loss,
-            step_size=1e-3,
-        )
-
-        _vector_field = vector_field.detach().cpu().numpy().squeeze()
-        _warped_image = warped_image.detach().cpu().numpy().squeeze()
-
-        tre_before = compute_tre_numpy(
-            moving_landmarks=moving_landmarks,
-            fixed_landmarks=fixed_landmarks,
-            vector_field=None,
-            image_spacing=(1.5,) * 3,
-        )
-        tre_after = compute_tre_numpy(
-            moving_landmarks=moving_landmarks,
-            fixed_landmarks=fixed_landmarks,
-            vector_field=_vector_field,
-            image_spacing=(1.5,) * 3,
-        )
-
-        print(
-            f"NLST_0{case}: "
-            f"tre_before={np.mean(tre_before):.2f}, "
-            f"tre_after={np.mean(tre_after):.2f}"
-        )
-
-        tres_before.append(np.mean(tre_before))
-        tres_after.append(np.mean(tre_after))
-
-        mid_slice = _fixed_image.shape[1] // 2
-        clim = (-800, 200)
-        fig, ax = plt.subplots(1, 5, sharex=True, sharey=True)
-        ax[0].imshow(_fixed_image[:, mid_slice, :], clim=clim)
-        ax[1].imshow(_moving_image[:, mid_slice, :], clim=clim)
-        ax[2].imshow(_warped_image[:, mid_slice, :], clim=clim)
-        ax[3].imshow(
-            _moving_image[:, mid_slice, :] - _fixed_image[:, mid_slice, :],
-            clim=(-500, 500),
-            cmap="seismic",
-        )
-        ax[4].imshow(
-            _warped_image[:, mid_slice, :] - _fixed_image[:, mid_slice, :],
-            clim=(-500, 500),
-            cmap="seismic",
-        )
-
-        fig.suptitle(f"NLST_{case:04d}")
-
-    print(f"before: mean TRE={np.mean(tres_before)}, std TRE={np.std(tres_before)}")
-    print(f"after: mean TRE={np.mean(tres_after)}, std TRE={np.std(tres_after)}")

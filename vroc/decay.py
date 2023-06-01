@@ -26,23 +26,3 @@ def exponential_decay(
     )
 
     return initial_value * level_decay_factor * itertion_decay_factor
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    initial_tau = 2.0
-    vals = []
-
-    for i_level in range(3):
-        for i_iteration in range(100):
-            tau = exponential_decay(
-                initial_tau,
-                i_level=i_level,
-                i_iteration=i_iteration,
-                level_lambda=0.46209812037329684,
-                iteration_lambda=0.00,
-            )
-            vals.append(tau)
-
-    plt.plot(vals)
