@@ -242,6 +242,7 @@ class AffineTransform(nn.Module):
         return affine_grid
 
 
+@torch.enable_grad()
 def run_affine_registration(
     moving_image: torch.Tensor,
     fixed_image: torch.Tensor,
@@ -324,6 +325,7 @@ def run_affine_registration(
                 "step_size": step_size,
             }
             logger.info(f"Start affine registration with parameters {params}")
+
             for i in range(n_iterations):
                 optimizer.zero_grad()
                 affine_matrix = affine_transform.forward()
